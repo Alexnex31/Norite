@@ -142,6 +142,9 @@ func standin(mode string) int {
 		send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
 	case "badstate":
 		send(voiceipc.OpState, voiceipc.State{State: "dancing"})
+	case "baddevices":
+		send(voiceipc.OpDevices, voiceipc.Devices{Microphone: voiceipc.Device{State: "deaf"},
+			Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}})
 	case "flood":
 		for range 10 * framesPerSecond {
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting})

@@ -132,18 +132,11 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 		t.Skip("builds norite-voice and M26's harness, and makes real calls")
 	}
 	// The worker opens the system's microphone and speakers from M29, and a test must not open the
-	// developer's: on a Mac it would prompt, on Windows and Linux record. On Linux the release's worker
-	// runs, pointed at a PulseAudio server that does not exist: its codec compiles and its devices fail
-	// to open, which must leave the call up. WASAPI and AudioQueue have no such switch, so elsewhere the
-	// worker is built with norite_noaudio, which carries the call with no devices at all. voiceworker's
-	// own tests carry audio, on a test device.
-	var flags []string
-	if runtime.GOOS == "linux" {
-		t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
-	} else {
-		flags = []string{"-tags", "norite_noaudio"}
-	}
-	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program, flags...)
+	// developer's: on a Mac it would prompt, on Windows and Linux record. So the worker is built with
+	// norite_noaudio, which carries the call with no devices at all. voiceworker's own tests carry audio,
+	// on a test device, and TestACallWithNoAudioServerEndsSayingSo runs the release's worker on Linux.
+	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program,
+		"-tags", "norite_noaudio")
 	h := startHarness(t)
 	seen := &statuses{}
 	logged := &logBuffer{}
@@ -163,18 +156,6 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
-	if runtime.GOOS == "linux" {
-		// The audio started as far as the devices, which failed, and the call stayed up. The worker's log and
-		// its control pipe are separate pipes, so a failure ending the call might reach the daemon after the
-		// line: the state is held for a while, not read once.
-		started := assert.Eventually(t, func() bool { return strings.Contains(logged.String(), "could not be opened") },
-			10*time.Second, 20*time.Millisecond)
-		if !started {
-			t.Fatalf("the worker's audio never started:\n%s", logged.String())
-		}
-		require.Never(t, func() bool { return v.Status().State != ipc.VoiceInCall }, 500*time.Millisecond,
-			20*time.Millisecond, "a device that could not open ended the call")
-	}
 
 	st = v.Leave()
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, st)
@@ -203,4 +184,36 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1004", st.Channel)
 	require.Equal(t, ipc.VoiceInCall, st.State)
+}
+
+// On Linux the release's worker runs, pointed at a PulseAudio server that does not exist: its codec
+// compiles, and both its devices fail to open, which ends the call saying so (M32, ADR 0034 §4). Until
+// M32 the call stayed up, sending and hearing nothing. WASAPI and AudioQueue have no such switch.
+func TestACallWithNoAudioServerEndsSayingSo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds norite-voice and M26's harness, and makes real calls")
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("only PulseAudio can be pointed at no server")
+	}
+	t.Setenv("PULSE_SERVER", "unix:"+filepath.Join(t.TempDir(), "no-server"))
+	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program)
+	h := startHarness(t)
+	logged := &logBuffer{}
+	v := NewVoice(VoiceOptions{
+		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
+		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Log:     zerolog.New(logged),
+	})
+	t.Cleanup(v.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, _ = v.Join(ctx, "1001", ipc.VoiceAllOn())
+	ended := assert.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 10*time.Second,
+		20*time.Millisecond)
+	if !ended {
+		t.Fatalf("a call with neither device stayed up:\n%s", logged.String())
+	}
+	require.Equal(t, "neither the microphone nor the speakers can be used", v.Status().Reason)
+	require.Contains(t, logged.String(), "could not be opened")
 }

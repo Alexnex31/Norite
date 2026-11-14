@@ -258,7 +258,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		if ev.Offer != nil {
 			return true, ""
 		}
-		return false, "the voice worker reported a state before its offer"
+		return false, "the voice worker reported a state or its devices before its offer"
 	})
 	if offer == nil {
 		fail(true, "%s", why)
@@ -281,10 +281,10 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		switch {
 		case ev.Offer != nil:
 			return false, "the voice worker offered twice"
-		case ev.State.State == voiceipc.StateReady:
+		case ev.State != nil && ev.State.State == voiceipc.StateReady:
 			return true, ""
 		}
-		return false, "" // connecting: keep waiting
+		return false, "" // connecting, or the devices: keep waiting
 	})
 	if ready == nil {
 		fail(true, "%s", why)

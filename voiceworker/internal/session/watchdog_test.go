@@ -145,32 +145,32 @@ func TestTheWatchdogRunsOnTheMonotonicClock(t *testing.T) {
 	}
 }
 
-// devices counts what was opened and closed, and holds Play until released.
-type devices struct {
+// tally counts what was opened and closed, and holds Play until released.
+type tally struct {
 	mu             sync.Mutex
 	opened, closed int
 	hold, entered  chan struct{}
 }
 
-type closer struct{ d *devices }
+type closer struct{ d *tally }
 
 func (c closer) Close() error { c.d.mu.Lock(); c.d.closed++; c.d.mu.Unlock(); return nil }
 
-func (d *devices) open() (io.Closer, error) {
+func (d *tally) open() (io.Closer, error) {
 	d.mu.Lock()
 	d.opened++
 	d.mu.Unlock()
 	return closer{d}, nil
 }
 
-func (d *devices) Play(context.Context, func([]int16)) (io.Closer, error) {
+func (d *tally) Play(context.Context, func([]int16)) (io.Closer, error) {
 	if d.hold != nil {
 		close(d.entered)
 		<-d.hold
 	}
 	return d.open()
 }
-func (d *devices) Capture(context.Context, func([]int16)) (io.Closer, error) { return d.open() }
+func (d *tally) Capture(context.Context, func([]int16)) (io.Closer, error) { return d.open() }
 
 // A leave that comes before the devices open leaves them unopened. One that lands while a device opens
 // does not wait for it, and the device, once open, sees the leave and closes itself. Staged, not raced:
@@ -179,7 +179,7 @@ func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 	m := &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
 	m.close()
-	d := &devices{}
+	d := &tally{}
 	m.openDevices(context.Background(), d)
 	if d.opened != 0 {
 		t.Errorf("%d devices opened after the call closed", d.opened)
@@ -187,7 +187,7 @@ func TestAMicrophoneIsNeverLeftOpenAfterTheCall(t *testing.T) {
 
 	m = &media{s: &Session{cc: testController(), ended: make(chan string, 1)}, stop: make(chan struct{}), base: time.Now(),
 		codec: keepOpen{}}
-	d = &devices{hold: make(chan struct{}), entered: make(chan struct{})}
+	d = &tally{hold: make(chan struct{}), entered: make(chan struct{})}
 	done := make(chan struct{})
 	go func() { m.openDevices(context.Background(), d); close(done) }()
 	within(t, d.entered, "Play was not called")

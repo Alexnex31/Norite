@@ -33,6 +33,10 @@ type Call interface {
 	Ready() <-chan struct{}
 	// Ended delivers why the call ended by itself, once.
 	Ended() <-chan string
+	// Devices delivers the microphone's and the speakers' state each time either changes (M32), the latest
+	// only, or is nil for a call with no devices. A state queued before the call ended is sent before its
+	// end.
+	Devices() <-chan voiceipc.Devices
 	// Close ends the call. It may block, which is why the worker bounds how long it waits for it.
 	Close()
 }
@@ -161,6 +165,10 @@ func (r *run) loop(ctx context.Context) int {
 	ready := call.Ready()
 	for {
 		select {
+		case d := <-call.Devices():
+			if err := voiceipc.Write(r.out, voiceipc.OpDevices, d); err != nil {
+				return ExitOK
+			}
 		case <-ready:
 			ready = nil
 			connect.Stop()
@@ -170,6 +178,12 @@ func (r *run) loop(ctx context.Context) int {
 		case <-connect.C:
 			return r.end("the call did not connect in time")
 		case reason := <-call.Ended():
+			// The devices that ended it, when they did, are said first, so the daemon keeps why.
+			select {
+			case d := <-call.Devices():
+				_ = voiceipc.Write(r.out, voiceipc.OpDevices, d)
+			default:
+			}
 			return r.end(reason)
 		case f := <-r.frames:
 			if f.Op != voiceipc.OpLeave {

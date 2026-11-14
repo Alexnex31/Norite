@@ -103,6 +103,13 @@ type Session struct {
 	dsp       dsp.Module
 	dspErr    error
 
+	// devs is what the call's devices are doing (M32), nil with no device. authDone is closed once an
+	// audio.Authorizer has answered, authErr; stopAuth gives up the question when the call closes.
+	devs     *devices
+	authDone chan struct{}
+	authErr  error
+	stopAuth context.CancelFunc
+
 	mediaMu       sync.Mutex
 	media         *media
 	mediaStarting bool
@@ -179,6 +186,13 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		cc: newController(time.Now())}
 	if opts.Device != nil {
+		s.devs = newDevices(s.end)
+		if a, ok := opts.Device.(audio.Authorizer); ok {
+			var ctx context.Context
+			ctx, s.stopAuth = context.WithCancel(context.Background())
+			s.authDone = make(chan struct{})
+			go s.authorize(ctx, a)
+		}
 		mk := opts.Codec
 		if mk == nil {
 			mk = opus.New
@@ -499,6 +513,9 @@ func (s *Session) Ended() <-chan string { return s.ended }
 // Close closes the peer connection. The SFU sees the data channel and DTLS close at once rather than
 // waiting out ICE's timeout.
 func (s *Session) Close() {
+	if s.stopAuth != nil {
+		s.stopAuth()
+	}
 	s.mediaMu.Lock()
 	s.closing = true
 	m, starting := s.media, s.mediaStarting

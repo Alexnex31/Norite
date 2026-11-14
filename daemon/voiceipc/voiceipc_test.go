@@ -67,6 +67,8 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 		{"connecting", OpState, State{State: StateConnecting}, true},
 		{"ready", OpState, State{State: StateReady}, true},
 		{"ended", OpState, State{State: StateEnded, Reason: strings.Repeat("r", MaxReason)}, true},
+		{"devices", OpDevices, Devices{Microphone: Device{State: DeviceRefused},
+			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason)}}, true},
 		{"join", OpJoin, Join{ICEServers: []ICEServer{{URLs: []string{"turn:192.0.2.1:3478?transport=tcp",
 			"turns:voice.example:5349"}, Username: "1700000000:42", Credential: "c2VjcmV0"}}, Loopback: true}, false},
 		{"join with no servers", OpJoin, Join{ICEServers: []ICEServer{}}, false},
@@ -100,6 +102,13 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 		{"an offer past the bound", OpOffer, Offer{SDP: strings.Repeat("a", voiceproto.MaxOffer+1)}},
 		{"an unknown state", OpState, State{State: "dancing"}},
 		{"a reason past the bound", OpState, State{State: StateEnded, Reason: strings.Repeat("r", MaxReason+1)}},
+		{"a microphone in an unknown state", OpDevices, Devices{Microphone: Device{State: "deaf"},
+			Speakers: Device{State: DeviceOpen}}},
+		{"speakers in an unknown state", OpDevices, Devices{Microphone: Device{State: DeviceOpen}}},
+		{"a microphone's reason past the bound", OpDevices, Devices{Speakers: Device{State: DeviceOpen},
+			Microphone: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason+1)}}},
+		{"the speakers' reason past the bound", OpDevices, Devices{Microphone: Device{State: DeviceOpen},
+			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason+1)}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -171,8 +180,32 @@ func TestTheOpsAreTheContracts(t *testing.T) {
 		}
 	}
 	want := map[int]string{int(OpHello): "Hello", int(OpOffer): "Offer", int(OpState): "State",
-		int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave"}
+		int(OpDevices): "Devices", int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave"}
 	require.Equal(t, want, got)
+}
+
+// Every state the contract names is one the check accepts, and no other.
+func TestTheDeviceStatesAreTheContracts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "voice-worker.schema.json"))
+	require.NoError(t, err)
+	var doc struct {
+		Defs struct {
+			Device struct {
+				Properties struct {
+					State struct {
+						Enum []string `json:"enum"`
+					} `json:"state"`
+				} `json:"properties"`
+			} `json:"Device"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	states := doc.Defs.Device.Properties.State.Enum
+	require.ElementsMatch(t, []string{DeviceOpening, DeviceOpen, DeviceAsking, DeviceRefused, DeviceNoDevice,
+		DeviceNoSession, DeviceFailed}, states)
+	for _, s := range states {
+		require.NoError(t, Devices{Microphone: Device{State: s}, Speakers: Device{State: s}}.Check(), s)
+	}
 }
 
 // A reason cut to the bound stays within it once encoded, whatever script it is in.

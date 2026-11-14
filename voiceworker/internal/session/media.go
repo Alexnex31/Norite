@@ -126,7 +126,9 @@ type media struct {
 
 	devMu             sync.Mutex
 	capture, playback io.Closer
-	stopOnce          sync.Once
+	// capHeard and playHeard are when each device last called back, for its watch (devices.go).
+	capHeard, playHeard atomic.Int64
+	stopOnce            sync.Once
 	// decoding, encoding and dspCall are when the call into the codec or the DSP in progress started, as
 	// nanoseconds past base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
 	// clock stepped by NTP or a resume would end a healthy call, or never end a stuck one.
@@ -150,8 +152,8 @@ type slot struct {
 }
 
 // startMedia starts both directions. A codec that cannot start ends the call, since it is a bug and no
-// audio can cross either way. A device that cannot open does not: the call goes on without that direction,
-// and the log says why. Turning that into call state the clients explain is M32's (ADR 0034).
+// audio can cross either way. A device that cannot open does not by itself: the call goes on without that
+// direction, and the devices' state says why (devices.go).
 func (s *Session) startMedia(ctx context.Context) error {
 	codec, err := s.awaitCodec(ctx)
 	if err != nil {
@@ -193,13 +195,13 @@ func (s *Session) startMedia(ctx context.Context) error {
 	return nil
 }
 
-// openDevices opens the speakers and the microphone, and keeps each only if the call has not closed
-// meanwhile. close stops the call before it reads them under devMu, and a device opened after that sees
+// openDevices opens the speakers and the microphone, keeps each only if the call has not closed
+// meanwhile, and watches each it kept. The microphone waits for an audio.Authorizer's answer first. close stops the call before it reads them under devMu, and a device opened after that sees
 // the stop and closes itself here. So no device is opened for a call already left, and a leave never
 // waits on a driver that is slow to open. A device whose Close outruns close's bound is closed by the
 // worker's exit, which follows its call, and the daemon reports the call left once the worker is reaped.
 func (m *media) openDevices(ctx context.Context, dev audio.Device) {
-	keep := func(c io.Closer, at *io.Closer) {
+	keep := func(c io.Closer, at *io.Closer) bool {
 		m.devMu.Lock()
 		late := m.stopped()
 		if !late {
@@ -211,22 +213,37 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 		if late {
 			_ = c.Close()
 		}
+		return !late
 	}
 	if m.stopped() {
 		return
 	}
 	if p, err := dev.Play(ctx, m.fill); err != nil {
 		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
-	} else {
-		keep(p, &m.playback)
+		m.s.devs.set(speakers, deviceOf(err))
+	} else if keep(p, &m.playback) {
+		go m.watchDevice(speakers, p, &m.playHeard)
+	}
+	if m.s.authDone != nil {
+		select {
+		case <-m.s.authDone:
+		case <-m.stop:
+			return
+		}
+		if err := m.s.authErr; err != nil {
+			m.s.logf("the microphone may not be used, so nothing will be sent: %v", err)
+			m.s.devs.set(microphone, deviceOf(err))
+			return
+		}
 	}
 	if m.stopped() {
 		return
 	}
 	if c, err := dev.Capture(ctx, m.captured); err != nil {
 		m.s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
-	} else {
-		keep(c, &m.capture)
+		m.s.devs.set(microphone, deviceOf(err))
+	} else if keep(c, &m.capture) {
+		go m.watchDevice(microphone, c, &m.capHeard)
 	}
 }
 
@@ -268,6 +285,7 @@ type captureFrame struct {
 // captured hands a frame to send without ever waiting on it: the device's goroutine must not stall, so
 // past captureBacklog the oldest frame waiting is dropped, and the echo canceller reconverges across it.
 func (m *media) captured(pcm []int16) {
+	m.heard(&m.capHeard)
 	f := captureFrame{pcm: make([]int16, len(pcm)), n: m.captures, played: m.ref.count()}
 	m.captures++
 	copy(f.pcm, pcm)
@@ -544,6 +562,7 @@ func (m *media) receive(tr *webrtc.TrackRemote, level uint8, sl *slot) {
 
 // fill is the speakers asking for the next frame: each slot's, mixed.
 func (m *media) fill(out []int16) {
+	m.heard(&m.playHeard)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {

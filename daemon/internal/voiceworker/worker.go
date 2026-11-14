@@ -103,10 +103,11 @@ type Options struct {
 	Env  []string
 }
 
-// Event is a frame from the worker, decoded and checked: an Offer or a State.
+// Event is a frame from the worker, decoded and checked: an Offer, a State or Devices, one of the three.
 type Event struct {
-	Offer *voiceipc.Offer
-	State *voiceipc.State
+	Offer   *voiceipc.Offer
+	State   *voiceipc.State
+	Devices *voiceipc.Devices
 }
 
 // Worker is one running worker.
@@ -500,6 +501,15 @@ func (w *Worker) decode(f gatewayproto.Frame) (Event, error) {
 			return Event{}, broke(err.Error())
 		}
 		return Event{State: &s}, nil
+	case voiceipc.OpDevices:
+		var d voiceipc.Devices
+		if err := ipc.Decode(f, &d); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		if err := d.Check(); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		return Event{Devices: &d}, nil
 	}
 	return Event{}, broke(fmt.Sprintf("op %d, which a worker does not send after HELLO", f.Op))
 }

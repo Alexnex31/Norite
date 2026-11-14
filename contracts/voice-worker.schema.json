@@ -17,7 +17,7 @@
       ]
     },
     "WorkerFrame": {
-      "description": "What the worker sends: Hello first and once, Offer once after Join, then State as its call changes.",
+      "description": "What the worker sends: Hello first and once, Offer once after Join, then State as its call changes, and from its first State, Devices as its microphone and speakers change (M32).",
       "oneOf": [
         {
           "$ref": "#/$defs/Hello"
@@ -27,6 +27,9 @@
         },
         {
           "$ref": "#/$defs/State"
+        },
+        {
+          "$ref": "#/$defs/Devices"
         }
       ]
     },
@@ -157,6 +160,71 @@
         },
         "t": {
           "type": "null"
+        }
+      }
+    },
+    "Devices": {
+      "type": "object",
+      "description": "op 4 (M32): how the call's microphone and speakers are doing, the whole of it each time either changes.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 4
+        },
+        "d": {
+          "type": "object",
+          "required": [
+            "microphone",
+            "speakers"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "microphone": {
+              "$ref": "#/$defs/Device"
+            },
+            "speakers": {
+              "$ref": "#/$defs/Device"
+            }
+          }
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Device": {
+      "type": "object",
+      "description": "One direction's outcome. opening: being opened, or opened and not yet delivering. open: delivering audio, from its first frame. asking: the OS is asking the person (macOS). refused: the OS or the person refused it. no_device: there is none. no_session: nobody is logged in at the machine (Linux). failed: anything else. The worker words none of these; the client does, for its OS.",
+      "required": [
+        "state",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "opening",
+            "open",
+            "asking",
+            "refused",
+            "no_device",
+            "no_session",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "What went wrong, for a person, or empty."
         }
       }
     },

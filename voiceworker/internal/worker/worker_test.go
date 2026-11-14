@@ -26,6 +26,7 @@ type fakeCall struct {
 	offerErr error
 	ready    chan struct{}
 	ended    chan string
+	devices  chan voiceipc.Devices
 	closed   chan struct{}
 	// stuck makes Close block for ever, as a library stuck in C would.
 	stuck bool
@@ -34,7 +35,8 @@ type fakeCall struct {
 }
 
 func newFakeCall() *fakeCall {
-	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), closed: make(chan struct{})}
+	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), devices: make(chan voiceipc.Devices, 1),
+		closed: make(chan struct{})}
 }
 
 func (c *fakeCall) Offer(ctx context.Context) (string, error) {
@@ -47,6 +49,9 @@ func (c *fakeCall) Offer(ctx context.Context) (string, error) {
 func (c *fakeCall) Accept(string) error    { return nil }
 func (c *fakeCall) Ready() <-chan struct{} { return c.ready }
 func (c *fakeCall) Ended() <-chan string   { return c.ended }
+func (c *fakeCall) Devices() <-chan voiceipc.Devices {
+	return c.devices
+}
 func (c *fakeCall) Close() {
 	close(c.closed)
 	if c.stuck {
@@ -181,6 +186,48 @@ func TestACallThatEndsByItselfSaysWhyAndExits(t *testing.T) {
 	s := d.state()
 	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, s)
 	require.Equal(t, ExitOK, d.exit())
+}
+
+// What the devices are doing reaches the daemon each time it changes, and the devices that ended a call
+// are said before its end, so the daemon has why (M32).
+func TestTheDevicesAreReportedAndSaidBeforeTheEnd(t *testing.T) {
+	devices := func(d *daemon) voiceipc.Devices {
+		t.Helper()
+		f := d.next()
+		require.Equal(t, voiceipc.OpDevices, f.Op)
+		var got voiceipc.Devices
+		require.NoError(t, ipc.Decode(f, &got))
+		return got
+	}
+	call := newFakeCall()
+	d := start(t, call, Options{})
+	d.joined()
+	asking := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceAsking},
+		Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}}
+	call.devices <- asking
+	require.Equal(t, asking, devices(d))
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+	call.ended <- "the voice server closed the call"
+	require.Equal(t, voiceipc.StateEnded, d.state().State)
+	require.Equal(t, ExitOK, d.exit())
+
+	// Both queued at once, as a call ended by its devices queues them: the loop takes either first, at
+	// random, so each way is run many times over.
+	none := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceNoSession},
+		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
+	for range 32 {
+		call := newFakeCall()
+		d := start(t, call, Options{})
+		d.joined()
+		close(call.ready)
+		require.Equal(t, voiceipc.StateReady, d.state().State)
+		call.devices <- none
+		call.ended <- "neither the microphone nor the speakers can be used"
+		require.Equal(t, none, devices(d))
+		require.Equal(t, voiceipc.StateEnded, d.state().State)
+		require.Equal(t, ExitOK, d.exit())
+	}
 }
 
 func TestACallThatNeverConnectsEnds(t *testing.T) {
