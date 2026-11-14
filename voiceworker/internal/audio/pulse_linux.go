@@ -20,7 +20,8 @@ const latency = 0.02
 // System is the PulseAudio protocol, which PipeWire speaks on every mainstream desktop through
 // pipewire-pulse. The server is found through PULSE_SERVER or $XDG_RUNTIME_DIR/pulse/native, and a
 // PulseAudio cookie through PULSE_COOKIE or ~/.config/pulse/cookie, all of which the daemon passes to the
-// worker. An ALSA-only system has no server, and capture fails with the reason.
+// worker. An ALSA-only system has no server, and capture fails with the reason. With nobody logged in,
+// nothing fails, and Where is what tells (M32).
 func System() Device { return pulseDevice{} }
 
 type pulseDevice struct{}
@@ -31,6 +32,8 @@ type stream struct {
 	once  sync.Once
 	c     *pulse.Client
 	close func()
+	// capture is whether it is the microphone's, for Where.
+	capture bool
 }
 
 func (s *stream) Close() error {
@@ -70,7 +73,7 @@ func (pulseDevice) Capture(_ context.Context, frame func([]int16)) (io.Closer, e
 		return nil, fmt.Errorf("audio: the microphone opened at %d Hz and %d channels", r.SampleRate(), r.Channels())
 	}
 	r.Start()
-	return &stream{c: c, close: r.Close}, nil
+	return &stream{c: c, close: r.Close, capture: true}, nil
 }
 
 func (pulseDevice) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {

@@ -17,8 +17,9 @@ import (
 // (ADR 0034): the default input and output, in 48 kHz mono 16-bit, which the queue converts to and from
 // the device's own format. Its callbacks run on threads of AudioQueue's own, since no run loop is given.
 //
-// The microphone's use is charged to the daemon, the worker's parent (ADR 0034). Whether macOS allowed it
-// is asked of AVFoundation by M32; a refused microphone delivers silence here, so silence proves nothing.
+// The microphone's use is charged to the daemon, the worker's parent (ADR 0034). Whether macOS allows it
+// is asked of AVFoundation first (Authorize, avfoundation_darwin.go), and the queue is opened only on a
+// yes: a refused microphone delivers silence here, so silence proves nothing.
 //
 // Written at M29 against Apple's headers and cross-compiled; run on the author's Mac by the milestone's
 // manual pass, which is the first time it ran.
