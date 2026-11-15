@@ -138,8 +138,8 @@ type VoiceStatus struct {
 	// there is none.
 	Processing *VoiceJoin `json:"processing"`
 	// Microphone and Speakers are what the call's devices are doing (M32), as its worker last said; nil
-	// before it has said. They stay after a call that ended by itself, so a client can say why it ended,
-	// and go with a leave or the next join.
+	// before it has said. They stay after a call they ended, both failing, so a client can say why it
+	// ended, and go after any other end, a leave and the next join.
 	Microphone *VoiceDevice `json:"microphone"`
 	Speakers   *VoiceDevice `json:"speakers"`
 }

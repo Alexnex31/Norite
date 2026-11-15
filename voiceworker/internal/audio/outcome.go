@@ -68,7 +68,9 @@ var errAsk = errors.New("audio: macOS has not asked yet")
 
 // authorization is what macOS's status for the microphone means: nil to capture, errAsk to ask the
 // person, or why not. The prompt and the grant are the daemon's, which the worker's use is charged to
-// (ADR 0034), so the refusals name it.
+// (ADR 0034), so the refusals name it. Restricted is a policy, parental controls or a device manager's,
+// which System Settings does not change, so it is not Refused, whose wording sends the person there: it
+// fails, and says why.
 func authorization(status int) error {
 	switch status {
 	case avAuthorized:
@@ -78,7 +80,7 @@ func authorization(status int) error {
 	case avDenied:
 		return &Failure{Outcome: Refused, Err: errors.New("macOS refuses norite-daemon the microphone")}
 	case avRestricted:
-		return &Failure{Outcome: Refused,
+		return &Failure{Outcome: Failed,
 			Err: errors.New("a policy on this Mac keeps norite-daemon from the microphone")}
 	}
 	return fmt.Errorf("audio: macOS answered the microphone's authorization with %d", status)
@@ -103,18 +105,28 @@ type loginSession struct {
 // sessions (D5, M32's spike): with nobody logged in at a seat, logind grants nobody the sound devices and
 // PipeWire lists none, so no device is NoSession; with somebody, the machine has none to give. A session
 // over SSH has no seat, and the user's own State is active with SSH alone, so what decides is a session
-// with a seat, active, of class user. err is logind's failure to answer, which is a system without it:
-// then all that is known is that there is no device.
+// with a seat, active, of class user. One of the account's at a seat that is not active is somebody
+// else's session in front, a user switch: no device, saying so, since logging in is not what brings the
+// devices back. err is logind's failure to answer, which is a system without it: then all that is known is
+// that there is no device.
 func stoodIn(what string, sessions []loginSession, err error) error {
 	if err != nil {
 		return &Failure{Outcome: NoDevice,
 			Err: fmt.Errorf("audio: the stream for %s goes to no device, and logind did not say whether anybody "+
 				"is logged in: %w", what, err)}
 	}
+	switched := false
 	for _, s := range sessions {
-		if s.Seat != "" && s.Active && s.Class == "user" {
-			return &Failure{Outcome: NoDevice, Err: fmt.Errorf("audio: the stream for %s goes to no device", what)}
+		if s.Seat != "" && s.Class == "user" {
+			if s.Active {
+				return &Failure{Outcome: NoDevice, Err: fmt.Errorf("audio: the stream for %s goes to no device", what)}
+			}
+			switched = true
 		}
+	}
+	if switched {
+		return &Failure{Outcome: NoDevice, Err: fmt.Errorf("audio: the stream for %s goes to no device, since "+
+			"this account's session at this machine is not the one in front", what)}
 	}
 	return &Failure{Outcome: NoSession,
 		Err: fmt.Errorf("audio: the stream for %s goes to no device, since nobody is logged in at this machine",

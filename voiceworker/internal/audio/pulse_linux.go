@@ -40,10 +40,13 @@ type stream struct {
 	closed  bool
 }
 
-// Close closes the stream, and Where's client once a question in progress has had its answer, each request
-// on it bounded by the library's second.
+// Close closes the stream at once, then Where's client once a question in progress on it has had its
+// answer, each request on it bounded by the library's second: the microphone stops when it is closed, and
+// only the asking waits.
 func (s *stream) Close() error {
 	s.once.Do(func() {
+		s.close()
+		s.c.Close()
 		s.askMu.Lock()
 		s.closed = true
 		if s.asker != nil {
@@ -51,8 +54,6 @@ func (s *stream) Close() error {
 			s.asker = nil
 		}
 		s.askMu.Unlock()
-		s.close()
-		s.c.Close()
 	})
 	return nil
 }

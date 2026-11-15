@@ -7,19 +7,44 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
 )
 
-// logindWithin bounds the whole question to logind.
-const logindWithin = time.Second
+// logindWithin bounds the whole question to logind, and loginFresh is how long its answer is kept: both
+// streams ask once a second for as long as a call outlives its session, and the answer only chooses
+// between two words for a device that is gone either way.
+const (
+	logindWithin = time.Second
+	loginFresh   = 5 * time.Second
+)
 
-// loginSessions is the account's sessions as logind has them, over the system bus (D5): the manager's
+// login is logind's last answer, shared by both streams.
+var login struct {
+	mu       sync.Mutex
+	at       time.Time
+	sessions []loginSession
+	err      error
+}
+
+// loginSessions is loginSessionsNow's answer, asked again once it is older than loginFresh.
+func loginSessions() ([]loginSession, error) {
+	login.mu.Lock()
+	defer login.mu.Unlock()
+	if login.at.IsZero() || time.Since(login.at) > loginFresh {
+		login.sessions, login.err = loginSessionsNow()
+		login.at = time.Now()
+	}
+	return login.sessions, login.err
+}
+
+// loginSessionsNow is the account's sessions as logind has them, over the system bus (D5): the manager's
 // GetUser, the user's Sessions, and each session's Seat, Active and Class. Asked only once a stream is on a
 // stand-in, never on an ordinary call. An account logind has no record of has no session: that is its
 // NoSuchUser, which an account with no login and no linger gets.
-func loginSessions() ([]loginSession, error) {
+func loginSessionsNow() ([]loginSession, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), logindWithin)
 	defer cancel()
 	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))

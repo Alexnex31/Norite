@@ -435,6 +435,12 @@ func (v *Voice) ended(c *call, why string) {
 	}
 	v.current = nil
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
+	// The devices stay only when they are why the call ended, both failing, so that a client can word it;
+	// after any other end they would describe devices nothing has open any more.
+	if mic, spk := v.status.Microphone, v.status.Speakers; mic == nil || spk == nil ||
+		!voiceipc.Failing(mic.State) || !voiceipc.Failing(spk.State) {
+		v.status.Microphone, v.status.Speakers = nil, nil
+	}
 	v.mu.Unlock()
 	v.publish()
 }

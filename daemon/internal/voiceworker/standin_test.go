@@ -238,7 +238,14 @@ func standin(mode string) int {
 				none := voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "nobody is logged in"}
 				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: none, Speakers: none})
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-					Reason: "neither the microphone nor the speakers can be used"})
+					Reason: "neither the microphone nor the speakers can be used: nobody is logged in"})
+				return 0
+			}
+			if mode == "devdropped" { // the devices working, then the voice server closing the call
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(200 * time.Millisecond)
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason: "the voice server closed the call"})
 				return 0
 			}
 			if mode == "dropcall" {

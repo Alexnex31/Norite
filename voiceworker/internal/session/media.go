@@ -126,8 +126,10 @@ type media struct {
 
 	devMu             sync.Mutex
 	capture, playback io.Closer
-	// capHeard and playHeard are when each device last called back, for its watch (devices.go).
+	// capHeard and playHeard are when each device last called back, and capFirst and playFirst are closed
+	// at its first frame, for its watch (devices.go).
 	capHeard, playHeard atomic.Int64
+	capFirst, playFirst chan struct{}
 	stopOnce            sync.Once
 	// decoding, encoding and dspCall are when the call into the codec or the DSP in progress started, as
 	// nanoseconds past base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
@@ -167,7 +169,8 @@ func (s *Session) startMedia(ctx context.Context) error {
 	// The DSP is not awaited: it compiles in about 200 ms, twice the codec, and send takes it up when it is
 	// ready, so it never holds back a call's first words.
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
-		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now()}
+		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now(),
+		capFirst: make(chan struct{}), playFirst: make(chan struct{})}
 	eo := opus.DefaultEncoderOptions()
 	m.bitrate, m.lossPercent = eo.Bitrate, eo.LossPercent
 	if m.enc, err = codec.NewEncoder(ctx, eo); err != nil {
@@ -220,9 +223,9 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	}
 	if p, err := dev.Play(ctx, m.fill); err != nil {
 		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
-		m.s.devs.set(speakers, deviceOf(err))
+		m.s.devs.set(speakers, deviceOf(err), true)
 	} else if keep(p, &m.playback) {
-		go m.watchDevice(speakers, p, &m.playHeard)
+		go m.watchDevice(speakers, p, &m.playHeard, m.playFirst)
 	}
 	if m.s.authDone != nil {
 		select {
@@ -230,9 +233,12 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 		case <-m.stop:
 			return
 		}
-		if err := m.s.authErr; err != nil {
+		// A question given up because the call closed is no refusal: it must not end the call as one.
+		if err := m.s.authErr; err != nil && !m.stopped() && !errors.Is(err, context.Canceled) {
 			m.s.logf("the microphone may not be used, so nothing will be sent: %v", err)
-			m.s.devs.set(microphone, deviceOf(err))
+			m.s.devs.set(microphone, deviceOf(err), true)
+			return
+		} else if err != nil {
 			return
 		}
 	}
@@ -241,9 +247,9 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	}
 	if c, err := dev.Capture(ctx, m.captured); err != nil {
 		m.s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
-		m.s.devs.set(microphone, deviceOf(err))
+		m.s.devs.set(microphone, deviceOf(err), true)
 	} else if keep(c, &m.capture) {
-		go m.watchDevice(microphone, c, &m.capHeard)
+		go m.watchDevice(microphone, c, &m.capHeard, m.capFirst)
 	}
 }
 
@@ -285,7 +291,7 @@ type captureFrame struct {
 // captured hands a frame to send without ever waiting on it: the device's goroutine must not stall, so
 // past captureBacklog the oldest frame waiting is dropped, and the echo canceller reconverges across it.
 func (m *media) captured(pcm []int16) {
-	m.heard(&m.capHeard)
+	m.heard(&m.capHeard, m.capFirst)
 	f := captureFrame{pcm: make([]int16, len(pcm)), n: m.captures, played: m.ref.count()}
 	m.captures++
 	copy(f.pcm, pcm)
@@ -562,7 +568,7 @@ func (m *media) receive(tr *webrtc.TrackRemote, level uint8, sl *slot) {
 
 // fill is the speakers asking for the next frame: each slot's, mixed.
 func (m *media) fill(out []int16) {
-	m.heard(&m.playHeard)
+	m.heard(&m.playHeard, m.playFirst)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {

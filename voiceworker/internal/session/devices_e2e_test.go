@@ -84,20 +84,21 @@ func TestACallThatCanNeitherSendNorHearEnds(t *testing.T) {
 	}
 	h := startHarness(t)
 	for _, c := range []struct {
-		name, room string
-		dev        *audiotest.Device
+		name, room, why string
+		dev             *audiotest.Device
 	}{
-		{"by its opens", "1", &audiotest.Device{CaptureErr: failure(audio.NoSession, "nobody is logged in"),
+		{"by its opens", "1", "nobody is logged in", &audiotest.Device{CaptureErr: failure(audio.NoSession, "nobody is logged in"),
 			PlayErr: failure(audio.NoSession, "nobody is logged in")}},
-		{"by where its streams went", "2", &audiotest.Device{
+		{"by where its streams went", "2", "a stand-in", &audiotest.Device{
 			Where: func(bool) error { return failure(audio.NoSession, "a stand-in") }}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := h.join(t, c.room, "1", c.dev, Options{})
 			select {
 			case reason := <-s.Ended():
-				if reason != "neither the microphone nor the speakers can be used" {
-					t.Errorf("the call ended saying %q", reason)
+				// The microphone's outcome is in the reason (ADR 0034 §4), for a script that reads only it.
+				if want := "neither the microphone nor the speakers can be used: " + c.why; reason != want {
+					t.Errorf("the call ended saying %q, want %q", reason, want)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("a call with neither device stayed up")
@@ -172,7 +173,7 @@ func TestTheQuestionIsReportedAndItsAnswerFollowed(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			answer := make(chan error, 1)
-			dev := &audiotest.Device{Ask: func(ctx context.Context) error {
+			dev := &audiotest.Asking{Device: &audiotest.Device{}, Ask: func(ctx context.Context) error {
 				select {
 				case err := <-answer:
 					return err
@@ -210,4 +211,87 @@ func TestAStreamMovedMidCallIsReportedBothWays(t *testing.T) {
 	staysUp(t, s, 500*time.Millisecond)
 	gone.Store(false)
 	reports(t, s, 3*watchEvery, is(voiceipc.DeviceOpen, voiceipc.DeviceOpen))
+}
+
+// A device slow to deliver its first frame is not an outcome the call's start is judged on: a Bluetooth
+// headset changing profile as its microphone opens can take longer than silentFor. It is reported failed,
+// and the call stays up, so that it works once the frames come.
+func TestSilenceAtTheStartEndsNoCall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	s := h.join(t, "1", "1", &audiotest.Device{Silent: true, PlayErr: failure(audio.NoSession, "nobody")}, Options{})
+	reports(t, s, silentFor+3*time.Second, is(voiceipc.DeviceFailed, voiceipc.DeviceNoSession))
+	staysUp(t, s, time.Second)
+}
+
+// A device is open at its first frame, not at the watch's next tick: a join waits on the microphone.
+func TestADeviceIsOpenAtItsFirstFrame(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	s := h.join(t, "1", "1", &audiotest.Device{}, Options{})
+	ready := time.Now()
+	reports(t, s, 5*time.Second, func(d voiceipc.Devices) bool { return d.Microphone.State == voiceipc.DeviceOpen })
+	if took := time.Since(ready); took >= deviceTick {
+		t.Errorf("the microphone was reported open %v after the call was ready, at a tick of %v", took, deviceTick)
+	}
+}
+
+// A question still open when the call is left is given up, and only once the call's media has stopped:
+// a microphone waiting on the answer then sees the stop first, and never takes the giving up for a
+// refusal, which with the speakers failing would end the call as its devices'. Staged, not raced: the
+// test holds the session's mediaMu while Close starts, which an order giving the question up first would
+// do before waiting on it.
+func TestLeavingGivesUpTheQuestionAfterTheMediaStops(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	var m *media
+	stoppedFirst := make(chan bool, 1)
+	dev := &audiotest.Asking{Device: &audiotest.Device{PlayErr: failure(audio.Refused, "no output for you")},
+		Ask: func(ctx context.Context) error {
+			<-ctx.Done()
+			stoppedFirst <- m.stopped()
+			return ctx.Err()
+		}}
+	s := h.join(t, "1", "1", dev, Options{})
+	reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceRefused))
+	m = mediaOf(s)
+	s.mediaMu.Lock()
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	time.Sleep(200 * time.Millisecond)
+	s.mediaMu.Unlock()
+	<-closed
+	select {
+	case first := <-stoppedFirst:
+		if !first {
+			t.Error("the question was given up before the call's media stopped")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the question was never given up")
+	}
+}
+
+// An answer that is the question given up is no refusal, whenever it arrives: it never reports the
+// microphone refused, nor ends the call as its devices'.
+func TestAGivenUpQuestionIsNoRefusal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	answer := make(chan struct{})
+	dev := &audiotest.Asking{Device: &audiotest.Device{PlayErr: failure(audio.Refused, "no output for you")},
+		Ask: func(context.Context) error { <-answer; return context.Canceled }}
+	s := h.join(t, "1", "1", dev, Options{})
+	reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceRefused))
+	close(answer)
+	staysUp(t, s, 500*time.Millisecond)
+	if m := s.devs.current().Microphone; m.State != voiceipc.DeviceAsking {
+		t.Errorf("the microphone was left %+v", m)
+	}
 }

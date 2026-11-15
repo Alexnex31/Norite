@@ -109,9 +109,6 @@ type Session struct {
 	authDone chan struct{}
 	authErr  error
 	stopAuth context.CancelFunc
-	// noDevices is what a session with no device says of its devices, once.
-	noDevices     chan voiceipc.Devices
-	noDevicesOnce sync.Once
 
 	mediaMu       sync.Mutex
 	media         *media
@@ -516,13 +513,17 @@ func (s *Session) Ended() <-chan string { return s.ended }
 // Close closes the peer connection. The SFU sees the data channel and DTLS close at once rather than
 // waiting out ICE's timeout.
 func (s *Session) Close() {
-	if s.stopAuth != nil {
-		s.stopAuth()
-	}
 	s.mediaMu.Lock()
 	s.closing = true
 	m, starting := s.media, s.mediaStarting
 	s.mediaMu.Unlock()
+	// The question is given up after the media has stopped, so a microphone waiting on it sees the stop
+	// first and never takes the giving up for a refusal.
+	defer func() {
+		if s.stopAuth != nil {
+			s.stopAuth()
+		}
+	}()
 	if m != nil {
 		m.close()
 	} else if !starting {

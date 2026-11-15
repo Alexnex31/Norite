@@ -74,7 +74,7 @@
           ]
         },
         "microphone": {
-          "description": "What the call's microphone is doing (M32), as the voice worker last said; null before it has said. Kept after a call that ended by itself, so its end can be explained; null after `leave` and at the next join. `join` prints once the call is up and this is past `opening`, or after 3 s.",
+          "description": "What the call's microphone is doing (M32), as the voice worker last said; null before it has said. Kept after a call its devices ended, both failing, so its end can be explained; null after any other end, after `leave` and at the next join. `join` prints once the call is up and this is past `opening`, or after 3 s.",
           "oneOf": [
             {
               "type": "null"

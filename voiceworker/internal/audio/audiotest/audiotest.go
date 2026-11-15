@@ -28,9 +28,6 @@ type Device struct {
 	// CaptureErr and PlayErr, when set, are what opening each direction returns: an *audio.Failure plays
 	// a refusal, an absent device or no session.
 	CaptureErr, PlayErr error
-	// Ask, when set, is the OS's question: Authorize says the question is asked, then returns what Ask
-	// does, the person's answer. Nil asks nothing and says yes.
-	Ask func(ctx context.Context) error
 	// Silent opens the microphone and never delivers a frame of it, and Paused, when set, stops it
 	// delivering while it returns true: a device that stopped mid-call.
 	Silent bool
@@ -44,13 +41,19 @@ type Device struct {
 	heardAt []time.Time // when each frame was played
 }
 
-// Authorize is the OS's question, as Ask plays it.
-func (d *Device) Authorize(ctx context.Context, asking func()) error {
-	if d.Ask == nil {
-		return nil
-	}
+// Asking is a Device whose OS asks the person first, as macOS does (audio.Authorizer). A Device alone is
+// no Authorizer, so the session's tests run Linux's and Windows' path, where nothing is asked, unless they
+// ask for this.
+type Asking struct {
+	*Device
+	// Ask is the person's answer, which Authorize returns once it has said the question is asked.
+	Ask func(ctx context.Context) error
+}
+
+// Authorize says the question is asked, then returns the answer.
+func (a *Asking) Authorize(ctx context.Context, asking func()) error {
 	asking()
-	return d.Ask(ctx)
+	return a.Ask(ctx)
 }
 
 // Capture calls frame every 20 ms with the next frame of Source.

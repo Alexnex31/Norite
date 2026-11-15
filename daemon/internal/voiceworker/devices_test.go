@@ -84,7 +84,7 @@ func TestAJoinWhoseDevicesBothFailFails(t *testing.T) {
 	var refused *Refusal
 	require.True(t, errors.As(err, &refused), "%v", err)
 	require.True(t, refused.Failed)
-	require.Equal(t, "neither the microphone nor the speakers can be used", refused.Msg)
+	require.Equal(t, "neither the microphone nor the speakers can be used: nobody is logged in", refused.Msg)
 	require.Equal(t, ipc.VoiceIdle, st.State)
 	none := &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession, Reason: "nobody is logged in"}
 	require.Equal(t, none, st.Microphone)
@@ -101,30 +101,34 @@ func TestTheDeviceStatesAgreeAcrossPackages(t *testing.T) {
 			ipc.VoiceDeviceNoDevice, ipc.VoiceDeviceNoSession, ipc.VoiceDeviceFailed})
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "daemon-ipc.schema.json"))
 	require.NoError(t, err)
-	type device struct {
-		OneOf []struct {
-			Properties struct {
-				State struct {
-					Enum []string `json:"enum"`
-				} `json:"state"`
-			} `json:"properties"`
-		} `json:"oneOf"`
-	}
 	var doc struct {
 		Defs struct {
-			VoiceStatus struct {
+			VoiceDevice struct {
 				Properties struct {
-					Microphone device `json:"microphone"`
-					Speakers   device `json:"speakers"`
+					State struct {
+						Enum []string `json:"enum"`
+					} `json:"state"`
 				} `json:"properties"`
-			} `json:"VoiceStatus"`
+			} `json:"VoiceDevice"`
 		} `json:"$defs"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))
-	want := []string{ipc.VoiceDeviceOpening, ipc.VoiceDeviceOpen, ipc.VoiceDeviceAsking,
-		ipc.VoiceDeviceRefused, ipc.VoiceDeviceNoDevice, ipc.VoiceDeviceNoSession, ipc.VoiceDeviceFailed}
-	for _, d := range []device{doc.Defs.VoiceStatus.Properties.Microphone, doc.Defs.VoiceStatus.Properties.Speakers} {
-		require.Len(t, d.OneOf, 2)
-		require.Equal(t, want, d.OneOf[1].Properties.State.Enum)
-	}
+	require.Equal(t, []string{ipc.VoiceDeviceOpening, ipc.VoiceDeviceOpen, ipc.VoiceDeviceAsking,
+		ipc.VoiceDeviceRefused, ipc.VoiceDeviceNoDevice, ipc.VoiceDeviceNoSession, ipc.VoiceDeviceFailed},
+		doc.Defs.VoiceDevice.Properties.State.Enum)
+}
+
+// A call that ends for any reason but its devices does not keep them: they would describe devices nothing
+// has open any more, and the client prints them.
+func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "devdropped", answeringServer{})
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Equal(t, &ipc.VoiceDevice{State: ipc.VoiceDeviceOpen}, st.Microphone)
+	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 5*time.Second, 10*time.Millisecond)
+	st = v.Status()
+	require.Equal(t, "the voice server closed the call", st.Reason)
+	require.Nil(t, st.Microphone)
+	require.Nil(t, st.Speakers)
 }

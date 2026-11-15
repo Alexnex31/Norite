@@ -139,6 +139,10 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	// on a test device, and TestACallWithNoAudioServerEndsSayingSo runs the release's worker on Linux.
 	worker := buildProgram(t, filepath.Join("..", "..", "..", "voiceworker"), "./cmd/norite-voice", Program,
 		"-tags", "norite_noaudio")
+	// A worker without audio says nothing of its devices, and each join waits for its microphone to the
+	// bound (M32): a short one, so the test's four joins do not take 3 s each.
+	defer func(d time.Duration) { micWithin = d }(micWithin)
+	micWithin = 100 * time.Millisecond
 	h := startHarness(t)
 	seen := &statuses{}
 	logged := &logBuffer{}
@@ -154,10 +158,8 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	// The settings a client sent, as the call's state reports them (M30).
 	st, err := v.Join(ctx, "1001", ipc.VoiceJoin{EchoCancellation: true, AutoGain: true})
 	require.NoError(t, err)
-	// A worker built without audio says so of both devices (M32), so the join waits on no microphone.
-	none := &ipc.VoiceDevice{State: ipc.VoiceDeviceNoDevice, Reason: "this worker was built without audio"}
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true,
-		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}, Microphone: none, Speakers: none}, st)
+		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
 
@@ -217,9 +219,11 @@ func TestACallWithNoAudioServerEndsSayingSo(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a call with neither device was joined: %+v\n%s", st, logged.String())
 	}
-	require.Equal(t, "neither the microphone nor the speakers can be used", err.Error())
+	const why = "neither the microphone nor the speakers can be used: no PulseAudio or PipeWire server answered " +
+		"for the microphone"
+	require.True(t, strings.HasPrefix(err.Error(), why), "%v", err)
 	require.Equal(t, ipc.VoiceIdle, st.State)
-	require.Equal(t, "neither the microphone nor the speakers can be used", st.Reason)
+	require.Equal(t, err.Error(), st.Reason)
 	for _, d := range []*ipc.VoiceDevice{st.Microphone, st.Speakers} {
 		require.NotNil(t, d, "the devices that ended the call were not kept")
 		require.Equal(t, ipc.VoiceDeviceFailed, d.State)

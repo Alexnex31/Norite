@@ -85,8 +85,8 @@ type Authorizer interface {
 // (M32's spike), so neither the open nor the samples can tell.
 type Watched interface {
 	// Where returns nil while the stream reaches a device, or why it does not. The session asks it once a
-	// second, on a goroutine of its own, which may be while Close runs or after: it must then return at
-	// once, and must not panic.
+	// second, on a goroutine of its own, which may be while Close runs or after: it must not panic, and must
+	// not keep the stream itself from closing.
 	Where() error
 }
 

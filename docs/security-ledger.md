@@ -1987,9 +1987,10 @@ carries the condition that would reopen it.
   it already hears the microphone. A panic there is a worker crash, which ends the call (rule 11).
 - **Reopens if**: the worker ever connects to an audio server an instance, a JOIN or anything but the
   account's own environment names.
-- **Checked at M32, and still closed.** `Where` connects again once a second while a call lasts, on a
-  client of its own, to the same server the account's environment names. Every request on it is bounded
-  by the library's 1 s, and a panic on it is still a worker crash.
+- **Checked at M32, and still closed.** `Where` asks the same server, the one the account's environment
+  names, once a second while a call lasts, on a client of its own that each stream keeps for its life and
+  makes again only after a request on it fails. Every request on it is bounded by the library's 1 s, and
+  a panic on it is still a worker crash.
 
 ### The worker asks whatever system bus DBUS_SYSTEM_BUS_ADDRESS names
 - **Raised**: M32, `/security-sweep`

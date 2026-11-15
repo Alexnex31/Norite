@@ -175,11 +175,15 @@ func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
 
 // explainDevices says on stderr what the devices were doing when a join failed because of them: a call
 // that ends as it starts, neither device usable, is a failed join, and the status keeps its devices (M32).
-// Only when the status's reason is the join's, so the devices are this call's and not an earlier one's.
+// Only when the status's reason is the join's failure, word for word, so the devices are this call's and
+// not an earlier one's.
 func explainDevices(ctx context.Context, cmd *cli.Command, c daemonclient.Caller, joinErr error) {
+	var failed *ipc.RelayError
+	if !errors.As(joinErr, &failed) || failed.Code != ipc.RelayFailed {
+		return
+	}
 	st, err := status(ctx, cmd, c)
-	if err != nil || st.State != ipc.VoiceIdle || st.Reason == "" ||
-		!strings.Contains(joinErr.Error(), st.Reason) {
+	if err != nil || st.State != ipc.VoiceIdle || st.Reason == "" || st.Reason != failed.Message {
 		return
 	}
 	for _, line := range ops.VoiceDevices(st.Microphone, st.Speakers, runtime.GOOS) {
