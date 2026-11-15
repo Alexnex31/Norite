@@ -248,40 +248,34 @@ func TestADeviceIsOpenAtItsFirstFrame(t *testing.T) {
 	}
 }
 
-// A question still open when the call is left is given up, and only once the call's media has stopped:
-// a microphone waiting on the answer then sees the stop first, and never takes the giving up for a
-// refusal, which with the speakers failing would end the call as its devices'. Staged, not raced: the
-// test holds the session's mediaMu while Close starts, which an order giving the question up first would
-// do before waiting on it.
-func TestLeavingGivesUpTheQuestionAfterTheMediaStops(t *testing.T) {
+// An answer that comes once the call has given its question up is no refusal, whatever it says: the
+// microphone is never reported refused, and the call is not ended as its devices'.
+func TestAnAnswerAfterTheCallLeftIsNoRefusal(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls")
 	}
 	h := startHarness(t)
-	var m *media
-	stoppedFirst := make(chan bool, 1)
+	answered := make(chan struct{})
 	dev := &audiotest.Asking{Device: &audiotest.Device{PlayErr: failure(audio.Refused, "no output for you")},
 		Ask: func(ctx context.Context) error {
 			<-ctx.Done()
-			stoppedFirst <- m.stopped()
-			return ctx.Err()
+			defer close(answered)
+			return failure(audio.Refused, "the person said no as the call closed")
 		}}
 	s := h.join(t, "1", "1", dev, Options{})
 	reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceRefused))
-	m = mediaOf(s)
-	s.mediaMu.Lock()
-	closed := make(chan struct{})
-	go func() { s.Close(); close(closed) }()
-	time.Sleep(200 * time.Millisecond)
-	s.mediaMu.Unlock()
-	<-closed
+	s.Close()
 	select {
-	case first := <-stoppedFirst:
-		if !first {
-			t.Error("the question was given up before the call's media stopped")
-		}
+	case <-answered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the question was never given up")
+	}
+	<-s.authDone
+	if m := s.devs.current().Microphone; m.State != voiceipc.DeviceAsking {
+		t.Errorf("the microphone was reported %+v after the call left", m)
+	}
+	if s.EndedByDevices() {
+		t.Error("the call says its devices ended it")
 	}
 }
 

@@ -61,14 +61,6 @@ func (s *stream) onStandIn() bool {
 		s.asker = nil
 		return false
 	}
-	// standIn is whether the sink at index is auto_null.
-	standIn := func(index uint32) bool {
-		var sink proto.GetSinkInfoReply
-		if c.RawRequest(&proto.GetSinkInfo{SinkIndex: index}, &sink) != nil {
-			return failed()
-		}
-		return sink.SinkName == nullSink
-	}
 	if s.capture {
 		var outs proto.GetSourceOutputInfoListReply
 		if c.RawRequest(&proto.GetSourceOutputInfoList{}, &outs) != nil {
@@ -82,8 +74,7 @@ func (s *stream) onStandIn() bool {
 		if c.RawRequest(&proto.GetSourceInfo{SourceIndex: outs[i].SourceIndex}, &src) != nil {
 			return failed()
 		}
-		// A source's MonitorSourceIndex is the sink it is the monitor of, Undefined for a source of its own.
-		return src.MonitorSourceIndex != proto.Undefined && standIn(src.MonitorSourceIndex)
+		return standInSource(src)
 	}
 	var ins proto.GetSinkInputInfoListReply
 	if c.RawRequest(&proto.GetSinkInputInfoList{}, &ins) != nil {
@@ -93,12 +84,23 @@ func (s *stream) onStandIn() bool {
 	if i < 0 {
 		return false
 	}
-	return standIn(ins[i].SinkIndex)
+	var sink proto.GetSinkInfoReply
+	if c.RawRequest(&proto.GetSinkInfo{SinkIndex: ins[i].SinkIndex}, &sink) != nil {
+		return failed()
+	}
+	return sink.SinkName == nullSink
+}
+
+// standInSource is whether src is the stand-in for no input: auto_null's monitor. In a source's reply the
+// library's MonitorSourceIndex and MonitorSourceName are the protocol's monitor_of_sink and
+// monitor_of_sink_name, the sink it is the monitor of, so one request answers.
+func standInSource(src proto.GetSourceInfoReply) bool {
+	return src.MonitorSourceIndex != proto.Undefined && src.MonitorSourceName == nullSink
 }
 
 // nullSink is the name a PulseAudio server gives its stand-in for no output, PipeWire's and
 // module-always-sink's alike. Its monitor is the stand-in for no input, auto_null.monitor in M32's spike,
-// and is found by the sink it monitors rather than by its own name.
+// and is known by the sink it monitors rather than by its own name.
 const nullSink = "auto_null"
 
 // own is the one of n streams whose properties name this process, or -1 when none does or several do.

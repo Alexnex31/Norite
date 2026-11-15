@@ -113,8 +113,8 @@ type loginSession struct {
 func stoodIn(what string, sessions []loginSession, err error) error {
 	if err != nil {
 		return &Failure{Outcome: NoDevice,
-			Err: fmt.Errorf("audio: the stream for %s goes to no device, and logind did not say whether anybody "+
-				"is logged in: %w", what, err)}
+			Err: fmt.Errorf("audio: the stream for %s goes to no device, and logind did not say whether this "+
+				"account is logged in: %w", what, err)}
 	}
 	switched := false
 	for _, s := range sessions {

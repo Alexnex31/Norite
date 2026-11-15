@@ -13,9 +13,9 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// logindWithin bounds the whole question to logind, and loginFresh is how long its answer is kept: both
-// streams ask once a second for as long as a call outlives its session, and the answer only chooses
-// between two words for a device that is gone either way.
+// logindWithin bounds connecting to the system bus, and then the questions to logind. loginFresh is how
+// long the answer is kept: both streams ask once a second for as long as a call outlives its session, and
+// the answer only chooses between two words for a device that is gone either way.
 const (
 	logindWithin = time.Second
 	loginFresh   = 5 * time.Second
@@ -52,8 +52,6 @@ func loginSessions() ([]loginSession, error) {
 //
 // Called under login.mu, which orders it with itself.
 func loginSessionsNow() ([]loginSession, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), logindWithin)
-	defer cancel()
 	if login.conn == nil {
 		// A connection lives as long as its context, so the bound on connecting cancels it only if the
 		// handshake outruns it: past that it is the kept connection's, and each question takes ctx.
@@ -72,13 +70,24 @@ func loginSessionsNow() ([]loginSession, error) {
 		}
 		login.conn, login.drop = conn, drop
 	}
+	// The questions' bound starts once connected, so a slow handshake leaves them their second.
+	ctx, cancel := context.WithTimeout(context.Background(), logindWithin)
+	defer cancel()
 	sessions, err := askLogind(ctx, login.conn)
-	if err != nil {
+	if err != nil && !remote(err) {
 		_ = login.conn.Close()
 		login.drop()
 		login.conn, login.drop = nil, nil
 	}
 	return sessions, err
+}
+
+// remote is whether err is an answer over the bus, which leaves the connection as it was: logind not
+// running is ServiceUnknown, a session gone UnknownObject. Anything else is the connection's or the
+// bound's.
+func remote(err error) bool {
+	var de dbus.Error
+	return errors.As(err, &de)
 }
 
 // askLogind is loginSessionsNow's questions, on conn.
@@ -110,10 +119,22 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 			Path dbus.ObjectPath
 		}
 		const iface = "org.freedesktop.login1.Session"
-		if err := errors.Join(property(ctx, o, iface, "Seat", &seat), property(ctx, o, iface, "Active", &s.Active),
-			property(ctx, o, iface, "Class", &s.Class)); err != nil {
-			// A session that ended between the listing and the question is no session.
-			continue
+		var err error
+		for _, p := range []struct {
+			name string
+			v    any
+		}{{"Seat", &seat}, {"Active", &s.Active}, {"Class", &s.Class}} {
+			if err = property(ctx, o, iface, p.name, p.v); err != nil {
+				break
+			}
+		}
+		if err != nil {
+			// A session that ended between the listing and the question is no session, which logind says;
+			// the bound running out or the connection failing says nothing of the session, and is the answer.
+			if remote(err) {
+				continue
+			}
+			return nil, err
 		}
 		s.Seat = seat.ID
 		sessions = append(sessions, s)

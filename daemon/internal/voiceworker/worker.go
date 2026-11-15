@@ -337,7 +337,11 @@ func (w *Worker) wait() {
 	case err != nil && !w.leaving:
 		w.exit = Exit{Crashed: true, Reason: fmt.Sprintf("the voice worker stopped unexpectedly (%s)", status(err, code))}
 	case w.ended != nil:
-		w.exit = Exit{Reason: termsafe.Text(w.ended.Reason), Devices: w.ended.Devices}
+		why := termsafe.Text(w.ended.Reason)
+		if why == "" {
+			why = "the voice worker ended the call without saying why"
+		}
+		w.exit = Exit{Reason: why, Devices: w.ended.Devices}
 	case w.leaving:
 		w.exit = Exit{Reason: "left"}
 	default:

@@ -240,6 +240,13 @@ func standin(mode string) int {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
 					Reason: "neither the microphone nor the speakers can be used: nobody is logged in", Devices: true})
 				return 0
+			case "devfailedlate": // both failing, the speakers only after their first frame: no end follows
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoDevice, voiceipc.DeviceNoDevice, "a stand-in"))
+			case "devclaims": // the devices working, and an end said to be theirs
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(100 * time.Millisecond)
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "their end", Devices: true})
+				return 0
 			case "endsilently": // ended as the microphone is waited for, saying nothing
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded})
 				return 0

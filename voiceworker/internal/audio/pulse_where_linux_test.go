@@ -41,3 +41,24 @@ func TestTheOwnStreamIsTheOneNamingThisProcess(t *testing.T) {
 		}
 	}
 }
+
+// Only auto_null's monitor is no microphone. Another sink's monitor is somebody's choice, desktop audio
+// shared or a virtual cable, and a source of its own is a microphone.
+func TestOnlyTheStandInsMonitorIsNoMicrophone(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  proto.GetSourceInfoReply
+		want bool
+	}{
+		{"auto_null's monitor", proto.GetSourceInfoReply{SourceName: "auto_null.monitor", MonitorSourceIndex: 35,
+			MonitorSourceName: "auto_null"}, true},
+		{"a card's monitor", proto.GetSourceInfoReply{SourceName: "alsa_output.pci.analog-stereo.monitor",
+			MonitorSourceIndex: 74, MonitorSourceName: "alsa_output.pci.analog-stereo"}, false},
+		{"a card's input", proto.GetSourceInfoReply{SourceName: "alsa_input.pci.analog-stereo",
+			MonitorSourceIndex: proto.Undefined}, false},
+	} {
+		if got := standInSource(c.src); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}

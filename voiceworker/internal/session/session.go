@@ -84,10 +84,12 @@ type Session struct {
 	// still runs RNNoise, for the voice probability the audio level's V flag follows (M30).
 	processing dsp.Settings
 
-	ready    chan struct{}
-	ended    chan string
-	endOnce  sync.Once
-	readyOne sync.Once
+	ready   chan struct{}
+	ended   chan string
+	endOnce sync.Once
+	// byDevices is whether the end Ended delivers was the devices', stored before it is delivered.
+	byDevices atomic.Bool
+	readyOne  sync.Once
 
 	track  *webrtc.TrackLocalStaticRTP
 	sender *webrtc.RTPSender
@@ -186,7 +188,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		cc: newController(time.Now())}
 	if opts.Device != nil {
-		s.devs = newDevices(s.end)
+		s.devs = newDevices(func(why string) { s.endFor(why, true) })
 		if a, ok := opts.Device.(audio.Authorizer); ok {
 			var ctx context.Context
 			ctx, s.stopAuth = context.WithCancel(context.Background())
@@ -358,8 +360,15 @@ func drain(tr *webrtc.TrackRemote) {
 }
 
 // end reports the call over, once, with why.
-func (s *Session) end(reason string) {
-	s.endOnce.Do(func() { s.ended <- reason })
+func (s *Session) end(reason string) { s.endFor(reason, false) }
+
+// endFor reports the call over, once, with why, and whether its devices are why: an end that comes
+// second is no end, so byDevices is kept by the one that delivers.
+func (s *Session) endFor(reason string, byDevices bool) {
+	s.endOnce.Do(func() {
+		s.byDevices.Store(byDevices)
+		s.ended <- reason
+	})
 }
 
 // Offer adds the call's sections and returns the offer, every candidate gathered.
@@ -517,13 +526,11 @@ func (s *Session) Close() {
 	s.closing = true
 	m, starting := s.media, s.mediaStarting
 	s.mediaMu.Unlock()
-	// The question is given up after the media has stopped, so a microphone waiting on it sees the stop
-	// first and never takes the giving up for a refusal.
-	defer func() {
-		if s.stopAuth != nil {
-			s.stopAuth()
-		}
-	}()
+	// The question is given up first: an answer that comes after is no refusal, whatever it says
+	// (authorize), and the microphone, waiting on it, is never opened.
+	if s.stopAuth != nil {
+		s.stopAuth()
+	}
 	if m != nil {
 		m.close()
 	} else if !starting {

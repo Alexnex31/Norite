@@ -164,7 +164,8 @@ const (
 	VoiceDeviceRefused = "refused"
 	// VoiceDeviceNoDevice is no device to use.
 	VoiceDeviceNoDevice = "no_device"
-	// VoiceDeviceNoSession is nobody logged in at the machine, so nothing may use a device (Linux).
+	// VoiceDeviceNoSession is the account not logged in at the machine, whoever else is, so nothing it runs
+	// may use a device (Linux).
 	VoiceDeviceNoSession = "no_session"
 	// VoiceDeviceFailed is anything else, its reason saying what.
 	VoiceDeviceFailed = "failed"

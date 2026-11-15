@@ -47,7 +47,8 @@ const (
 	Refused
 	// NoDevice is no device to open.
 	NoDevice
-	// NoSession is nobody logged in at the machine, so nothing may use its devices (Linux).
+	// NoSession is the account not logged in at the machine, whoever else is, so nothing it runs may use its
+	// devices (Linux).
 	NoSession
 )
 

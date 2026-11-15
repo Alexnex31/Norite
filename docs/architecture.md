@@ -2423,7 +2423,7 @@ around whoever is transmitting) plus two **separate** actions (each its own keyb
 **Mic permission and global hotkey**, settled by M25
 ([ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)):
 - **The worker opens the microphone itself, and no attach client ever does.**
-  - Linux has no per-program gate, but no device before somebody logs in.
+  - Linux has no per-program gate, but no device before the account logs in at the machine.
   - Windows names the worker's exe in its one device-wide switch.
   - macOS charges the worker's use to the daemon, its parent, so the prompt reads "norite-daemon" and comes
     again after each new daemon build while releases are ad-hoc signed.

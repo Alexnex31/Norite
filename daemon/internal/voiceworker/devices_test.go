@@ -90,10 +90,38 @@ func TestAJoinWhoseDevicesBothFailFails(t *testing.T) {
 	require.Equal(t, none, st.Microphone)
 	require.Equal(t, none, st.Speakers)
 
-	// A leave with no call clears them, as the contract says.
+	// A leave with no call clears them, as the contract says, and the reason they explained.
 	st = v.Leave()
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)
+	require.Equal(t, "left", st.Reason)
+}
+
+// A worker saying its devices ended a call they were not failing in leaves no devices: a worker is a
+// stranger, and the status would describe working devices nothing has open.
+func TestAnEndClaimedByWorkingDevicesKeepsNone(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "devclaims", answeringServer{})
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 5*time.Second, 10*time.Millisecond)
+	st := v.Status()
+	require.Equal(t, "their end", st.Reason)
+	require.Nil(t, st.Microphone)
+	require.Nil(t, st.Speakers)
+}
+
+// Both devices failing with no end after them, the speakers having worked as the call started, answer the
+// join within endWithin rather than at micWithin: the worker ends a call on both failing only as it starts.
+func TestAJoinWhoseDevicesFailWithNoEndAnswers(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "devfailedlate", answeringServer{})
+	start := time.Now()
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Less(t, time.Since(start), micWithin, "the join waited out its bound")
+	require.Equal(t, ipc.VoiceInCall, st.State)
+	require.Equal(t, ipc.VoiceDeviceNoDevice, st.Microphone.State)
 }
 
 // A worker ending the call as its microphone is waited for fails the join, whatever reason it gives,

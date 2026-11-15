@@ -58,9 +58,9 @@ type devices struct {
 	now [2]voiceipc.Device
 	// first is whether each device has had its first outcome past opening and asking, and firstFailing
 	// whether that outcome was a failure; decided is whether both have, which is when the call's start is
-	// judged. endedCall is whether that judgement ended the call.
-	first, firstFailing [2]bool
-	decided, endedCall  bool
+	// judged. judged is whether each device's state now is a backend's answer rather than its silence.
+	first, firstFailing, judged [2]bool
+	decided                     bool
 	// changes holds the latest report not yet taken, at most one: a report replaces one not yet sent, so
 	// the device's side never waits on the pipe.
 	changes chan voiceipc.Devices
@@ -87,18 +87,18 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 		d.mu.Unlock()
 		return
 	}
-	d.now[which] = dev
+	d.now[which], d.judged[which] = dev, judged
 	if judged && !d.first[which] && dev.State != voiceipc.DeviceOpening && dev.State != voiceipc.DeviceAsking {
 		d.first[which], d.firstFailing[which] = true, voiceipc.Failing(dev.State)
 	}
 	endCall := false
 	if !d.decided && d.first[microphone] && d.first[speakers] {
-		// Both first outcomes failing, and both failing still: a device whose first answer was a stand-in
-		// for a moment, Bluetooth's sink coming back for one, may be working by the time the other answers.
+		// Both first outcomes failing, and both failing still on a backend's answer: a device whose first
+		// answer was a stand-in for a moment, Bluetooth's sink coming back for one, may be working by the time
+		// the other answers, or silent as it comes back, which decides nothing.
 		d.decided = true
-		endCall = d.firstFailing[microphone] && d.firstFailing[speakers] &&
-			voiceipc.Failing(d.now[microphone].State) && voiceipc.Failing(d.now[speakers].State)
-		d.endedCall = endCall
+		endCall = d.firstFailing[microphone] && d.firstFailing[speakers] && d.failingNow(microphone) &&
+			d.failingNow(speakers)
 	}
 	report := voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers]}
 	why := "neither the microphone nor the speakers can be used"
@@ -114,6 +114,11 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 	if endCall {
 		d.end(voiceipc.CutReason(why))
 	}
+}
+
+// failingNow is whether which device is failing on its backend's answer, under mu.
+func (d *devices) failingNow(which int) bool {
+	return d.judged[which] && voiceipc.Failing(d.now[which].State)
 }
 
 // current is the devices as last reported.
@@ -216,15 +221,9 @@ func (s *Session) authorize(ctx context.Context, a audio.Authorizer) {
 }
 
 // EndedByDevices is whether the call ended because both its devices failed as it started, asked once
-// Ended has delivered: the daemon keeps the devices in its status after that end alone.
-func (s *Session) EndedByDevices() bool {
-	if s.devs == nil {
-		return false
-	}
-	s.devs.mu.Lock()
-	defer s.devs.mu.Unlock()
-	return s.devs.endedCall
-}
+// Ended has delivered: the daemon keeps the devices in its status after that end alone. It is false for a
+// call something else ended first, however its devices were doing.
+func (s *Session) EndedByDevices() bool { return s.byDevices.Load() }
 
 // Devices delivers the devices' state each time it changes, the latest only. A session with no device, a
 // worker built without audio, says nothing: no state would be true of it, and both failing would read as

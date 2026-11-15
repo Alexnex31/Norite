@@ -15,7 +15,7 @@ import (
 // stranger's audio, gets what reaching the audio system, the network and its own files needs. M29 adds what
 // its capture library reads, and nothing else (its roadmap entry): jfreymuth/pulse reads PULSE_SERVER,
 // XDG_RUNTIME_DIR, HOME and PULSE_COOKIE, the last its one addition. M32 adds DBUS_SYSTEM_BUS_ADDRESS, by
-// which the worker asks logind whether anybody is logged in, set only where the system bus is not at its
+// which the worker asks logind whether its account is logged in, set only where the system bus is not at its
 // default path.
 var passed = map[string][]string{
 	"unix": {

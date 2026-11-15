@@ -289,24 +289,22 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 }
 
 // end reports the call ended, and why, as the worker's last frame.
-func (r *run) end(reason string) int {
-	reason = voiceipc.CutReason(reason)
-	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: reason})
-	return ExitOK
-}
+func (r *run) end(reason string) int { return r.endBy(reason, false) }
 
 // ended reports the end the call itself delivered, saying whether its devices were why.
-func (r *run) ended(reason string) int {
+func (r *run) ended(reason string) int { return r.endBy(reason, r.call.EndedByDevices()) }
+
+// endBy is the one writer of the ended frame.
+func (r *run) endBy(reason string, byDevices bool) int {
 	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-		Reason: voiceipc.CutReason(reason), Devices: r.call.EndedByDevices()})
+		Reason: voiceipc.CutReason(reason), Devices: byDevices})
 	return ExitOK
 }
 
 // violation is a frame out of order or malformed. The worker says so and exits: its daemon is of the same
 // install, so this is a bug, and guessing what was meant would hide it.
 func (r *run) violation(f gatewayproto.Frame) int {
-	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-		Reason: fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op)})
+	r.endBy(fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op), false)
 	return ExitProtocol
 }
 
