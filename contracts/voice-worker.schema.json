@@ -137,7 +137,8 @@
           "type": "object",
           "required": [
             "state",
-            "reason"
+            "reason",
+            "devices"
           ],
           "additionalProperties": false,
           "properties": {
@@ -152,6 +153,26 @@
               "type": "string",
               "maxLength": 256,
               "description": "Why a call ended, for a person, or empty."
+            },
+            "devices": {
+              "type": "boolean",
+              "description": "On an ended call, whether its devices ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone. False on every other state."
+            }
+          },
+          "if": {
+            "properties": {
+              "state": {
+                "not": {
+                  "const": "ended"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "devices": {
+                "const": false
+              }
             }
           }
         },
@@ -203,7 +224,7 @@
     },
     "Device": {
       "type": "object",
-      "description": "One direction's outcome. opening: being opened, or opened and not yet delivering. open: delivering audio, from its first frame. asking: the OS is asking the person (macOS). refused: the OS or the person refused it. no_device: there is none. no_session: nobody is logged in at the machine (Linux). failed: anything else. The worker words none of these; the client does, for its OS.",
+      "description": "One direction's outcome. opening: being opened, or opened and not yet delivering. open: delivering audio, from its first frame. asking: the OS is asking the person (macOS). refused: the OS or the person refused it. no_device: there is none. no_session: the account is not logged in at the machine, whoever else is (Linux). failed: anything else. The worker words none of these; the client does, for its OS.",
       "required": [
         "state",
         "reason"

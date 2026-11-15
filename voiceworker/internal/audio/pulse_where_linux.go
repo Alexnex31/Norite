@@ -15,17 +15,19 @@ import (
 // seat, a PulseAudio server says yes to everything: the default source is the monitor of a stand-in sink,
 // auto_null, recording delivers zeros and playback consumes. The session ending moves an open stream
 // there, and the next login moves it back, both silently. So what decides is where the stream is now: a
-// microphone on a monitor, of any sink, records no person, and speakers on auto_null play to nobody. The
+// microphone on auto_null's monitor, and speakers on auto_null, reach no device. Another sink's monitor is
+// somebody's choice, desktop audio shared or a virtual cable, and is a microphone like any other. The
 // samples decide nothing, since an idle card's are zeros too.
 //
 // It asks on a client of its own, never the stream's, kept for the stream's life and made again after a
 // request fails: one made each second cost a connection and its handshake each time, and every client
 // that comes and goes is announced to whatever watches the server, a desktop's volume applet included
-// (M32's /optimization-review). askMu orders it with Close, which closes it, so it is never used closed:
-// the library's closed client may panic. The library keeps a stream's index to itself, so the stream is
-// found by this process's id, which is unique: a worker has one stream each way. Anything that cannot be
-// found or asked is nil, since a stream that cannot be seen may well be working, and a server that went
-// away stops the stream's callbacks, which the session sees.
+// (M32's /optimization-review). askMu orders it with Close, which closes it once a question in progress
+// has had its answer, so it is never used closed: the library's closed client may panic. The library
+// keeps a stream's index to itself, so the stream is found by this process's id, which is unique: a worker
+// has one stream each way. Anything that cannot be found or asked is nil, since a stream that cannot be
+// seen may well be working, and a server that went away stops the stream's callbacks, which the session
+// sees.
 func (s *stream) Where() error {
 	if !s.onStandIn() {
 		return nil
@@ -59,6 +61,14 @@ func (s *stream) onStandIn() bool {
 		s.asker = nil
 		return false
 	}
+	// standIn is whether the sink at index is auto_null.
+	standIn := func(index uint32) bool {
+		var sink proto.GetSinkInfoReply
+		if c.RawRequest(&proto.GetSinkInfo{SinkIndex: index}, &sink) != nil {
+			return failed()
+		}
+		return sink.SinkName == nullSink
+	}
 	if s.capture {
 		var outs proto.GetSourceOutputInfoListReply
 		if c.RawRequest(&proto.GetSourceOutputInfoList{}, &outs) != nil {
@@ -72,7 +82,8 @@ func (s *stream) onStandIn() bool {
 		if c.RawRequest(&proto.GetSourceInfo{SourceIndex: outs[i].SourceIndex}, &src) != nil {
 			return failed()
 		}
-		return src.MonitorSourceIndex != proto.Undefined
+		// A source's MonitorSourceIndex is the sink it is the monitor of, Undefined for a source of its own.
+		return src.MonitorSourceIndex != proto.Undefined && standIn(src.MonitorSourceIndex)
 	}
 	var ins proto.GetSinkInputInfoListReply
 	if c.RawRequest(&proto.GetSinkInputInfoList{}, &ins) != nil {
@@ -82,16 +93,12 @@ func (s *stream) onStandIn() bool {
 	if i < 0 {
 		return false
 	}
-	var sink proto.GetSinkInfoReply
-	if c.RawRequest(&proto.GetSinkInfo{SinkIndex: ins[i].SinkIndex}, &sink) != nil {
-		return failed()
-	}
-	return sink.SinkName == nullSink
+	return standIn(ins[i].SinkIndex)
 }
 
 // nullSink is the name a PulseAudio server gives its stand-in for no output, PipeWire's and
-// module-always-sink's alike. A source that is a sink's monitor is no microphone, whichever sink, so the
-// source needs no name.
+// module-always-sink's alike. Its monitor is the stand-in for no input, auto_null.monitor in M32's spike,
+// and is found by the sink it monitors rather than by its own name.
 const nullSink = "auto_null"
 
 // own is the one of n streams whose properties name this process, or -1 when none does or several do.

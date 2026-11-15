@@ -238,12 +238,19 @@ func standin(mode string) int {
 				none := voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "nobody is logged in"}
 				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: none, Speakers: none})
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-					Reason: "neither the microphone nor the speakers can be used: nobody is logged in"})
+					Reason: "neither the microphone nor the speakers can be used: nobody is logged in", Devices: true})
+				return 0
+			case "endsilently": // ended as the microphone is waited for, saying nothing
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded})
 				return 0
 			}
-			if mode == "devdropped" { // the devices working, then the voice server closing the call
+			if mode == "devdropped" {
+				// The devices working, then both on the stand-in as the session ends mid-call, which leaves the
+				// call up, then the voice server closing it.
 				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
 				time.Sleep(200 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession, "nobody is logged in"))
+				time.Sleep(100 * time.Millisecond)
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
 					Reason: "the voice server closed the call"})
 				return 0

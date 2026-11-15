@@ -148,6 +148,8 @@ type Exit struct {
 	Crashed bool
 	// Reason says why, for a person: the worker's own, or the daemon's account of a crash.
 	Reason string
+	// Devices is a worker that said its call's devices ended it, both failing as it started (M32).
+	Devices bool
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
@@ -335,7 +337,7 @@ func (w *Worker) wait() {
 	case err != nil && !w.leaving:
 		w.exit = Exit{Crashed: true, Reason: fmt.Sprintf("the voice worker stopped unexpectedly (%s)", status(err, code))}
 	case w.ended != nil:
-		w.exit = Exit{Reason: termsafe.Text(w.ended.Reason)}
+		w.exit = Exit{Reason: termsafe.Text(w.ended.Reason), Devices: w.ended.Devices}
 	case w.leaving:
 		w.exit = Exit{Reason: "left"}
 	default:

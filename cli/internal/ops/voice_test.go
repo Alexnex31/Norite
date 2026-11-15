@@ -38,9 +38,9 @@ func TestEachDeviceStateIsWordedForItsOS(t *testing.T) {
 		{"refused elsewhere", dev(ipc.VoiceDeviceRefused, "a sandbox said no"), nil, "linux",
 			[]string{"The microphone was refused: a sandbox said no"}},
 		{"no session for either", dev(ipc.VoiceDeviceNoSession, "x"), dev(ipc.VoiceDeviceNoSession, "y"), "linux",
-			[]string{"Nothing can use the microphone or speakers until somebody logs in at this machine"}},
+			[]string{"Nothing can use the microphone or speakers until you log in at this machine"}},
 		{"no session for one", dev(ipc.VoiceDeviceNoSession, "x"), open, "linux",
-			[]string{"Nothing can use the microphone until somebody logs in at this machine", "The speakers are on"}},
+			[]string{"Nothing can use the microphone until you log in at this machine", "The speakers are on"}},
 		{"no device", dev(ipc.VoiceDeviceNoDevice, ""), dev(ipc.VoiceDeviceNoDevice, "audio: the stream for the "+
 			"speakers goes to no device"), "linux", []string{"There is no microphone to use",
 			"There are no speakers to play to: audio: the stream for the speakers goes to no device"}},

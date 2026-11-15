@@ -74,7 +74,7 @@
           ]
         },
         "microphone": {
-          "description": "What the call's microphone is doing (M32), as the voice worker last said; null before it has said. Kept after a call its devices ended, both failing, so its end can be explained; null after any other end, after `leave` and at the next join. `join` prints once the call is up and this is past `opening`, or after 3 s.",
+          "description": "What the call's microphone is doing (M32), as the voice worker last said; null before it has said. Kept after a call its devices ended, both failing as it started, so its end can be explained; null after any other end, after `leave` and at the next join. `join` prints once the call is up and this is past `opening`, or after 3 s.",
           "oneOf": [
             {
               "type": "null"
@@ -115,7 +115,7 @@
             "no_session",
             "failed"
           ],
-          "description": "opening: being opened, or opened and not yet delivering. open: delivering audio. asking: macOS is asking whether norite-daemon may use the microphone. refused: the OS or the person refused it; the text output names the setting that changes it. no_device: there is none to use. no_session: nobody is logged in at the machine, so nothing may use a device (Linux). failed: anything else, `reason` saying what."
+          "description": "opening: being opened, or opened and not yet delivering. open: delivering audio. asking: macOS is asking whether norite-daemon may use the microphone. refused: the OS or the person refused it; the text output names the setting that changes it. no_device: there is none to use. no_session: the account is not logged in at the machine, whoever else is, so nothing it runs may use a device (Linux). failed: anything else, `reason` saying what."
         },
         "reason": {
           "type": "string",

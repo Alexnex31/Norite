@@ -89,6 +89,23 @@ func TestAJoinWhoseDevicesBothFailFails(t *testing.T) {
 	none := &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession, Reason: "nobody is logged in"}
 	require.Equal(t, none, st.Microphone)
 	require.Equal(t, none, st.Speakers)
+
+	// A leave with no call clears them, as the contract says.
+	st = v.Leave()
+	require.Nil(t, st.Microphone)
+	require.Nil(t, st.Speakers)
+}
+
+// A worker ending the call as its microphone is waited for fails the join, whatever reason it gives,
+// none included.
+func TestAJoinWhoseWorkerEndsSilentlyFails(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "endsilently", answeringServer{})
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	var refused *Refusal
+	require.True(t, errors.As(err, &refused), "%v", err)
+	require.Equal(t, "the voice worker ended the call without saying why", refused.Msg)
+	require.Equal(t, ipc.VoiceIdle, st.State)
 }
 
 // The daemon's words for a device's state are the worker's, which daemon/ipc cannot import, and the
@@ -119,7 +136,8 @@ func TestTheDeviceStatesAgreeAcrossPackages(t *testing.T) {
 }
 
 // A call that ends for any reason but its devices does not keep them: they would describe devices nothing
-// has open any more, and the client prints them.
+// has open any more, and the client prints them. Both are failing as this one ends, the session having
+// ended mid-call, and the end is still not theirs.
 func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
 	fast(t)
 	v := standinVoice(t, "devdropped", answeringServer{})

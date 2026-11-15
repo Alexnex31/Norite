@@ -112,6 +112,9 @@ type State struct {
 	State string `json:"state"`
 	// Reason says why a call ended, in words for a person, or "".
 	Reason string `json:"reason"`
+	// Devices is, on an ended call, whether its devices ended it, both failing as it started (M32): the
+	// daemon keeps them in its status after that end alone. False on every other state.
+	Devices bool `json:"devices"`
 }
 
 // The states a worker reports.
@@ -153,8 +156,8 @@ const (
 	DeviceRefused = "refused"
 	// DeviceNoDevice: there is none to open.
 	DeviceNoDevice = "no_device"
-	// DeviceNoSession: nobody is logged in at the machine, and nothing can use a device until somebody is
-	// (Linux).
+	// DeviceNoSession: the account is not logged in at the machine, and nothing it runs can use a device
+	// until it is (Linux), whoever else is.
 	DeviceNoSession = "no_session"
 	// DeviceFailed: anything else, Reason saying what.
 	DeviceFailed = "failed"
@@ -200,7 +203,8 @@ func (o Offer) Check() error {
 	return nil
 }
 
-// Check refuses a state that is not one of the words, or a reason past MaxReason.
+// Check refuses a state that is not one of the words, a reason past MaxReason, or devices that ended a
+// call that has not.
 func (s State) Check() error {
 	switch s.State {
 	case StateConnecting, StateReady, StateEnded:
@@ -209,6 +213,9 @@ func (s State) Check() error {
 	}
 	if len(s.Reason) > MaxReason {
 		return fmt.Errorf("a reason of %d bytes, past %d", len(s.Reason), MaxReason)
+	}
+	if s.Devices && s.State != StateEnded {
+		return fmt.Errorf("devices that ended a call that is %s", s.State)
 	}
 	return nil
 }

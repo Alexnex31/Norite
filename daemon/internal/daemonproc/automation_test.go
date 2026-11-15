@@ -4,7 +4,6 @@
 package daemonproc
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,13 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -98,30 +95,10 @@ func (f *portFixture) ok(method, path string) ipc.AutomationStatus {
 	resp := f.ask(method, path)
 	require.Nil(f.t, resp.Error, "%s %s: %+v", method, path, resp.Error)
 	require.Equal(f.t, http.StatusOK, *resp.Status)
-	matchesAutomationStatus(f.t, resp.Body)
+	matchesDefinition(f.t, "AutomationStatus", resp.Body)
 	var out ipc.AutomationStatus
 	require.NoError(f.t, json.Unmarshal(resp.Body, &out))
 	return out
-}
-
-func matchesAutomationStatus(t *testing.T, body []byte) {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "daemon-ipc.schema.json"))
-	require.NoError(t, err)
-	var doc struct {
-		Defs map[string]json.RawMessage `json:"$defs"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &doc))
-	require.Contains(t, doc.Defs, "AutomationStatus")
-	def, err := jsonschema.UnmarshalJSON(bytes.NewReader(doc.Defs["AutomationStatus"]))
-	require.NoError(t, err)
-	c := jsonschema.NewCompiler()
-	require.NoError(t, c.AddResource("status.json", def))
-	schema, err := c.Compile("status.json")
-	require.NoError(t, err)
-	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
-	require.NoError(t, err)
-	require.NoError(t, schema.Validate(inst), "%s", body)
 }
 
 // freePort is a port nothing holds at the moment it is asked.

@@ -209,9 +209,11 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	// that comes at once finds no call of this one's to leave, which would put "left" over the reason.
 	fail := func(failed bool, format string, args ...any) {
 		msg := reason(fmt.Sprintf(format, args...))
+		byDevices := false
 		if w != nil {
 			select {
 			case <-w.Done():
+				byDevices = w.Exit().Devices
 			default:
 				w.Leave()
 			}
@@ -219,10 +221,10 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		ev := log.Warn()
 		if ctx.Err() != nil {
 			// Left, by a leave, a join after it or the sign-in's end, which said so in the status: not a failure.
-			msg, failed, ev = "the call was left before it was up", false, log.Info()
+			msg, failed, byDevices, ev = "the call was left before it was up", false, false, log.Info()
 		}
 		ev.Str("reason", msg).Msg("the voice call could not be joined")
-		v.ended(c, msg)
+		v.ended(c, msg, byDevices)
 		result <- &Refusal{Msg: msg, Failed: failed}
 	}
 
@@ -298,7 +300,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		fail(true, "%s", why)
 		return
 	}
-	if why := v.awaitMicrophone(ctx, c, w); why != "" {
+	if why, up := v.awaitMicrophone(ctx, c, w); !up {
 		fail(true, "%s", why)
 		return
 	}
@@ -323,7 +325,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}
 	<-w.Done()
-	v.ended(c, w.Exit().Reason)
+	v.ended(c, w.Exit().Reason, w.Exit().Devices)
 }
 
 // await waits for the event want accepts, the worker's end, the bound, or the call's cancellation. A
@@ -366,9 +368,10 @@ func (v *Voice) await(ctx context.Context, w *Worker, within time.Duration,
 // devices' state as the worker says it (D6): so a join answers with whether the person will be heard, a
 // refusal or macOS's question included, rather than "in call" over a microphone nobody can use. A
 // microphone that failed is waited past until the speakers have said too: both failing end the call, which
-// the worker says next, and that end is the join's failure, its reason returned. A worker that says nothing
-// of its devices is waited for to the bound, and the call goes on.
-func (v *Voice) awaitMicrophone(ctx context.Context, c *call, w *Worker) string {
+// the worker says next, and that end is the join's failure, its reason returned with up false, which a
+// worker's empty reason cannot be mistaken for. A worker that says nothing of its devices is waited for
+// to the bound, and the call goes on.
+func (v *Voice) awaitMicrophone(ctx context.Context, c *call, w *Worker) (string, bool) {
 	timer := time.NewTimer(micWithin)
 	defer timer.Stop()
 	for {
@@ -376,26 +379,29 @@ func (v *Voice) awaitMicrophone(ctx context.Context, c *call, w *Worker) string 
 		mic, spk := v.status.Microphone, v.status.Speakers
 		v.mu.Unlock()
 		if decided(mic, spk) {
-			return ""
+			return "", true
 		}
 		select {
 		case ev, ok := <-w.Events():
 			switch {
 			case !ok || (ev.State != nil && ev.State.State == voiceipc.StateEnded):
 				<-w.Done()
-				return w.Exit().Reason
+				if why := w.Exit().Reason; why != "" {
+					return why, false
+				}
+				return "the voice worker ended the call without saying why", false
 			case ev.Offer != nil:
 				w.Kill("the voice worker broke the protocol: it offered again in a call")
 				<-w.Done()
-				return w.Exit().Reason
+				return w.Exit().Reason, false
 			case ev.Devices != nil:
 				v.devices(c, *ev.Devices)
 			}
 		case <-timer.C:
-			return ""
+			return "", true
 		case <-ctx.Done():
 			w.Leave()
-			return "left"
+			return "left", false
 		}
 	}
 }
@@ -427,7 +433,10 @@ func (v *Voice) devices(c *call, d voiceipc.Devices) {
 }
 
 // ended makes c's end the status, if c is still the call: a call left or replaced has already said so.
-func (v *Voice) ended(c *call, why string) {
+// The devices stay only when the worker said they are why the call ended, so that a client can word it;
+// after any other end they would describe devices nothing has open any more, both failing by then
+// included, which a session that ended mid-call leaves them.
+func (v *Voice) ended(c *call, why string, byDevices bool) {
 	v.mu.Lock()
 	if v.current != c {
 		v.mu.Unlock()
@@ -435,10 +444,7 @@ func (v *Voice) ended(c *call, why string) {
 	}
 	v.current = nil
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
-	// The devices stay only when they are why the call ended, both failing, so that a client can word it;
-	// after any other end they would describe devices nothing has open any more.
-	if mic, spk := v.status.Microphone, v.status.Speakers; mic == nil || spk == nil ||
-		!voiceipc.Failing(mic.State) || !voiceipc.Failing(spk.State) {
+	if !byDevices {
 		v.status.Microphone, v.status.Speakers = nil, nil
 	}
 	v.mu.Unlock()
@@ -460,6 +466,14 @@ func (v *Voice) Leave() ipc.VoiceStatus {
 	c := v.current
 	v.mu.Unlock()
 	if c == nil {
+		// The devices a failed join kept are an earlier call's, and a leave clears them as it would a call's.
+		v.mu.Lock()
+		kept := v.status.Microphone != nil || v.status.Speakers != nil
+		v.status.Microphone, v.status.Speakers = nil, nil
+		v.mu.Unlock()
+		if kept {
+			v.publish()
+		}
 		return v.Status()
 	}
 	return v.leave(c, "left")

@@ -21,12 +21,17 @@ const (
 	loginFresh   = 5 * time.Second
 )
 
-// login is logind's last answer, shared by both streams.
+// login is logind's last answer, shared by both streams, and the system-bus connection it came over, kept
+// for the worker's life and made again after a question on it fails: a connection made for each question
+// is a handshake each time, and announced to every listener on the bus as it comes and goes. The worker
+// exits with its call, which closes it.
 var login struct {
 	mu       sync.Mutex
 	at       time.Time
 	sessions []loginSession
 	err      error
+	conn     *dbus.Conn
+	drop     context.CancelFunc
 }
 
 // loginSessions is loginSessionsNow's answer, asked again once it is older than loginFresh.
@@ -44,17 +49,43 @@ func loginSessions() ([]loginSession, error) {
 // GetUser, the user's Sessions, and each session's Seat, Active and Class. Asked only once a stream is on a
 // stand-in, never on an ordinary call. An account logind has no record of has no session: that is its
 // NoSuchUser, which an account with no login and no linger gets.
+//
+// Called under login.mu, which orders it with itself.
 func loginSessionsNow() ([]loginSession, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), logindWithin)
 	defer cancel()
-	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
-	if err != nil {
-		return nil, err
+	if login.conn == nil {
+		// A connection lives as long as its context, so the bound on connecting cancels it only if the
+		// handshake outruns it: past that it is the kept connection's, and each question takes ctx.
+		live, drop := context.WithCancel(context.Background())
+		late := time.AfterFunc(logindWithin, drop)
+		conn, err := dbus.ConnectSystemBus(dbus.WithContext(live))
+		if !late.Stop() && err == nil {
+			err = errors.New("the system bus did not answer in time")
+		}
+		if err != nil {
+			drop()
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, err
+		}
+		login.conn, login.drop = conn, drop
 	}
-	defer func() { _ = conn.Close() }()
+	sessions, err := askLogind(ctx, login.conn)
+	if err != nil {
+		_ = login.conn.Close()
+		login.drop()
+		login.conn, login.drop = nil, nil
+	}
+	return sessions, err
+}
+
+// askLogind is loginSessionsNow's questions, on conn.
+func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 	const dest = "org.freedesktop.login1"
 	var user dbus.ObjectPath
-	err = conn.Object(dest, "/org/freedesktop/login1").CallWithContext(ctx,
+	err := conn.Object(dest, "/org/freedesktop/login1").CallWithContext(ctx,
 		"org.freedesktop.login1.Manager.GetUser", 0, uint32(os.Getuid())).Store(&user) //nolint:gosec // a uid
 	var de dbus.Error
 	if errors.As(err, &de) && de.Name == "org.freedesktop.login1.NoSuchUser" {

@@ -21,7 +21,7 @@ const (
 // cleans it with the rest. A device not reported yet says nothing.
 func VoiceDevices(mic, spk *ipc.VoiceDevice, goos string) []string {
 	if mic != nil && spk != nil && mic.State == ipc.VoiceDeviceNoSession && spk.State == mic.State {
-		return []string{"Nothing can use the microphone or speakers until somebody logs in at this machine"}
+		return []string{"Nothing can use the microphone or speakers until you log in at this machine"}
 	}
 	var lines []string
 	if mic != nil {
@@ -52,7 +52,7 @@ func microphoneLine(d ipc.VoiceDevice, goos string) string {
 	case ipc.VoiceDeviceNoDevice:
 		return withReason("There is no microphone to use", d.Reason)
 	case ipc.VoiceDeviceNoSession:
-		return "Nothing can use the microphone until somebody logs in at this machine"
+		return "Nothing can use the microphone until you log in at this machine"
 	}
 	return withReason("The microphone failed", d.Reason)
 }
@@ -68,7 +68,7 @@ func speakersLine(d ipc.VoiceDevice) string {
 	case ipc.VoiceDeviceNoDevice:
 		return withReason("There are no speakers to play to", d.Reason)
 	case ipc.VoiceDeviceNoSession:
-		return "Nothing can use the speakers until somebody logs in at this machine"
+		return "Nothing can use the speakers until you log in at this machine"
 	}
 	return withReason("The speakers failed", d.Reason)
 }

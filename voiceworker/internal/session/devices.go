@@ -5,6 +5,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -27,11 +28,12 @@ import (
 //
 // One device failing lets the call go on, listening or speaking alone. Both failing as the call starts
 // end it, with the microphone's outcome in the reason: a call that can neither send nor hear is no call
-// (ADR 0034 §4). Silence at the start is not an outcome for that: a device can take longer than silentFor
-// to deliver its first frame, a Bluetooth headset changing profile as its microphone opens for one, and
-// ending the call on it would end one that was about to work. It is reported failed all the same. Only as it starts: a session that ends mid-call moves both streams to the stand-in, and
+// (ADR 0034 §4). Only as it starts: a session that ends mid-call moves both streams to the stand-in, and
 // PulseAudio moves them back when somebody logs in again, so ending the call then would end one that
-// would have come back.
+// would have come back. And only on what the backends answered, never on silence: a device can take longer
+// than silentFor to deliver its first frame, a Bluetooth headset changing profile as its microphone opens
+// for one, and ending the call on it would end one that was about to work. Silence is reported failed all
+// the same.
 
 const (
 	// silentFor is how long a device may deliver nothing before it has failed.
@@ -56,9 +58,9 @@ type devices struct {
 	now [2]voiceipc.Device
 	// first is whether each device has had its first outcome past opening and asking, and firstFailing
 	// whether that outcome was a failure; decided is whether both have, which is when the call's start is
-	// judged.
+	// judged. endedCall is whether that judgement ended the call.
 	first, firstFailing [2]bool
-	decided             bool
+	decided, endedCall  bool
 	// changes holds the latest report not yet taken, at most one: a report replaces one not yet sent, so
 	// the device's side never waits on the pipe.
 	changes chan voiceipc.Devices
@@ -91,8 +93,12 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 	}
 	endCall := false
 	if !d.decided && d.first[microphone] && d.first[speakers] {
+		// Both first outcomes failing, and both failing still: a device whose first answer was a stand-in
+		// for a moment, Bluetooth's sink coming back for one, may be working by the time the other answers.
 		d.decided = true
-		endCall = d.firstFailing[microphone] && d.firstFailing[speakers]
+		endCall = d.firstFailing[microphone] && d.firstFailing[speakers] &&
+			voiceipc.Failing(d.now[microphone].State) && voiceipc.Failing(d.now[speakers].State)
+		d.endedCall = endCall
 	}
 	report := voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers]}
 	why := "neither the microphone nor the speakers can be used"
@@ -190,12 +196,34 @@ func (m *media) watchDevice(which int, c io.Closer, last *atomic.Int64, first <-
 }
 
 // authorize asks an audio.Authorizer for the microphone as the call starts, so that macOS's question is
-// on the screen while ICE connects, and keeps the answer for openDevices.
+// on the screen while ICE connects, and keeps the answer for openDevices. The answer is reported as soon
+// as it comes, so a join that waits on the microphone never says it is being asked about once somebody has
+// answered: a yes is opening again until its first frame, a no is the refusal. A question given up because
+// the call closed is no refusal, whatever the backend returned for it, and reports nothing.
 func (s *Session) authorize(ctx context.Context, a audio.Authorizer) {
 	defer close(s.authDone)
 	s.authErr = a.Authorize(ctx, func() {
 		s.devs.set(microphone, voiceipc.Device{State: voiceipc.DeviceAsking}, true)
 	})
+	switch err := s.authErr; {
+	case err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled)):
+	case err != nil:
+		s.logf("the microphone may not be used, so nothing will be sent: %v", err)
+		s.devs.set(microphone, deviceOf(err), true)
+	default:
+		s.devs.set(microphone, voiceipc.Device{State: voiceipc.DeviceOpening}, true)
+	}
+}
+
+// EndedByDevices is whether the call ended because both its devices failed as it started, asked once
+// Ended has delivered: the daemon keeps the devices in its status after that end alone.
+func (s *Session) EndedByDevices() bool {
+	if s.devs == nil {
+		return false
+	}
+	s.devs.mu.Lock()
+	defer s.devs.mu.Unlock()
+	return s.devs.endedCall
 }
 
 // Devices delivers the devices' state each time it changes, the latest only. A session with no device, a

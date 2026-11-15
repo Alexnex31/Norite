@@ -106,6 +106,9 @@ func TestACallThatCanNeitherSendNorHearEnds(t *testing.T) {
 			if d := s.devs.current(); !is(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession)(d) {
 				t.Errorf("the devices were left as %+v", d)
 			}
+			if !s.EndedByDevices() {
+				t.Error("the call does not say its devices ended it")
+			}
 		})
 	}
 }
@@ -166,14 +169,18 @@ func TestTheQuestionIsReportedAndItsAnswerFollowed(t *testing.T) {
 	for _, c := range []struct {
 		name, room string
 		answer     error
-		want       string
+		// silent is a microphone that has not delivered its first frame yet, so that only the answer
+		// itself can move it past asking.
+		silent bool
+		want   string
 	}{
-		{"yes", "1", nil, voiceipc.DeviceOpen},
-		{"no", "2", failure(audio.Refused, "the person said no"), voiceipc.DeviceRefused},
+		{"yes", "1", nil, false, voiceipc.DeviceOpen},
+		{"no", "2", failure(audio.Refused, "the person said no"), false, voiceipc.DeviceRefused},
+		{"yes, before the first frame", "3", nil, true, voiceipc.DeviceOpening},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			answer := make(chan error, 1)
-			dev := &audiotest.Asking{Device: &audiotest.Device{}, Ask: func(ctx context.Context) error {
+			dev := &audiotest.Asking{Device: &audiotest.Device{Silent: c.silent}, Ask: func(ctx context.Context) error {
 				select {
 				case err := <-answer:
 					return err
@@ -184,7 +191,8 @@ func TestTheQuestionIsReportedAndItsAnswerFollowed(t *testing.T) {
 			s := h.join(t, c.room, "1", dev, Options{})
 			reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceOpen))
 			answer <- c.answer
-			reports(t, s, 5*time.Second, is(c.want, voiceipc.DeviceOpen))
+			// Within silentFor, after which a silent microphone has failed whatever the answer did.
+			reports(t, s, silentFor, is(c.want, voiceipc.DeviceOpen))
 			staysUp(t, s, 500*time.Millisecond)
 		})
 	}

@@ -2260,7 +2260,9 @@ of this section.
     `no_device`, `no_session` and `failed`. `refused` names no setting: the client words it for its OS.
   - **A device is `open` at its first frame**, and one that delivers nothing for 2 s is `failed`.
   - **One device failing lets the call go on; both failing at the join end it**, with the microphone's
-    outcome as the reason (ADR 0034 §4).
+    outcome as the reason (ADR 0034 §4). Both first answers count, and both must still be failing when the
+    second comes. The worker's ended state says the devices ended the call, and only then does the daemon
+    keep them in its status.
   - **`norite voice join` waits, at most 3 s, for the microphone to be past `opening`**, and on macOS
     prints that the question is being asked without waiting for the answer. The worker asks AVFoundation
     at its start, beside ICE.
@@ -2270,17 +2272,19 @@ of this section.
     - With no seat session, the PulseAudio protocol says yes to everything. The default source is the
       monitor of a "Dummy Output", recording delivers zeros, and today's worker sends silence with no
       error.
-    - What tells the cases apart is the source the worker's stream took: a monitor is not a microphone,
-      and a sink named `auto_null` is no output. The samples decide nothing, since an idle card's are
-      zeros too.
+    - What tells the cases apart is where the worker's stream went: `auto_null`'s monitor is no
+      microphone, and `auto_null` itself no output. Another sink's monitor is somebody's choice, desktop
+      audio shared or a virtual cable, and counts as a microphone (M32's second `/code-review`). The
+      samples decide nothing, since an idle card's are zeros too.
     - The stream moves silently both ways when a session ends or begins, so the worker reads its stream's
       source once a second and reports the change, recovery included. A session ending mid-call changes
       the state and ends nothing.
     - "No session" is asked of logind over D-Bus (`godbus`, BSD-2-Clause, new in `voiceworker`): a
       session with a seat, active, of class `user`. The user's `State` is `active` over SSH alone and
       decides nothing.
-  - **A device lost mid-call** is `failed` when the backend sees an error. Following a new default device
-    is carried to M34.
+  - **A device lost mid-call** is `failed` once it has delivered nothing for 2 s, since no backend surfaces
+    an error mid-call (WASAPI's invalidation stops the callbacks), and `open` again if it resumes.
+    Following a new default device is carried to M34.
   - **The Developer ID is not taken now** (the author's decision). It is more than a signature, and the
     entry that takes it inherits all four parts:
     - notarizing needs the hardened runtime;
@@ -2357,7 +2361,8 @@ of this section.
   spacing against departure spacing, sees it at any depth (M31's entry, architecture.md §17). It is built
   here with the downlink's subscription, or given an entry of its own.
 
-  **From M32:** a device lost mid-call is reported `failed` and stays so. Following the new default device
+  **From M32:** a device lost mid-call is reported `failed`, by its silence, and `open` again only if the
+  same stream resumes, which an unplugged device's does not. Following the new default device
   is built here with the rest of the call's control: on Windows, reopening after
   `AUDCLNT_E_DEVICE_INVALIDATED`, and on macOS after the queue stops. PulseAudio moves a stream itself, and
   M32 already reports where it went.

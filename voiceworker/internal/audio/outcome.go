@@ -102,13 +102,14 @@ type loginSession struct {
 }
 
 // stoodIn is why a PulseAudio stream on a stand-in for no device is there, from the account's logind
-// sessions (D5, M32's spike): with nobody logged in at a seat, logind grants nobody the sound devices and
-// PipeWire lists none, so no device is NoSession; with somebody, the machine has none to give. A session
-// over SSH has no seat, and the user's own State is active with SSH alone, so what decides is a session
-// with a seat, active, of class user. One of the account's at a seat that is not active is somebody
-// else's session in front, a user switch: no device, saying so, since logging in is not what brings the
-// devices back. err is logind's failure to answer, which is a system without it: then all that is known is
-// that there is no device.
+// sessions (D5, M32's spike), which are this account's alone: logind grants the sound devices to the
+// session in front, so with none of the account's at a seat its PipeWire lists none, whoever else is
+// logged in, and no device is NoSession; with the account's in front, the machine has none to give. A
+// session over SSH has no seat, and the user's own State is active with SSH alone, so what decides is a
+// session with a seat, active, of class user. One of the account's at a seat that is not active is
+// somebody else's session in front, a user switch: no device, saying so, since logging in is not what
+// brings the devices back. err is logind's failure to answer, which is a system without it: then all that
+// is known is that there is no device.
 func stoodIn(what string, sessions []loginSession, err error) error {
 	if err != nil {
 		return &Failure{Outcome: NoDevice,
@@ -129,6 +130,6 @@ func stoodIn(what string, sessions []loginSession, err error) error {
 			"this account's session at this machine is not the one in front", what)}
 	}
 	return &Failure{Outcome: NoSession,
-		Err: fmt.Errorf("audio: the stream for %s goes to no device, since nobody is logged in at this machine",
+		Err: fmt.Errorf("audio: the stream for %s goes to no device, since this account is not logged in at this machine",
 			what)}
 }

@@ -174,7 +174,7 @@ daemon carries it as call state over the attach socket (M34). The outcomes:
   - Windows: "Let desktop apps access your microphone";
   - macOS: System Settings → Privacy & Security → Microphone → `norite-daemon`;
 - no input device;
-- on Linux, no session: no device is available until somebody logs in at the machine.
+- on Linux, no session: no device is available until the account logs in at the machine.
 
 On macOS the worker asks for the outcome explicitly, through AVFoundation's access request and its
 answer. It does not infer the outcome from samples arriving or from a status read once: both misled the

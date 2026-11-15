@@ -33,6 +33,9 @@ type Call interface {
 	Ready() <-chan struct{}
 	// Ended delivers why the call ended by itself, once.
 	Ended() <-chan string
+	// EndedByDevices is whether that end was its devices', both failing as it started (M32), asked once
+	// Ended has delivered.
+	EndedByDevices() bool
 	// Devices delivers the microphone's and the speakers' state each time either changes (M32), the latest
 	// only, or is nil for a call with no devices. A state queued before the call ended is sent before its
 	// end.
@@ -184,7 +187,7 @@ func (r *run) loop(ctx context.Context) int {
 				_ = voiceipc.Write(r.out, voiceipc.OpDevices, d)
 			default:
 			}
-			return r.end(reason)
+			return r.ended(reason)
 		case f := <-r.frames:
 			if f.Op != voiceipc.OpLeave {
 				return r.violation(f)
@@ -276,7 +279,7 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 			}
 			return a, 0, true
 		case reason := <-r.call.Ended():
-			return voiceipc.Answer{}, r.end(reason), false
+			return voiceipc.Answer{}, r.ended(reason), false
 		case err := <-r.gone:
 			return voiceipc.Answer{}, r.daemonGone(err), false
 		case <-ctx.Done():
@@ -289,6 +292,13 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 func (r *run) end(reason string) int {
 	reason = voiceipc.CutReason(reason)
 	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: reason})
+	return ExitOK
+}
+
+// ended reports the end the call itself delivered, saying whether its devices were why.
+func (r *run) ended(reason string) int {
+	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+		Reason: voiceipc.CutReason(reason), Devices: r.call.EndedByDevices()})
 	return ExitOK
 }
 

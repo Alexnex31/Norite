@@ -240,7 +240,7 @@ func TestAJoinEndedByItsDevicesSaysWhatTheyWereDoing(t *testing.T) {
 		Speakers: none}, refuse: &ipc.RelayError{Code: ipc.RelayFailed, Message: why}}
 	r := norite(t, d, false, "join", "1234")
 	require.Error(t, r.err)
-	assert.Contains(t, r.out, "Nothing can use the microphone or speakers until somebody logs in at this machine.\n")
+	assert.Contains(t, r.out, "Nothing can use the microphone or speakers until you log in at this machine.\n")
 
 	d = &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: why, Microphone: none,
 		Speakers: none}, refuse: &ipc.RelayError{Code: ipc.RelayFailed, Message: "the voice server refused: 409 room full"}}
@@ -292,7 +292,7 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 			Microphone: &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession},
 			Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession}},
 			[]string{"The last call ended: neither the microphone nor the speakers can be used.\nNothing can use the " +
-				"microphone or speakers until somebody logs in at this machine.\n"}, nil},
+				"microphone or speakers until you log in at this machine.\n"}, nil},
 	}
 	for _, tc := range cases {
 		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")

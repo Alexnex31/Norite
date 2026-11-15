@@ -199,10 +199,12 @@ func (s *Session) startMedia(ctx context.Context) error {
 }
 
 // openDevices opens the speakers and the microphone, keeps each only if the call has not closed
-// meanwhile, and watches each it kept. The microphone waits for an audio.Authorizer's answer first. close stops the call before it reads them under devMu, and a device opened after that sees
-// the stop and closes itself here. So no device is opened for a call already left, and a leave never
-// waits on a driver that is slow to open. A device whose Close outruns close's bound is closed by the
-// worker's exit, which follows its call, and the daemon reports the call left once the worker is reaped.
+// meanwhile, and watches each it kept. The microphone waits for an audio.Authorizer's answer first, which
+// authorize has reported. close stops the call before it reads them under devMu, and a device opened
+// after that sees the stop and closes itself here. So no device is opened for a call already left, and a
+// leave never waits on a driver that is slow to open. A device whose Close outruns close's bound is closed
+// by the worker's exit, which follows its call, and the daemon reports the call left once the worker is
+// reaped.
 func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	keep := func(c io.Closer, at *io.Closer) bool {
 		m.devMu.Lock()
@@ -233,13 +235,8 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 		case <-m.stop:
 			return
 		}
-		// A question given up because the call closed is no refusal: it must not end the call as one.
-		if err := m.s.authErr; err != nil && !m.stopped() && !errors.Is(err, context.Canceled) {
-			m.s.logf("the microphone may not be used, so nothing will be sent: %v", err)
-			m.s.devs.set(microphone, deviceOf(err), true)
-			return
-		} else if err != nil {
-			return
+		if m.s.authErr != nil {
+			return // refused, and said so, or the question given up with the call
 		}
 	}
 	if m.stopped() {

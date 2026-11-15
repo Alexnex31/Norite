@@ -40,20 +40,23 @@ type stream struct {
 	closed  bool
 }
 
-// Close closes the stream at once, then Where's client once a question in progress on it has had its
-// answer, each request on it bounded by the library's second: the microphone stops when it is closed, and
-// only the asking waits.
+// Close closes the stream at once and returns. Where's client is closed once a question in progress on it
+// has had its answer, each request bounded by the library's second, on a goroutine of its own: a server
+// that stopped answering would otherwise hold the close past the session's bound, and the speakers and the
+// codec are closed after the microphone.
 func (s *stream) Close() error {
 	s.once.Do(func() {
 		s.close()
 		s.c.Close()
-		s.askMu.Lock()
-		s.closed = true
-		if s.asker != nil {
-			s.asker.Close()
-			s.asker = nil
-		}
-		s.askMu.Unlock()
+		go func() {
+			s.askMu.Lock()
+			defer s.askMu.Unlock()
+			s.closed = true
+			if s.asker != nil {
+				s.asker.Close()
+				s.asker = nil
+			}
+		}()
 	})
 	return nil
 }
