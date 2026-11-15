@@ -148,8 +148,8 @@ type Exit struct {
 	Crashed bool
 	// Reason says why, for a person: the worker's own, or the daemon's account of a crash.
 	Reason string
-	// Devices is a worker that said its call's devices ended it, both failing as it started (M32).
-	Devices bool
+	// Devices is the devices a worker said ended its call, both failing as it started (M32), or nil.
+	Devices *voiceipc.Devices
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
@@ -423,6 +423,13 @@ func (w *Worker) read(hello chan<- error) {
 		}
 		if unheard {
 			continue
+		}
+		// Into the buffer first: a frame written just before the worker exited, its devices before its end
+		// for one, would otherwise be lost to the exit whenever both were ready.
+		select {
+		case w.events <- ev:
+			continue
+		default:
 		}
 		select {
 		case w.events <- ev:

@@ -6,6 +6,7 @@ package audio
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -112,34 +113,55 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 	}
 	sessions := make([]loginSession, 0, len(refs))
 	for _, r := range refs {
-		o := conn.Object(dest, r.Path)
-		var s loginSession
-		var seat struct {
-			ID   string
-			Path dbus.ObjectPath
-		}
-		const iface = "org.freedesktop.login1.Session"
-		var err error
-		for _, p := range []struct {
-			name string
-			v    any
-		}{{"Seat", &seat}, {"Active", &s.Active}, {"Class", &s.Class}} {
-			if err = property(ctx, o, iface, p.name, p.v); err != nil {
-				break
-			}
+		// One GetAll a session rather than a Get a property: 2+n round trips under the bound, not 2+3n.
+		var props map[string]dbus.Variant
+		err := conn.Object(dest, r.Path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.GetAll", 0,
+			"org.freedesktop.login1.Session").Store(&props)
+		if gone(err) {
+			continue // ended between the listing and the question, which logind says: no session
 		}
 		if err != nil {
-			// A session that ended between the listing and the question is no session, which logind says;
-			// the bound running out or the connection failing says nothing of the session, and is the answer.
-			if remote(err) {
-				continue
-			}
+			// The bound running out, the connection failing, logind going away or refusing: none says the
+			// session ended, so none is an answer.
 			return nil, err
 		}
-		s.Seat = seat.ID
+		s, err := sessionOf(props)
+		if err != nil {
+			return nil, err
+		}
 		sessions = append(sessions, s)
 	}
 	return sessions, nil
+}
+
+// gone is whether err is logind saying the session is no more: the object gone, or login1's own word.
+func gone(err error) bool {
+	var de dbus.Error
+	return errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.UnknownObject" ||
+		de.Name == "org.freedesktop.login1.NoSuchSession")
+}
+
+// sessionOf is a session from its properties, as GetAll gives them.
+func sessionOf(props map[string]dbus.Variant) (loginSession, error) {
+	var s loginSession
+	var seat struct {
+		ID   string
+		Path dbus.ObjectPath
+	}
+	for _, p := range []struct {
+		name string
+		v    any
+	}{{"Seat", &seat}, {"Active", &s.Active}, {"Class", &s.Class}} {
+		v, ok := props[p.name]
+		if !ok {
+			return loginSession{}, fmt.Errorf("logind gave a session without its %s", p.name)
+		}
+		if err := dbus.Store([]any{v.Value()}, p.v); err != nil {
+			return loginSession{}, fmt.Errorf("logind gave a session's %s as %s: %w", p.name, v.Signature(), err)
+		}
+	}
+	s.Seat = seat.ID
+	return s, nil
 }
 
 // property reads one property of o into v.

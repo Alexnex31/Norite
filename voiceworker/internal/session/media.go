@@ -223,6 +223,7 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	if m.stopped() {
 		return
 	}
+	m.s.devs.begin()
 	if p, err := dev.Play(ctx, m.fill); err != nil {
 		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
 		m.s.devs.set(speakers, deviceOf(err), true)

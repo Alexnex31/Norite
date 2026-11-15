@@ -41,6 +41,10 @@ func TestABusThatNeverAnswersIsGivenUpOn(t *testing.T) {
 	t.Setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path="+sock)
 	login.mu.Lock()
 	defer login.mu.Unlock()
+	// Whatever an earlier test kept is set aside, so the question goes to this bus.
+	kept, drop := login.conn, login.drop
+	login.conn, login.drop = nil, nil
+	defer func() { login.conn, login.drop = kept, drop }()
 	start := time.Now()
 	done := make(chan error, 1)
 	go func() {
@@ -73,5 +77,41 @@ func TestOnlyTheBusesOwnAnswersKeepTheConnection(t *testing.T) {
 		if remote(err) {
 			t.Errorf("%v keeps the connection", err)
 		}
+	}
+}
+
+// Only logind saying so makes a session gone; logind going away or refusing is no answer about it.
+func TestASessionIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
+	for name, want := range map[string]bool{
+		"org.freedesktop.DBus.Error.UnknownObject":  true,
+		"org.freedesktop.login1.NoSuchSession":      true,
+		"org.freedesktop.DBus.Error.ServiceUnknown": false,
+		"org.freedesktop.DBus.Error.NoReply":        false,
+		"org.freedesktop.DBus.Error.AccessDenied":   false,
+	} {
+		if got := gone(dbus.Error{Name: name}); got != want {
+			t.Errorf("%s: gone %v, want %v", name, got, want)
+		}
+	}
+	if gone(errors.New("context deadline exceeded")) {
+		t.Error("the bound running out is a session gone")
+	}
+}
+
+// A session's properties, as GetAll gives them, and one missing a property is an error, not a session.
+func TestASessionIsReadFromItsProperties(t *testing.T) {
+	props := map[string]dbus.Variant{
+		"Seat":   dbus.MakeVariant([]any{"seat0", dbus.ObjectPath("/org/freedesktop/login1/seat/seat0")}),
+		"Active": dbus.MakeVariant(true),
+		"Class":  dbus.MakeVariant("user"),
+		"Name":   dbus.MakeVariant("pass"),
+	}
+	s, err := sessionOf(props)
+	if err != nil || s != (loginSession{Seat: "seat0", Active: true, Class: "user"}) {
+		t.Errorf("%+v, %v", s, err)
+	}
+	delete(props, "Class")
+	if _, err := sessionOf(props); err == nil {
+		t.Error("a session without its class was read")
 	}
 }

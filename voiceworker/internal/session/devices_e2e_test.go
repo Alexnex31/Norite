@@ -106,8 +106,8 @@ func TestACallThatCanNeitherSendNorHearEnds(t *testing.T) {
 			if d := s.devs.current(); !is(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession)(d) {
 				t.Errorf("the devices were left as %+v", d)
 			}
-			if !s.EndedByDevices() {
-				t.Error("the call does not say its devices ended it")
+			if by := s.EndedBy(); by == nil || !is(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession)(*by) {
+				t.Errorf("the call says it was ended by %+v", by)
 			}
 		})
 	}
@@ -274,7 +274,7 @@ func TestAnAnswerAfterTheCallLeftIsNoRefusal(t *testing.T) {
 	if m := s.devs.current().Microphone; m.State != voiceipc.DeviceAsking {
 		t.Errorf("the microphone was reported %+v after the call left", m)
 	}
-	if s.EndedByDevices() {
+	if s.EndedBy() != nil {
 		t.Error("the call says its devices ended it")
 	}
 }

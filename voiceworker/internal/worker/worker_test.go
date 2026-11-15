@@ -32,8 +32,8 @@ type fakeCall struct {
 	stuck bool
 	// slowGather makes Offer wait for its context, as a gather waiting out an unreachable TURN does.
 	slowGather bool
-	// byDevices is what EndedByDevices answers.
-	byDevices bool
+	// by is what EndedBy answers.
+	by *voiceipc.Devices
 }
 
 func newFakeCall() *fakeCall {
@@ -48,10 +48,10 @@ func (c *fakeCall) Offer(ctx context.Context) (string, error) {
 	}
 	return "v=0\r\noffer\r\n", c.offerErr
 }
-func (c *fakeCall) Accept(string) error    { return nil }
-func (c *fakeCall) Ready() <-chan struct{} { return c.ready }
-func (c *fakeCall) Ended() <-chan string   { return c.ended }
-func (c *fakeCall) EndedByDevices() bool   { return c.byDevices }
+func (c *fakeCall) Accept(string) error        { return nil }
+func (c *fakeCall) Ready() <-chan struct{}     { return c.ready }
+func (c *fakeCall) Ended() <-chan string       { return c.ended }
+func (c *fakeCall) EndedBy() *voiceipc.Devices { return c.by }
 func (c *fakeCall) Devices() <-chan voiceipc.Devices {
 	return c.devices
 }
@@ -221,7 +221,7 @@ func TestTheDevicesAreReportedAndSaidBeforeTheEnd(t *testing.T) {
 		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
 	for range 32 {
 		call := newFakeCall()
-		call.byDevices = true
+		call.by = &none
 		d := start(t, call, Options{})
 		d.joined()
 		close(call.ready)
@@ -230,7 +230,7 @@ func TestTheDevicesAreReportedAndSaidBeforeTheEnd(t *testing.T) {
 		call.ended <- "neither the microphone nor the speakers can be used"
 		require.Equal(t, none, devices(d))
 		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
-			Reason: "neither the microphone nor the speakers can be used", Devices: true}, d.state())
+			Reason: "neither the microphone nor the speakers can be used", Devices: &none}, d.state())
 		require.Equal(t, ExitOK, d.exit())
 	}
 }

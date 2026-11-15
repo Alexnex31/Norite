@@ -155,8 +155,37 @@
               "description": "Why a call ended, for a person, or empty."
             },
             "devices": {
-              "type": "boolean",
-              "description": "On an ended call, whether its devices ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone. False on every other state."
+              "description": "On an ended call, the devices that ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone. Null after any other end, and on every other state.",
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/CallDevices"
+                    },
+                    {
+                      "properties": {
+                        "microphone": {
+                          "properties": {
+                            "state": {
+                              "enum": ["refused", "no_device", "no_session", "failed"]
+                            }
+                          }
+                        },
+                        "speakers": {
+                          "properties": {
+                            "state": {
+                              "enum": ["refused", "no_device", "no_session", "failed"]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
             }
           },
           "if": {
@@ -171,7 +200,7 @@
           "then": {
             "properties": {
               "devices": {
-                "const": false
+                "type": "null"
               }
             }
           }
@@ -199,26 +228,35 @@
           "const": 4
         },
         "d": {
-          "type": "object",
-          "required": [
-            "microphone",
-            "speakers"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "microphone": {
-              "$ref": "#/$defs/Device"
-            },
-            "speakers": {
-              "$ref": "#/$defs/Device"
-            }
-          }
+          "$ref": "#/$defs/CallDevices"
         },
         "s": {
           "type": "null"
         },
         "t": {
           "type": "null"
+        }
+      }
+    },
+    "CallDevices": {
+      "type": "object",
+      "description": "The call's microphone and speakers (M32).",
+      "required": [
+        "microphone",
+        "speakers",
+        "decided"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "microphone": {
+          "$ref": "#/$defs/Device"
+        },
+        "speakers": {
+          "$ref": "#/$defs/Device"
+        },
+        "decided": {
+          "type": "boolean",
+          "description": "Whether the call's start has been judged and the call goes on (D4): a join waiting on a failing microphone answers on it. A start judged to end the call says so with the ended state that follows, and its report is not decided."
         }
       }
     },

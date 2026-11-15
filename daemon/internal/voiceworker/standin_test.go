@@ -235,17 +235,23 @@ func standin(mode string) int {
 				send(voiceipc.OpDevices, dev(voiceipc.DeviceFailed, voiceipc.DeviceOpen,
 					"it stopped delivering audio \x1b[31m"))
 			case "devneither":
+				// The ended state names the devices, which the DEVICES before it need not have reached the daemon.
 				none := voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "nobody is logged in"}
-				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: none, Speakers: none})
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-					Reason: "neither the microphone nor the speakers can be used: nobody is logged in", Devices: true})
+					Reason:  "neither the microphone nor the speakers can be used: nobody is logged in",
+					Devices: &voiceipc.Devices{Microphone: none, Speakers: none}})
 				return 0
-			case "devfailedlate": // both failing, the speakers only after their first frame: no end follows
-				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoDevice, voiceipc.DeviceNoDevice, "a stand-in"))
-			case "devclaims": // the devices working, and an end said to be theirs
+			case "devfailedlate": // both failing, the speakers only after their first frame: the call goes on
+				d := dev(voiceipc.DeviceNoDevice, voiceipc.DeviceNoDevice, "a stand-in")
+				send(voiceipc.OpDevices, d)
+				time.Sleep(300 * time.Millisecond)
+				d.Decided = true
+				send(voiceipc.OpDevices, d)
+			case "devclaims": // the devices working, and the status's devices failing as an end comes from elsewhere
 				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
 				time.Sleep(100 * time.Millisecond)
-				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "their end", Devices: true})
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession, "a stand-in"))
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "their end"})
 				return 0
 			case "endsilently": // ended as the microphone is waited for, saying nothing
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded})

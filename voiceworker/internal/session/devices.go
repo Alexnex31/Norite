@@ -17,8 +17,8 @@ import (
 )
 
 // How the call's microphone and speakers are doing, which the worker reports to the daemon as call state
-// (M32, ADR 0034 §1). Until M32 a device that failed was a log line, and on Linux with nobody logged in
-// nothing failed at all: PulseAudio moved the streams to a stand-in and the call sent silence.
+// (M32, ADR 0034 §1). Until M32 a device that failed was a log line, and on Linux with the account not
+// logged in nothing failed at all: PulseAudio moved the streams to a stand-in and the call sent silence.
 //
 // What a device is doing is decided by watching it, not by its open returning:
 //   - it is open from its first frame, and one that opened and delivers nothing for silentFor has failed;
@@ -42,6 +42,10 @@ const (
 	// where its stream goes.
 	deviceTick = 250 * time.Millisecond
 	watchEvery = time.Second
+	// judgeWithin is how long after the devices begin to open the call's start may still be judged: a
+	// device whose first answer comes later, after minutes of silence for one, is a call well under way,
+	// which its devices failing do not end.
+	judgeWithin = 10 * time.Second
 )
 
 // The two directions, as devices indexes them.
@@ -52,21 +56,25 @@ const (
 
 // devices is what the worker reports of the call's devices, and where D4's end of the call is decided.
 type devices struct {
-	end func(reason string)
+	// end ends the call with why, saying the devices did: the report that ended it.
+	end func(reason string, by voiceipc.Devices)
 
 	mu  sync.Mutex
 	now [2]voiceipc.Device
 	// first is whether each device has had its first outcome past opening and asking, and firstFailing
 	// whether that outcome was a failure; decided is whether both have, which is when the call's start is
 	// judged. judged is whether each device's state now is a backend's answer rather than its silence.
+	// goesOn is a start judged without ending the call, which every report from then on says. began is
+	// when the devices began to open, zero before.
 	first, firstFailing, judged [2]bool
-	decided                     bool
+	decided, goesOn             bool
+	began                       time.Time
 	// changes holds the latest report not yet taken, at most one: a report replaces one not yet sent, so
 	// the device's side never waits on the pipe.
 	changes chan voiceipc.Devices
 }
 
-func newDevices(end func(string)) *devices {
+func newDevices(end func(string, voiceipc.Devices)) *devices {
 	d := &devices{end: end, changes: make(chan voiceipc.Devices, 1)}
 	d.now[microphone] = voiceipc.Device{State: voiceipc.DeviceOpening}
 	d.now[speakers] = voiceipc.Device{State: voiceipc.DeviceOpening}
@@ -92,6 +100,9 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 		d.first[which], d.firstFailing[which] = true, voiceipc.Failing(dev.State)
 	}
 	endCall := false
+	if !d.decided && !d.began.IsZero() && time.Since(d.began) > judgeWithin {
+		d.decided, d.goesOn = true, true // past the start: whatever comes, the call goes on
+	}
 	if !d.decided && d.first[microphone] && d.first[speakers] {
 		// Both first outcomes failing, and both failing still on a backend's answer: a device whose first
 		// answer was a stand-in for a moment, Bluetooth's sink coming back for one, may be working by the time
@@ -99,8 +110,9 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 		d.decided = true
 		endCall = d.firstFailing[microphone] && d.firstFailing[speakers] && d.failingNow(microphone) &&
 			d.failingNow(speakers)
+		d.goesOn = !endCall
 	}
-	report := voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers]}
+	report := voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers], Decided: d.goesOn}
 	why := "neither the microphone nor the speakers can be used"
 	if r := d.now[microphone].Reason; r != "" {
 		why += ": " + r
@@ -112,8 +124,18 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 	d.changes <- report
 	d.mu.Unlock()
 	if endCall {
-		d.end(voiceipc.CutReason(why))
+		d.end(voiceipc.CutReason(why), report)
 	}
+}
+
+// begin notes that the devices begin to open now, which the window for judging the start runs from.
+func (d *devices) begin() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.began = time.Now()
+	d.mu.Unlock()
 }
 
 // failingNow is whether which device is failing on its backend's answer, under mu.
@@ -125,7 +147,7 @@ func (d *devices) failingNow(which int) bool {
 func (d *devices) current() voiceipc.Devices {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers]}
+	return voiceipc.Devices{Microphone: d.now[microphone], Speakers: d.now[speakers], Decided: d.goesOn}
 }
 
 // deviceOf is the state a backend's answer puts a device in: open on nil. The reason is the error's, less
@@ -220,10 +242,10 @@ func (s *Session) authorize(ctx context.Context, a audio.Authorizer) {
 	}
 }
 
-// EndedByDevices is whether the call ended because both its devices failed as it started, asked once
-// Ended has delivered: the daemon keeps the devices in its status after that end alone. It is false for a
-// call something else ended first, however its devices were doing.
-func (s *Session) EndedByDevices() bool { return s.byDevices.Load() }
+// EndedBy is the devices that ended the call, both failing as it started, or nil: the daemon keeps them in
+// its status after that end alone. Stored by the end Ended delivers, before it delivers it, so it is nil for
+// a call something else ended first, however its devices were doing.
+func (s *Session) EndedBy() *voiceipc.Devices { return s.endedBy.Load() }
 
 // Devices delivers the devices' state each time it changes, the latest only. A session with no device, a
 // worker built without audio, says nothing: no state would be true of it, and both failing would read as

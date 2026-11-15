@@ -67,7 +67,8 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 		{"connecting", OpState, State{State: StateConnecting}, true},
 		{"ready", OpState, State{State: StateReady}, true},
 		{"ended", OpState, State{State: StateEnded, Reason: strings.Repeat("r", MaxReason)}, true},
-		{"ended by its devices", OpState, State{State: StateEnded, Reason: "r", Devices: true}, true},
+		{"ended by its devices", OpState, State{State: StateEnded, Reason: "r", Devices: &Devices{
+			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoDevice}}}, true},
 		{"devices", OpDevices, Devices{Microphone: Device{State: DeviceRefused},
 			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason)}}, true},
 		{"join", OpJoin, Join{ICEServers: []ICEServer{{URLs: []string{"turn:192.0.2.1:3478?transport=tcp",
@@ -103,7 +104,10 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 		{"an offer past the bound", OpOffer, Offer{SDP: strings.Repeat("a", voiceproto.MaxOffer+1)}},
 		{"an unknown state", OpState, State{State: "dancing"}},
 		{"a reason past the bound", OpState, State{State: StateEnded, Reason: strings.Repeat("r", MaxReason+1)}},
-		{"devices that ended a call still up", OpState, State{State: StateReady, Devices: true}},
+		{"devices that ended a call still up", OpState, State{State: StateReady, Devices: &Devices{
+			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoSession}}}},
+		{"devices that ended a call, working", OpState, State{State: StateEnded, Devices: &Devices{
+			Microphone: Device{State: DeviceOpen}, Speakers: Device{State: DeviceNoSession}}}},
 		{"a microphone in an unknown state", OpDevices, Devices{Microphone: Device{State: "deaf"},
 			Speakers: Device{State: DeviceOpen}}},
 		{"speakers in an unknown state", OpDevices, Devices{Microphone: Device{State: DeviceOpen}}},

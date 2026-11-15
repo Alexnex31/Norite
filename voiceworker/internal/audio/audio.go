@@ -81,9 +81,9 @@ type Authorizer interface {
 }
 
 // Watched is a stream whose backend can tell, off the audio path, whether it still reaches a device. What
-// Capture and Play return may implement it. PulseAudio needs it: with nobody logged in it moves a stream to
-// a stand-in for no device and delivers zeros there, with no error, and moves it back once somebody logs in
-// (M32's spike), so neither the open nor the samples can tell.
+// Capture and Play return may implement it. PulseAudio needs it: with the account not logged in at the
+// machine it moves a stream to a stand-in for no device and delivers zeros there, with no error, and moves
+// it back once the account logs in (M32's spike), so neither the open nor the samples can tell.
 type Watched interface {
 	// Where returns nil while the stream reaches a device, or why it does not. The session asks it once a
 	// second, on a goroutine of its own, which may be while Close runs or after: it must not panic, and must

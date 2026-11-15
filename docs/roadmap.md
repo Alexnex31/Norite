@@ -2261,8 +2261,10 @@ of this section.
   - **A device is `open` at its first frame**, and one that delivers nothing for 2 s is `failed`.
   - **One device failing lets the call go on; both failing at the join end it**, with the microphone's
     outcome as the reason (ADR 0034 §4). Both first answers count, and both must still be failing when the
-    second comes. The worker's ended state says the devices ended the call, and only then does the daemon
-    keep them in its status.
+    second comes, within 10 s of the devices opening. The worker's ended state names the devices that ended
+    the call, which the daemon keeps in its status after that end alone, and each DEVICES report says
+    whether the start has been judged with the call going on, which a join waiting on a failing microphone
+    answers on.
   - **`norite voice join` waits, at most 3 s, for the microphone to be past `opening`**, and on macOS
     prints that the question is being asked without waiting for the answer. The worker asks AVFoundation
     at its start, beside ICE.

@@ -11,9 +11,9 @@ import (
 	"github.com/jfreymuth/pulse/proto"
 )
 
-// Where is whether the stream reaches a device (M32's spike, PipeWire 1.4.2). With nobody logged in at a
-// seat, a PulseAudio server says yes to everything: the default source is the monitor of a stand-in sink,
-// auto_null, recording delivers zeros and playback consumes. The session ending moves an open stream
+// Where is whether the stream reaches a device (M32's spike, PipeWire 1.4.2). With the account not logged
+// in at a seat, a PulseAudio server says yes to everything: the default source is the monitor of a stand-in
+// sink, auto_null, recording delivers zeros and playback consumes. The session ending moves an open stream
 // there, and the next login moves it back, both silently. So what decides is where the stream is now: a
 // microphone on auto_null's monitor, and speakers on auto_null, reach no device. Another sink's monitor is
 // somebody's choice, desktop audio shared or a virtual cable, and is a microphone like any other. The
@@ -93,7 +93,8 @@ func (s *stream) onStandIn() bool {
 
 // standInSource is whether src is the stand-in for no input: auto_null's monitor. In a source's reply the
 // library's MonitorSourceIndex and MonitorSourceName are the protocol's monitor_of_sink and
-// monitor_of_sink_name, the sink it is the monitor of, so one request answers.
+// monitor_of_sink_name, the sink it is the monitor of, so one request answers. Run against PipeWire 1.4.2's
+// pipewire-pulse at M32's manual pass, both ways; not against a PulseAudio server.
 func standInSource(src proto.GetSourceInfoReply) bool {
 	return src.MonitorSourceIndex != proto.Undefined && src.MonitorSourceName == nullSink
 }

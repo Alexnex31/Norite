@@ -1995,12 +1995,13 @@ carries the condition that would reopen it.
 ### The worker asks whatever system bus DBUS_SYSTEM_BUS_ADDRESS names
 - **Raised**: M32, `/security-sweep`
 - **Verdict**: not a vulnerability
-- **Why**: from M32 the worker asks logind whether anybody is logged in, over the system bus
-  (`audio.loginSessions`), only once a stream has gone to PulseAudio's stand-in. The address is the
-  account's own environment, which the daemon passes on (`env.go`). A bus somebody substituted can only
-  move the answer between `no_session` and `no_device`, words in the call state. The whole question is
-  bounded at 1 s: godbus closes the connection when its context ends, from the dial on, so a bus that never
-  answers the authentication is bounded too.
+- **Why**: from M32 the worker asks logind whether its account is logged in at the machine, over the
+  system bus (`audio.loginSessions`), only once a stream has gone to PulseAudio's stand-in. The address is
+  the account's own environment, which the daemon passes on (`env.go`). A bus somebody substituted can only
+  move the answer between `no_session` and `no_device`, words in the call state. Connecting is bounded at
+  1 s, a bus that never answers the authentication included (godbus closes a connection when its context
+  ends, and the bound cancels it), and the questions at 1 s more once connected: 2 s at most, every 5 s at
+  most while a stream stands in. One connection is kept for the worker's life.
 - **Reopens if**: the address, or anything the worker asks of the bus, comes from an instance, a JOIN or
   anything but the account's own environment; or the answer decides more than which words are shown.
 

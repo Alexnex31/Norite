@@ -9,9 +9,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/daemon/ipc"
@@ -90,16 +92,16 @@ func TestAJoinWhoseDevicesBothFailFails(t *testing.T) {
 	require.Equal(t, none, st.Microphone)
 	require.Equal(t, none, st.Speakers)
 
-	// A leave with no call clears them, as the contract says, and the reason they explained.
+	// A leave with no call clears them, as the contract says, and keeps why the join failed.
 	st = v.Leave()
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)
-	require.Equal(t, "left", st.Reason)
+	require.Equal(t, "neither the microphone nor the speakers can be used: nobody is logged in", st.Reason)
 }
 
-// A worker saying its devices ended a call they were not failing in leaves no devices: a worker is a
-// stranger, and the status would describe working devices nothing has open.
-func TestAnEndClaimedByWorkingDevicesKeepsNone(t *testing.T) {
+// A call that ends otherwise, its devices both failing in the status by then, keeps none: only the devices
+// an ended state names are kept.
+func TestAnEndNotTheDevicesKeepsNone(t *testing.T) {
 	fast(t)
 	v := standinVoice(t, "devclaims", answeringServer{})
 	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
@@ -111,8 +113,8 @@ func TestAnEndClaimedByWorkingDevicesKeepsNone(t *testing.T) {
 	require.Nil(t, st.Speakers)
 }
 
-// Both devices failing with no end after them, the speakers having worked as the call started, answer the
-// join within endWithin rather than at micWithin: the worker ends a call on both failing only as it starts.
+// Both devices failing answer the join once the worker says the call's start is judged and it goes on,
+// rather than at micWithin: the worker ends a call on both failing only as it starts.
 func TestAJoinWhoseDevicesFailWithNoEndAnswers(t *testing.T) {
 	fast(t)
 	v := standinVoice(t, "devfailedlate", answeringServer{})
@@ -177,4 +179,32 @@ func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
 	require.Equal(t, "the voice server closed the call", st.Reason)
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)
+}
+
+// A join after one its devices failed publishes the new call joining first: leaving the call there is not
+// is no status of anybody's, the kept devices included.
+func TestAJoinAfterADevicesFailurePublishesNoLeave(t *testing.T) {
+	fast(t)
+	o := standinOptions(t, "devneither", nil)
+	var mu sync.Mutex
+	var seen []ipc.VoiceStatus
+	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: answeringServer{}, Env: o.Env,
+		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.Nop(),
+		Changed: func(st ipc.VoiceStatus) {
+			mu.Lock()
+			seen = append(seen, st)
+			mu.Unlock()
+		}})
+	t.Cleanup(v.Close)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.Error(t, err)
+	require.NotNil(t, v.Status().Microphone)
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+	_, _ = v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, seen)
+	require.Equal(t, ipc.VoiceJoining, seen[0].State, "%+v", seen[0])
 }

@@ -87,9 +87,10 @@ type Session struct {
 	ready   chan struct{}
 	ended   chan string
 	endOnce sync.Once
-	// byDevices is whether the end Ended delivers was the devices', stored before it is delivered.
-	byDevices atomic.Bool
-	readyOne  sync.Once
+	// endedBy is the devices that ended the call, when the end Ended delivers was theirs, stored before it is
+	// delivered.
+	endedBy  atomic.Pointer[voiceipc.Devices]
+	readyOne sync.Once
 
 	track  *webrtc.TrackLocalStaticRTP
 	sender *webrtc.RTPSender
@@ -188,7 +189,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		cc: newController(time.Now())}
 	if opts.Device != nil {
-		s.devs = newDevices(func(why string) { s.endFor(why, true) })
+		s.devs = newDevices(func(why string, by voiceipc.Devices) { s.endFor(why, &by) })
 		if a, ok := opts.Device.(audio.Authorizer); ok {
 			var ctx context.Context
 			ctx, s.stopAuth = context.WithCancel(context.Background())
@@ -360,13 +361,13 @@ func drain(tr *webrtc.TrackRemote) {
 }
 
 // end reports the call over, once, with why.
-func (s *Session) end(reason string) { s.endFor(reason, false) }
+func (s *Session) end(reason string) { s.endFor(reason, nil) }
 
-// endFor reports the call over, once, with why, and whether its devices are why: an end that comes
-// second is no end, so byDevices is kept by the one that delivers.
-func (s *Session) endFor(reason string, byDevices bool) {
+// endFor reports the call over, once, with why, and the devices that are why, or nil: an end that comes
+// second is no end, so endedBy is kept by the one that delivers.
+func (s *Session) endFor(reason string, by *voiceipc.Devices) {
 	s.endOnce.Do(func() {
-		s.byDevices.Store(byDevices)
+		s.endedBy.Store(by)
 		s.ended <- reason
 	})
 }
@@ -526,11 +527,14 @@ func (s *Session) Close() {
 	s.closing = true
 	m, starting := s.media, s.mediaStarting
 	s.mediaMu.Unlock()
-	// The question is given up first: an answer that comes after is no refusal, whatever it says
-	// (authorize), and the microphone, waiting on it, is never opened.
-	if s.stopAuth != nil {
-		s.stopAuth()
-	}
+	// The question is given up once the media has stopped, so a microphone waiting on it sees the stop and
+	// is never opened, whatever the answer: a yes given as the call is left would otherwise open it for a
+	// moment. An answer that comes once it is given up is no refusal, whatever it says (authorize).
+	defer func() {
+		if s.stopAuth != nil {
+			s.stopAuth()
+		}
+	}()
 	if m != nil {
 		m.close()
 	} else if !starting {

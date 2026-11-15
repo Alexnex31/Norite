@@ -112,9 +112,10 @@ type State struct {
 	State string `json:"state"`
 	// Reason says why a call ended, in words for a person, or "".
 	Reason string `json:"reason"`
-	// Devices is, on an ended call, whether its devices ended it, both failing as it started (M32): the
-	// daemon keeps them in its status after that end alone. False on every other state.
-	Devices bool `json:"devices"`
+	// Devices is, on an ended call, the devices that ended it, both failing as it started (M32): the daemon
+	// keeps them in its status after that end alone, from this frame rather than the last DEVICES it read.
+	// Nil after any other end, and on every other state.
+	Devices *Devices `json:"devices"`
 }
 
 // The states a worker reports.
@@ -132,6 +133,10 @@ const (
 type Devices struct {
 	Microphone Device `json:"microphone"`
 	Speakers   Device `json:"speakers"`
+	// Decided is whether the call's start has been judged and the call goes on (D4): a join waiting on a
+	// failing microphone answers on it. A start judged to end the call says so with the ended state, which
+	// follows, and its report is not decided.
+	Decided bool `json:"decided"`
 }
 
 // Device is one direction's outcome.
@@ -214,8 +219,16 @@ func (s State) Check() error {
 	if len(s.Reason) > MaxReason {
 		return fmt.Errorf("a reason of %d bytes, past %d", len(s.Reason), MaxReason)
 	}
-	if s.Devices && s.State != StateEnded {
-		return fmt.Errorf("devices that ended a call that is %s", s.State)
+	if s.Devices != nil {
+		if s.State != StateEnded {
+			return fmt.Errorf("devices that ended a call that is %s", s.State)
+		}
+		if err := s.Devices.Check(); err != nil {
+			return err
+		}
+		if !Failing(s.Devices.Microphone.State) || !Failing(s.Devices.Speakers.State) {
+			return errors.New("devices that ended a call, one of them working")
+		}
 	}
 	return nil
 }
