@@ -32,12 +32,25 @@ type stream struct {
 	once  sync.Once
 	c     *pulse.Client
 	close func()
-	// capture is whether it is the microphone's, for Where.
+	// capture is whether it is the microphone's, for Where. asker is Where's client, and closed says Close
+	// has run, both under askMu (pulse_where_linux.go).
 	capture bool
+	askMu   sync.Mutex
+	asker   *pulse.Client
+	closed  bool
 }
 
+// Close closes the stream, and Where's client once a question in progress has had its answer, each request
+// on it bounded by the library's second.
 func (s *stream) Close() error {
 	s.once.Do(func() {
+		s.askMu.Lock()
+		s.closed = true
+		if s.asker != nil {
+			s.asker.Close()
+			s.asker = nil
+		}
+		s.askMu.Unlock()
 		s.close()
 		s.c.Close()
 	})
