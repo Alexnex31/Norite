@@ -130,7 +130,7 @@ type media struct {
 	// at its first frame, for its watch (devices.go).
 	capHeard, playHeard atomic.Int64
 	capFirst, playFirst chan struct{}
-	stopOnce            sync.Once
+	stopOnce, closeOnce sync.Once
 	// decoding, encoding and dspCall are when the call into the codec or the DSP in progress started, as
 	// nanoseconds past base plus one, or zero. Measured from base so the watchdog runs on the monotonic clock: a wall
 	// clock stepped by NTP or a resume would end a healthy call, or never end a stuck one.
@@ -713,11 +713,15 @@ func (m *media) watch() {
 	}
 }
 
+// halt tells everything the call runs to stop, and waits for nothing: what waits on m.stop sees it at once.
+func (m *media) halt() { m.stopOnce.Do(func() { close(m.stop) }) }
+
 // close stops both directions and closes the codec. A decode that never returns holds mu; the codec is
 // then left to the worker's exit, which follows the call's end.
 func (m *media) close() {
+	m.halt()
 	first := false
-	m.stopOnce.Do(func() { close(m.stop); first = true })
+	m.closeOnce.Do(func() { first = true })
 	if !first {
 		return
 	}

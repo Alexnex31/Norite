@@ -155,7 +155,7 @@
               "description": "Why a call ended, for a person, or empty."
             },
             "devices": {
-              "description": "On an ended call, the devices that ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone. Null after any other end, and on every other state.",
+              "description": "On an ended call, the devices that ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone, and they are not decided, the start having been judged to end the call. Null after any other end, and on every other state.",
               "oneOf": [
                 {
                   "type": "null"
@@ -180,6 +180,9 @@
                               "enum": ["refused", "no_device", "no_session", "failed"]
                             }
                           }
+                        },
+                        "decided": {
+                          "const": false
                         }
                       }
                     }

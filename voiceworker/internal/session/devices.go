@@ -42,9 +42,10 @@ const (
 	// where its stream goes.
 	deviceTick = 250 * time.Millisecond
 	watchEvery = time.Second
-	// judgeWithin is how long after the devices begin to open the call's start may still be judged: a
-	// device whose first answer comes later, after minutes of silence for one, is a call well under way,
-	// which its devices failing do not end.
+	// judgeWithin is how long after a device begins to open its first answer may still judge the call's
+	// start: a device whose first answer comes later, after minutes of silence for one, is a call well under
+	// way, which its devices failing do not end. A microphone waiting on macOS's question has not begun: the
+	// time a person takes to answer is theirs, and a refusal after it is still the start's.
 	judgeWithin = 10 * time.Second
 )
 
@@ -62,13 +63,14 @@ type devices struct {
 	mu  sync.Mutex
 	now [2]voiceipc.Device
 	// first is whether each device has had its first outcome past opening and asking, and firstFailing
-	// whether that outcome was a failure; decided is whether both have, which is when the call's start is
-	// judged. judged is whether each device's state now is a backend's answer rather than its silence.
-	// goesOn is a start judged without ending the call, which every report from then on says. began is
-	// when the devices began to open, zero before.
+	// whether that outcome was a failure; startJudged is whether the call's start has been, either way.
+	// judged is whether each device's state now is a backend's answer rather than its silence. goesOn is a
+	// start judged without ending the call, which every report from then on says as Decided: never
+	// startJudged, which is also true of a start judged to end the call. began is when each device began
+	// to open, zero before and while the microphone is asked about; begun is whether the devices have.
 	first, firstFailing, judged [2]bool
-	decided, goesOn             bool
-	began                       time.Time
+	startJudged, goesOn, begun  bool
+	began                       [2]time.Time
 	// changes holds the latest report not yet taken, at most one: a report replaces one not yet sent, so
 	// the device's side never waits on the pipe.
 	changes chan voiceipc.Devices
@@ -82,9 +84,8 @@ func newDevices(end func(string, voiceipc.Devices)) *devices {
 }
 
 // set reports which device's state, if it changed. judged is whether the state is the backend's answer or
-// the device's first frame, which is what the call's start is judged on, rather than silence. A report is
-// queued before the call is ended for it, so the worker can send the devices that ended the call before it
-// says the call ended.
+// the device's first frame, which is what the call's start is judged on, rather than silence. A start
+// judged to end the call ends it with the report it queued, which the ended state carries.
 func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 	if d == nil {
 		return // a test's media, made without a session's devices
@@ -95,19 +96,26 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 		d.mu.Unlock()
 		return
 	}
+	switch was := d.now[which].State; {
+	case dev.State == voiceipc.DeviceAsking:
+		d.began[which] = time.Time{}
+	case was == voiceipc.DeviceAsking && d.begun:
+		d.began[which] = time.Now() // answered: the device begins to open now, or has its first outcome
+	}
+	// Asked before this outcome counts as a first one, which would otherwise hide its own lateness.
+	if !d.startJudged && (d.late(microphone) || d.late(speakers)) {
+		d.startJudged, d.goesOn = true, true // past the start: whatever comes, the call goes on
+	}
 	d.now[which], d.judged[which] = dev, judged
 	if judged && !d.first[which] && dev.State != voiceipc.DeviceOpening && dev.State != voiceipc.DeviceAsking {
 		d.first[which], d.firstFailing[which] = true, voiceipc.Failing(dev.State)
 	}
 	endCall := false
-	if !d.decided && !d.began.IsZero() && time.Since(d.began) > judgeWithin {
-		d.decided, d.goesOn = true, true // past the start: whatever comes, the call goes on
-	}
-	if !d.decided && d.first[microphone] && d.first[speakers] {
+	if !d.startJudged && d.first[microphone] && d.first[speakers] {
 		// Both first outcomes failing, and both failing still on a backend's answer: a device whose first
 		// answer was a stand-in for a moment, Bluetooth's sink coming back for one, may be working by the time
 		// the other answers, or silent as it comes back, which decides nothing.
-		d.decided = true
+		d.startJudged = true
 		endCall = d.firstFailing[microphone] && d.firstFailing[speakers] && d.failingNow(microphone) &&
 			d.failingNow(speakers)
 		d.goesOn = !endCall
@@ -128,14 +136,25 @@ func (d *devices) set(which int, dev voiceipc.Device, judged bool) {
 	}
 }
 
-// begin notes that the devices begin to open now, which the window for judging the start runs from.
+// begin notes that the devices begin to open now, which each one's window for judging the start runs from:
+// the microphone's from its answer instead, while it is asked about.
 func (d *devices) begin() {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
-	d.began = time.Now()
+	d.begun = true
+	for w := range d.began {
+		if d.now[w].State != voiceipc.DeviceAsking {
+			d.began[w] = time.Now()
+		}
+	}
 	d.mu.Unlock()
+}
+
+// late is whether which device has had no first outcome within judgeWithin of beginning to open, under mu.
+func (d *devices) late(which int) bool {
+	return !d.first[which] && !d.began[which].IsZero() && time.Since(d.began[which]) > judgeWithin
 }
 
 // failingNow is whether which device is failing on its backend's answer, under mu.

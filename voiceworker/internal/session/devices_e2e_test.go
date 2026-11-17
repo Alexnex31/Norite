@@ -6,6 +6,7 @@ package session
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -297,3 +298,50 @@ func TestAGivenUpQuestionIsNoRefusal(t *testing.T) {
 		t.Errorf("the microphone was left %+v", m)
 	}
 }
+
+// Leaving gives the question up before it waits on anything, so it leaves the screen with the call and an
+// answer given while the call closes is no refusal: here the speakers' Close holds the media's close to
+// its bound, and the question is given up all the same.
+func TestTheQuestionIsGivenUpBeforeTheCloseWaits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	given := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	dev := slowSpeakers{Asking: &audiotest.Asking{Device: &audiotest.Device{}, Ask: func(ctx context.Context) error {
+		<-ctx.Done()
+		close(given)
+		return context.Canceled
+	}}, release: release}
+	s := h.join(t, "1", "1", dev, Options{})
+	reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceOpen))
+	go s.Close()
+	select {
+	case <-given:
+	case <-time.After(closeWithin / 2):
+		t.Error("the question was given up only once the close had waited")
+	}
+}
+
+// slowSpeakers is a device whose speakers' Close waits until released, as a driver slow to close does.
+type slowSpeakers struct {
+	*audiotest.Asking
+	release chan struct{}
+}
+
+func (d slowSpeakers) Play(ctx context.Context, fill func([]int16)) (io.Closer, error) {
+	c, err := d.Asking.Play(ctx, fill)
+	if err != nil {
+		return nil, err
+	}
+	return heldClose{c, d.release}, nil
+}
+
+type heldClose struct {
+	io.Closer
+	release chan struct{}
+}
+
+func (c heldClose) Close() error { <-c.release; return c.Closer.Close() }

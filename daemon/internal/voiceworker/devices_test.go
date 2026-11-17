@@ -121,6 +121,8 @@ func TestAJoinWhoseDevicesFailWithNoEndAnswers(t *testing.T) {
 	start := time.Now()
 	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
 	require.NoError(t, err)
+	// The stand-in says the start is judged 300 ms after its first report, which already has both failing.
+	require.GreaterOrEqual(t, time.Since(start), 300*time.Millisecond, "the join answered before it was judged")
 	require.Less(t, time.Since(start), micWithin, "the join waited out its bound")
 	require.Equal(t, ipc.VoiceInCall, st.State)
 	require.Equal(t, ipc.VoiceDeviceNoDevice, st.Microphone.State)

@@ -379,9 +379,9 @@ func (v *Voice) awaitMicrophone(ctx context.Context, c *call, w *Worker) (string
 	defer timer.Stop()
 	for {
 		v.mu.Lock()
-		mic, startDecided := v.status.Microphone, c.decided
+		mic, goesOn := v.status.Microphone, c.decided
 		v.mu.Unlock()
-		if decided(mic, startDecided) {
+		if decided(mic, goesOn) {
 			return "", true
 		}
 		select {
@@ -409,11 +409,11 @@ func (v *Voice) awaitMicrophone(ctx context.Context, c *call, w *Worker) (string
 // decided is whether a join can answer on this microphone: past opening, and, when it failed, with the
 // worker having said the call's start is judged and the call goes on. A start judged to end it is said by
 // the ended state instead, which is the join's failure.
-func decided(mic *ipc.VoiceDevice, startDecided bool) bool {
+func decided(mic *ipc.VoiceDevice, goesOn bool) bool {
 	if mic == nil || mic.State == ipc.VoiceDeviceOpening {
 		return false
 	}
-	return !voiceipc.Failing(mic.State) || startDecided
+	return !voiceipc.Failing(mic.State) || goesOn
 }
 
 // devices makes what the worker says of c's devices the status's, if c is still the call. The reasons are

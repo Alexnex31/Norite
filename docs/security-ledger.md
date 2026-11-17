@@ -2021,11 +2021,15 @@ carries the condition that would reopen it.
 - **Verdict**: not a vulnerability
 - **Why**: `Where` finds the worker's own stream by `application.process.id`, which a PulseAudio client
   sets for itself, so another client could claim the worker's id. Two streams claiming it are not judged
-  (`own` answers -1), which leaves the device reported open while it may be on the stand-in. Only a client
-  of the same server can do it, which is the account's own session, and all it gains is a wrong word in
-  the account's own call state.
+  (`own` answers -1), which leaves the device reported open while it may be on the stand-in. Re-examined
+  within M32, once `Where` came to decide more than a word: its answer is what ends a call whose devices
+  both fail as it starts (D4). So a client claiming the id can keep up a call that should have ended,
+  hearing and sending nothing, or, with a stream of its own on the stand-in where the worker has none
+  yet, end the account's call as it starts. Only a client of the same server can do either, which is the
+  account's own session, and a program running as the account can end the worker's call outright: what it
+  gains is the account's own call, which it already had.
 - **Reopens if**: a server shared between accounts is supported, or `Where`'s answer starts deciding
-  more than what the call state says.
+  something outside the account's own call.
 
 ### `session.Options` has a packet-dropping hook and a relay-only switch
 - **Raised**: M29, `/security-sweep`

@@ -135,7 +135,7 @@ type Devices struct {
 	Speakers   Device `json:"speakers"`
 	// Decided is whether the call's start has been judged and the call goes on (D4): a join waiting on a
 	// failing microphone answers on it. A start judged to end the call says so with the ended state, which
-	// follows, and its report is not decided.
+	// follows, and its report is not decided: Decided is the worker's goesOn, never its startJudged.
 	Decided bool `json:"decided"`
 }
 
@@ -228,6 +228,9 @@ func (s State) Check() error {
 		}
 		if !Failing(s.Devices.Microphone.State) || !Failing(s.Devices.Speakers.State) {
 			return errors.New("devices that ended a call, one of them working")
+		}
+		if s.Devices.Decided {
+			return errors.New("devices that ended a call, saying it goes on")
 		}
 	}
 	return nil

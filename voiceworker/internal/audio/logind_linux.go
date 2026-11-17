@@ -84,21 +84,39 @@ func loginSessionsNow() ([]loginSession, error) {
 }
 
 // remote is whether err is an answer over the bus, which leaves the connection as it was: logind not
-// running is ServiceUnknown, a session gone UnknownObject. Anything else is the connection's or the
-// bound's.
+// running is ServiceUnknown, a session gone UnknownObject, and an answer of a shape this does not read is
+// logind's too. Anything else is the connection's or the bound's.
 func remote(err error) bool {
 	var de dbus.Error
-	return errors.As(err, &de)
+	var mis misanswered
+	return errors.As(err, &de) || errors.As(err, &mis)
+}
+
+// misanswered is an answer that came over the bus and could not be read as what was asked.
+type misanswered struct{ error }
+
+func (m misanswered) Unwrap() error { return m.error }
+
+// call asks o's method and stores its answer in v: the call's own error as it came, the answer's not
+// reading as v as misanswered.
+func call(ctx context.Context, o dbus.BusObject, method string, v any, args ...any) error {
+	c := o.CallWithContext(ctx, method, 0, args...)
+	if c.Err != nil {
+		return c.Err
+	}
+	if err := c.Store(v); err != nil {
+		return misanswered{err}
+	}
+	return nil
 }
 
 // askLogind is loginSessionsNow's questions, on conn.
 func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 	const dest = "org.freedesktop.login1"
 	var user dbus.ObjectPath
-	err := conn.Object(dest, "/org/freedesktop/login1").CallWithContext(ctx,
-		"org.freedesktop.login1.Manager.GetUser", 0, uint32(os.Getuid())).Store(&user) //nolint:gosec // a uid
-	var de dbus.Error
-	if errors.As(err, &de) && de.Name == "org.freedesktop.login1.NoSuchUser" {
+	err := call(ctx, conn.Object(dest, "/org/freedesktop/login1"), "org.freedesktop.login1.Manager.GetUser",
+		&user, uint32(os.Getuid())) //nolint:gosec // a uid
+	if userGone(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -108,15 +126,19 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 		ID   string
 		Path dbus.ObjectPath
 	}
-	if err := property(ctx, conn.Object(dest, user), "org.freedesktop.login1.User", "Sessions", &refs); err != nil {
+	err = property(ctx, conn.Object(dest, user), "org.freedesktop.login1.User", "Sessions", &refs)
+	if userGone(err) {
+		return nil, nil // the account's last session ended, and logind let go of it, between the two
+	}
+	if err != nil {
 		return nil, err
 	}
 	sessions := make([]loginSession, 0, len(refs))
 	for _, r := range refs {
 		// One GetAll a session rather than a Get a property: 2+n round trips under the bound, not 2+3n.
 		var props map[string]dbus.Variant
-		err := conn.Object(dest, r.Path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.GetAll", 0,
-			"org.freedesktop.login1.Session").Store(&props)
+		err := call(ctx, conn.Object(dest, r.Path), "org.freedesktop.DBus.Properties.GetAll", &props,
+			"org.freedesktop.login1.Session")
 		if gone(err) {
 			continue // ended between the listing and the question, which logind says: no session
 		}
@@ -127,7 +149,7 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 		}
 		s, err := sessionOf(props)
 		if err != nil {
-			return nil, err
+			return nil, misanswered{err}
 		}
 		sessions = append(sessions, s)
 	}
@@ -139,6 +161,14 @@ func gone(err error) bool {
 	var de dbus.Error
 	return errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.UnknownObject" ||
 		de.Name == "org.freedesktop.login1.NoSuchSession")
+}
+
+// userGone is whether err is logind saying it has no record of the account: an account with no login and
+// no linger, or one whose last session ended a moment ago. Either has no session.
+func userGone(err error) bool {
+	var de dbus.Error
+	return errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.UnknownObject" ||
+		de.Name == "org.freedesktop.login1.NoSuchUser")
 }
 
 // sessionOf is a session from its properties, as GetAll gives them.
@@ -167,8 +197,11 @@ func sessionOf(props map[string]dbus.Variant) (loginSession, error) {
 // property reads one property of o into v.
 func property(ctx context.Context, o dbus.BusObject, iface, name string, v any) error {
 	var variant dbus.Variant
-	if err := o.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, iface, name).Store(&variant); err != nil {
+	if err := call(ctx, o, "org.freedesktop.DBus.Properties.Get", &variant, iface, name); err != nil {
 		return err
 	}
-	return dbus.Store([]any{variant.Value()}, v)
+	if err := dbus.Store([]any{variant.Value()}, v); err != nil {
+		return misanswered{err}
+	}
+	return nil
 }

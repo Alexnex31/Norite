@@ -424,8 +424,8 @@ func (w *Worker) read(hello chan<- error) {
 		if unheard {
 			continue
 		}
-		// Into the buffer first: a frame written just before the worker exited, its devices before its end
-		// for one, would otherwise be lost to the exit whenever both were ready.
+		// Into the buffer first: a frame written just before the worker exited, its devices as the microphone
+		// is answered for one, would otherwise be lost to the exit whenever both were ready.
 		select {
 		case w.events <- ev:
 			continue

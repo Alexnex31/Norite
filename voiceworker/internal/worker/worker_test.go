@@ -192,8 +192,8 @@ func TestACallThatEndsByItselfSaysWhyAndExits(t *testing.T) {
 }
 
 // What the devices are doing reaches the daemon each time it changes, and the devices that ended a call
-// are said before its end, so the daemon has why (M32).
-func TestTheDevicesAreReportedAndSaidBeforeTheEnd(t *testing.T) {
+// are said in its end, so the daemon has why (M32).
+func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
 	devices := func(d *daemon) voiceipc.Devices {
 		t.Helper()
 		f := d.next()
@@ -215,24 +215,18 @@ func TestTheDevicesAreReportedAndSaidBeforeTheEnd(t *testing.T) {
 	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, d.state())
 	require.Equal(t, ExitOK, d.exit())
 
-	// Both queued at once, as a call ended by its devices queues them: the loop takes either first, at
-	// random, so each way is run many times over.
 	none := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceNoSession},
 		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
-	for range 32 {
-		call := newFakeCall()
-		call.by = &none
-		d := start(t, call, Options{})
-		d.joined()
-		close(call.ready)
-		require.Equal(t, voiceipc.StateReady, d.state().State)
-		call.devices <- none
-		call.ended <- "neither the microphone nor the speakers can be used"
-		require.Equal(t, none, devices(d))
-		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
-			Reason: "neither the microphone nor the speakers can be used", Devices: &none}, d.state())
-		require.Equal(t, ExitOK, d.exit())
-	}
+	call = newFakeCall()
+	call.by = &none
+	d = start(t, call, Options{})
+	d.joined()
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+	call.ended <- "neither the microphone nor the speakers can be used"
+	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
+		Reason: "neither the microphone nor the speakers can be used", Devices: &none}, d.state())
+	require.Equal(t, ExitOK, d.exit())
 }
 
 func TestACallThatNeverConnectsEnds(t *testing.T) {

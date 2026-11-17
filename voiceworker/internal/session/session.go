@@ -527,14 +527,16 @@ func (s *Session) Close() {
 	s.closing = true
 	m, starting := s.media, s.mediaStarting
 	s.mediaMu.Unlock()
-	// The question is given up once the media has stopped, so a microphone waiting on it sees the stop and
-	// is never opened, whatever the answer: a yes given as the call is left would otherwise open it for a
-	// moment. An answer that comes once it is given up is no refusal, whatever it says (authorize).
-	defer func() {
-		if s.stopAuth != nil {
-			s.stopAuth()
-		}
-	}()
+	// The question is given up once the media is told to stop, and before anything waits, so a microphone
+	// waiting on it sees the stop and is never opened, whatever the answer: a yes given as the call is left
+	// would otherwise open it for a moment. An answer that comes once it is given up is no refusal, whatever
+	// it says (authorize), and the question leaves the screen with the call.
+	if m != nil {
+		m.halt()
+	}
+	if s.stopAuth != nil {
+		s.stopAuth()
+	}
 	if m != nil {
 		m.close()
 	} else if !starting {

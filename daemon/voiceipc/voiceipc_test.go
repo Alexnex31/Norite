@@ -108,6 +108,8 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoSession}}}},
 		{"devices that ended a call, working", OpState, State{State: StateEnded, Devices: &Devices{
 			Microphone: Device{State: DeviceOpen}, Speakers: Device{State: DeviceNoSession}}}},
+		{"devices that ended a call, saying it goes on", OpState, State{State: StateEnded, Devices: &Devices{
+			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoSession}, Decided: true}}},
 		{"a microphone in an unknown state", OpDevices, Devices{Microphone: Device{State: "deaf"},
 			Speakers: Device{State: DeviceOpen}}},
 		{"speakers in an unknown state", OpDevices, Devices{Microphone: Device{State: DeviceOpen}}},

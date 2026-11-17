@@ -76,7 +76,6 @@ func TestOnlyTheEndDeliveredSaysWhoseItWas(t *testing.T) {
 func TestTheReportsSayWhenTheStartIsJudged(t *testing.T) {
 	none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "a stand-in"}
 	open := voiceipc.Device{State: voiceipc.DeviceOpen}
-	last := func(d *devices) voiceipc.Devices { return <-d.changes }
 
 	var by []voiceipc.Devices
 	d := newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
@@ -98,10 +97,72 @@ func TestTheReportsSayWhenTheStartIsJudged(t *testing.T) {
 
 	by = nil
 	d = newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
-	d.began = time.Now().Add(-judgeWithin - time.Second)
+	d.begin()
+	d.began[speakers] = time.Now().Add(-judgeWithin - time.Second)
 	d.set(microphone, none, true)
 	d.set(speakers, none, true)
 	if r := last(d); !r.Decided || len(by) != 0 {
 		t.Errorf("a start past its window reported %+v and ended by %+v", r, by)
 	}
 }
+
+// The time a person takes to answer macOS's question is not the start's: a refusal after it, the speakers
+// having failed, ends the call, and a microphone allowed late has its window from the answer.
+func TestTheQuestionDoesNotRunTheWindow(t *testing.T) {
+	none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "a stand-in"}
+	asking := voiceipc.Device{State: voiceipc.DeviceAsking}
+	ago := time.Now().Add(-judgeWithin - time.Second)
+	for _, c := range []struct {
+		name   string
+		answer func(d *devices)
+	}{
+		{"refused", func(d *devices) {
+			d.set(microphone, voiceipc.Device{State: voiceipc.DeviceRefused, Reason: "no"}, true)
+		}},
+		{"allowed, then failing to open", func(d *devices) {
+			d.set(microphone, voiceipc.Device{State: voiceipc.DeviceOpening}, true)
+			d.set(microphone, none, true)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var by []voiceipc.Devices
+			d := newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
+			d.set(microphone, asking, true)
+			d.begin()
+			d.set(speakers, none, true)
+			for w := range d.began { // the devices began long ago, while the question was on the screen
+				if !d.began[w].IsZero() {
+					d.began[w] = ago
+				}
+			}
+			// The speakers change while it is: the microphone has not begun, so is not late.
+			d.set(speakers, voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "logged out"}, true)
+			c.answer(d)
+			if len(by) != 1 {
+				t.Errorf("a start answered after the question ended by %+v, reporting %+v", by, last(d))
+			}
+		})
+	}
+}
+
+// A microphone allowed after the question has its window from the answer: silent past it, the call goes on.
+func TestAMicrophoneAllowedLateHasItsOwnWindow(t *testing.T) {
+	none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "a stand-in"}
+	var by []voiceipc.Devices
+	d := newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
+	d.set(microphone, voiceipc.Device{State: voiceipc.DeviceAsking}, true)
+	d.begin()
+	d.set(speakers, none, true)
+	d.set(microphone, voiceipc.Device{State: voiceipc.DeviceOpening}, true)
+	if d.began[microphone].IsZero() {
+		t.Fatal("the microphone allowed has not begun to open")
+	}
+	d.began[microphone] = time.Now().Add(-judgeWithin - time.Second) // and has been silent since
+	d.set(speakers, voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "logged out"}, true)
+	d.set(microphone, none, true)
+	if r := last(d); !r.Decided || len(by) != 0 {
+		t.Errorf("a microphone silent past its window reported %+v and ended by %+v", r, by)
+	}
+}
+
+func last(d *devices) voiceipc.Devices { return <-d.changes }

@@ -67,11 +67,14 @@ func TestABusThatNeverAnswersIsGivenUpOn(t *testing.T) {
 	}
 }
 
-// An answer over the bus, logind not running or a session gone, leaves the connection kept; anything else
-// is the connection's, and it is made again.
+// An answer over the bus, logind not running, a session gone or an answer of a shape not read, leaves the
+// connection kept; anything else is the connection's, and it is made again.
 func TestOnlyTheBusesOwnAnswersKeepTheConnection(t *testing.T) {
 	if !remote(dbus.Error{Name: "org.freedesktop.DBus.Error.ServiceUnknown"}) {
 		t.Error("logind not running drops the connection")
+	}
+	if _, err := sessionOf(nil); !remote(misanswered{err}) {
+		t.Error("a session logind gave without its properties drops the connection")
 	}
 	for _, err := range []error{errors.New("connection reset"), errors.New("context deadline exceeded")} {
 		if remote(err) {
@@ -95,6 +98,24 @@ func TestASessionIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
 	}
 	if gone(errors.New("context deadline exceeded")) {
 		t.Error("the bound running out is a session gone")
+	}
+}
+
+// The account is not logged in when logind has no record of it, asked for it or for its sessions a moment
+// after it let go of it; logind going away is no answer about it.
+func TestAnAccountIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
+	for name, want := range map[string]bool{
+		"org.freedesktop.DBus.Error.UnknownObject":  true,
+		"org.freedesktop.login1.NoSuchUser":         true,
+		"org.freedesktop.DBus.Error.ServiceUnknown": false,
+		"org.freedesktop.DBus.Error.NoReply":        false,
+	} {
+		if got := userGone(dbus.Error{Name: name}); got != want {
+			t.Errorf("%s: gone %v, want %v", name, got, want)
+		}
+	}
+	if userGone(nil) || userGone(errors.New("context deadline exceeded")) {
+		t.Error("no error, or the bound running out, is an account gone")
 	}
 }
 
