@@ -2262,9 +2262,9 @@ of this section.
   - **One device failing lets the call go on; both failing at the join end it**, with the microphone's
     outcome as the reason (ADR 0034 §4). Both first answers count, and both must still be failing when the
     second comes. A device that has opened has 10 s from its open returning to give its first answer, past
-    which the call goes on whatever comes; an open that fails, and macOS's answer, are first answers
-    whenever they come, so a slow driver or a person slow to answer is never the start's. The worker's ended
-    state names the devices that ended
+    which the call goes on whatever comes; an open that fails, and a refusal of macOS's question, are first
+    answers whenever they come, and a microphone allowed has its window from its own open, so a slow driver
+    or a person slow to answer is never the start's. The worker's ended state names the devices that ended
     the call, which the daemon keeps in its status after that end alone, and each DEVICES report says
     whether the start has been judged with the call going on, which a join waiting on a failing microphone
     answers on.

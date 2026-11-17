@@ -114,6 +114,7 @@ func TestAnAccountIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
 		{noUser, "org.freedesktop.DBus.Error.UnknownObject", false, "the manager"},
 		{noUser, "org.freedesktop.DBus.Error.ServiceUnknown", false, "the manager"},
 		{userGone, "org.freedesktop.DBus.Error.UnknownObject", true, "the account"},
+		{userGone, "org.freedesktop.login1.NoSuchUser", false, "the account"},
 		{userGone, "org.freedesktop.DBus.Error.NoReply", false, "the account"},
 	} {
 		if got := c.ask(dbus.Error{Name: c.name}); got != c.want {

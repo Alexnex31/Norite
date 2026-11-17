@@ -198,9 +198,7 @@ func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
 		t.Helper()
 		f := d.next()
 		require.Equal(t, voiceipc.OpDevices, f.Op)
-		var got voiceipc.Devices
-		require.NoError(t, ipc.Decode(f, &got))
-		return got
+		return devicesOf(t, f)
 	}
 	call := newFakeCall()
 	d := start(t, call, Options{})
@@ -216,22 +214,36 @@ func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
 	require.Equal(t, ExitOK, d.exit())
 
 	// A call its devices end queues their report as it ends: the loop takes either first, at random, so it
-	// may say them or not, but the end comes once, carries them, and is the last frame. Run many times over.
+	// may say them or not, but the end comes once, carries them, and is the last frame. Both are queued
+	// while the loop is still writing READY, held there by the pipe until the test reads the rest of it, so
+	// both are ready when it next selects: queued after, the report was always taken alone first. Run until
+	// each order has been seen.
 	none := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceNoSession},
 		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
-	for range 32 {
+	var said, unsaid int
+	for range 64 {
 		call := newFakeCall()
 		call.by = &none
 		d := start(t, call, Options{})
 		d.joined()
 		close(call.ready)
-		require.Equal(t, voiceipc.StateReady, d.state().State)
+		var first [1]byte
+		_, err := io.ReadFull(d.fromW, first[:]) // the loop is inside READY's write until the rest is read
+		require.NoError(t, err)
 		call.devices <- none
 		call.ended <- "neither the microphone nor the speakers can be used"
-		f := d.next()
+		f, err := voiceipc.Read(io.MultiReader(bytes.NewReader(first[:]), d.fromW), voiceipc.MaxWorkerFrame)
+		require.NoError(t, err)
+		var ready voiceipc.State
+		require.NoError(t, ipc.Decode(f, &ready))
+		require.Equal(t, voiceipc.StateReady, ready.State)
+		f = d.next()
 		if f.Op == voiceipc.OpDevices {
+			said++
 			require.Equal(t, none, devicesOf(t, f))
 			f = d.next()
+		} else {
+			unsaid++
 		}
 		require.Equal(t, voiceipc.OpState, f.Op)
 		var s voiceipc.State
@@ -239,9 +251,11 @@ func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
 		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
 			Reason: "neither the microphone nor the speakers can be used", Devices: &none}, s)
 		require.Equal(t, ExitOK, d.exit())
-		_, err := voiceipc.Read(d.fromW, voiceipc.MaxWorkerFrame)
+		_, err = voiceipc.Read(d.fromW, voiceipc.MaxWorkerFrame)
 		require.ErrorIs(t, err, io.EOF, "a frame after the end")
 	}
+	require.Positive(t, said, "the report was never said before the end")
+	require.Positive(t, unsaid, "the end never came first")
 }
 
 func devicesOf(t *testing.T, f gatewayproto.Frame) voiceipc.Devices {
