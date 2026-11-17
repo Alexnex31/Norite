@@ -7,6 +7,8 @@ dedicated throwaway spike" is answered here. The answers choose the shapes of M2
 permission) and M35 (push-to-talk), and `architecture.md` §6 and §17 now point here. **Amended by
 [ADR 0036](0036-opus-in-webassembly.md)** (M29) in one consequence: capture is pure Go on each OS, so the
 worker cross-compiles like every other binary, and the release problem named below does not arise.
+**§1 was built at M32**, on Linux and Windows walked in VMs and on macOS written against Apple's
+documentation; what it found is in M32's roadmap entry and the Consequences below.
 
 Each answer says how it was found: **run** (a program was run and its output read) or **read** (from a
 library's source, or a vendor's documentation or forum). The throwaway programs are not in the repository,
@@ -243,6 +245,19 @@ id is chosen at M35.
     one, every new daemon build is asked again (run), so "prompts exactly once" holds per build and not
     per install. A Developer ID costs a paid Apple account and changes the release pipeline. Since M24
     does not install updates on macOS, that cost buys a prompt per manual upgrade, not per automatic one.
+    **M32 did not take it** (the author's decision): it is more than a signature, needing the hardened
+    runtime, the audio-input entitlement, a JIT entitlement for wazero, and an `Info.plist` Go's linker does
+    not embed, all listed in M32's roadmap entry for whichever entry takes it.
+  - **As built (M32):**
+    - The worker reports the microphone and the speakers alike, and the speakers matter as much: on Linux
+      with the account not logged in both fail, and a call that can neither send nor hear would be joined
+      and silent. One failing leaves the call up; both failing as it starts end it, the microphone's
+      outcome in the reason. A session ending mid-call ends nothing.
+    - On Linux nothing refuses: with no session PulseAudio says yes and moves the streams to `auto_null`,
+      which records zeros. The worker asks where its own stream went, once a second, and logind why.
+    - A failure that is policy rather than a setting, macOS's restricted, is worded as policy, and an
+      inactive session of the account, a user switched away, is no device rather than no session, since
+      logging in again is not what brings the devices back.
 - **M35** builds §2–§5 and drops `golang.design/x/hotkey`. Its done-when gains the portal path on at
   least one Wayland desktop and the X11 path, and on macOS the Carbon path from the installed LaunchAgent,
   with no permission granted.
@@ -252,7 +267,8 @@ id is chosen at M35.
   settle: kitty protocol release events where the terminal has them, a toggle where it does not. The
   global hotkey is the push-to-talk path.
 - **Three new daemon dependencies at M35**, all permissive and all fine under rule 22's client allow-list:
-  `godbus/dbus` (BSD-2-Clause), `jezek/xgb` (BSD-3-Clause) and `ebitengine/purego` (Apache-2.0).
+  `godbus/dbus` (BSD-2-Clause), `jezek/xgb` (BSD-3-Clause) and `ebitengine/purego` (Apache-2.0). The
+  worker took `godbus/dbus` at M32, for logind; the daemon's inventory listed it already.
 - **A Windows service could never hold the key**, a fourth reason after M3's for the daemon staying a
   logon task.
 - **macOS already names the daemon.** Installing its LaunchAgent raises a "can run in the background"

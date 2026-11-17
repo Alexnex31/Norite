@@ -2428,6 +2428,23 @@ around whoever is transmitting) plus two **separate** actions (each its own keyb
   - macOS charges the worker's use to the daemon, its parent, so the prompt reads "norite-daemon" and comes
     again after each new daemon build while releases are ad-hoc signed.
   - The worker reports the outcome and the daemon carries it as call state; the clients explain it.
+- **The call's devices are call state** (M32). The worker reports the microphone and the speakers on each
+  change, in its own frame (`OpDevices`): opening, open, asking, refused, no device, no session or failed,
+  with a reason. The daemon keeps them in `VoiceStatus`, and the client words each for its OS, naming the
+  setting that gives the microphone back.
+  - **A device is open at its first frame**, and one silent for 2 s has failed, open again if it resumes.
+    Silence is reported and never ends a call: a Bluetooth headset changing profile is silent for that long.
+  - **One device failing leaves the call up; both failing as it starts end it**, on what the backends
+    answered, the microphone's outcome in the reason. Each device's first answer counts within 10 s of its
+    open returning, and an open that fails, or macOS's refusal, whenever it comes. After the start nothing
+    the devices do ends the call: a session ending mid-call moves both streams to the stand-in, and the next
+    login moves them back.
+  - **On Linux nothing refuses.** With the account not logged in at a seat, PulseAudio says yes and moves
+    the streams to `auto_null`, which records zeros. The worker asks, once a second while a call lasts,
+    where its own stream went, and on the stand-in asks logind over the system bus why: no session, or no
+    device.
+  - **A join answers once the microphone is past opening**, at most 3 s after the call is up, and on macOS
+    while the question is on the screen rather than after the person answers it.
 - **Voice-activity detection is the default input mode.** Push-to-talk is registered by the daemon (never
   an attach client, so several attached clients cannot double-register), in pure Go per OS:
   - `RegisterHotKey` on Windows;
@@ -3085,11 +3102,14 @@ during implementation, and must be documented plainly wherever the relevant subs
   [ADR 0034](adr/0034-mic-permission-and-global-hotkey.md)). This bullet said until M25 that the handoff
   from a foreground client was unverified. It is withdrawn: the worker opens the device itself.
   - On macOS the grant is the daemon's, since TCC charges a child to its parent. An ad-hoc signed daemon is
-    asked again after every new build. A Developer ID would end that, and is the author's decision, carried
-    by M32.
+    asked again after every new build. A Developer ID would end that, and is the author's decision: M32 did
+    not take it, and its roadmap entry lists what taking it needs (the hardened runtime and its
+    entitlements, wazero's JIT among them, and an embedded `Info.plist`).
   - On Windows the worker's exe is the one named. A per-app prompt Microsoft is testing would name it too.
   - On Linux nothing is asked, and nothing can capture before a seat session exists, which a daemon started
-    by `--linger` has not got.
+    by `--linger` has not got. Since M32 the worker says so, and a call joined that way ends at once; it is
+    told apart from a machine with no card by where PulseAudio put the stream, a sink named `auto_null`,
+    which a server that names a real sink so would mislead.
   - The global hotkey needs no permission on any OS by the routes chosen. It needs an interactive session
     on Windows (a service cannot hold one) and a session on Linux.
 - **Self-hosting simplicity and voice-in-v1 are in real, unreconciled tension.** Postgres-only self-hosting
