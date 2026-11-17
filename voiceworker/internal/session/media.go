@@ -223,11 +223,11 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 	if m.stopped() {
 		return
 	}
-	m.s.devs.begin()
 	if p, err := dev.Play(ctx, m.fill); err != nil {
 		m.s.logf("the speakers could not be opened, so nothing will be heard: %v", err)
 		m.s.devs.set(speakers, deviceOf(err), true)
 	} else if keep(p, &m.playback) {
+		m.s.devs.open(speakers)
 		go m.watchDevice(speakers, p, &m.playHeard, m.playFirst)
 	}
 	if m.s.authDone != nil {
@@ -247,6 +247,7 @@ func (m *media) openDevices(ctx context.Context, dev audio.Device) {
 		m.s.logf("the microphone could not be opened, so nothing will be sent: %v", err)
 		m.s.devs.set(microphone, deviceOf(err), true)
 	} else if keep(c, &m.capture) {
+		m.s.devs.open(microphone)
 		go m.watchDevice(microphone, c, &m.capHeard, m.capFirst)
 	}
 }

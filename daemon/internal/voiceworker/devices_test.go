@@ -113,6 +113,21 @@ func TestAnEndNotTheDevicesKeepsNone(t *testing.T) {
 	require.Nil(t, st.Speakers)
 }
 
+// A join that fails for the daemon's own reason keeps no devices, even when the worker it left was ending
+// the call on its devices as it did: the status's reason is the daemon's, which they would contradict.
+func TestAJoinThatTimesOutKeepsNoDevices(t *testing.T) {
+	fast(t)
+	r := readyWithin
+	readyWithin = 300 * time.Millisecond
+	t.Cleanup(func() { readyWithin = r })
+	v := standinVoice(t, "endsasleft", answeringServer{})
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.ErrorContains(t, err, "did not connect within")
+	require.Equal(t, ipc.VoiceIdle, st.State)
+	require.Nil(t, st.Microphone)
+	require.Nil(t, st.Speakers)
+}
+
 // Both devices failing answer the join once the worker says the call's start is judged and it goes on,
 // rather than at micWithin: the worker ends a call on both failing only as it starts.
 func TestAJoinWhoseDevicesFailWithNoEndAnswers(t *testing.T) {

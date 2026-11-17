@@ -215,18 +215,40 @@ func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
 	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, d.state())
 	require.Equal(t, ExitOK, d.exit())
 
+	// A call its devices end queues their report as it ends: the loop takes either first, at random, so it
+	// may say them or not, but the end comes once, carries them, and is the last frame. Run many times over.
 	none := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceNoSession},
 		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
-	call = newFakeCall()
-	call.by = &none
-	d = start(t, call, Options{})
-	d.joined()
-	close(call.ready)
-	require.Equal(t, voiceipc.StateReady, d.state().State)
-	call.ended <- "neither the microphone nor the speakers can be used"
-	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
-		Reason: "neither the microphone nor the speakers can be used", Devices: &none}, d.state())
-	require.Equal(t, ExitOK, d.exit())
+	for range 32 {
+		call := newFakeCall()
+		call.by = &none
+		d := start(t, call, Options{})
+		d.joined()
+		close(call.ready)
+		require.Equal(t, voiceipc.StateReady, d.state().State)
+		call.devices <- none
+		call.ended <- "neither the microphone nor the speakers can be used"
+		f := d.next()
+		if f.Op == voiceipc.OpDevices {
+			require.Equal(t, none, devicesOf(t, f))
+			f = d.next()
+		}
+		require.Equal(t, voiceipc.OpState, f.Op)
+		var s voiceipc.State
+		require.NoError(t, ipc.Decode(f, &s))
+		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
+			Reason: "neither the microphone nor the speakers can be used", Devices: &none}, s)
+		require.Equal(t, ExitOK, d.exit())
+		_, err := voiceipc.Read(d.fromW, voiceipc.MaxWorkerFrame)
+		require.ErrorIs(t, err, io.EOF, "a frame after the end")
+	}
+}
+
+func devicesOf(t *testing.T, f gatewayproto.Frame) voiceipc.Devices {
+	t.Helper()
+	var got voiceipc.Devices
+	require.NoError(t, ipc.Decode(f, &got))
+	return got
 }
 
 func TestACallThatNeverConnectsEnds(t *testing.T) {

@@ -112,6 +112,9 @@ type Session struct {
 	authDone chan struct{}
 	authErr  error
 	stopAuth context.CancelFunc
+	// halted, a test's, runs in Close between stopping the media and giving the question up, where an
+	// answer would race the two.
+	halted func()
 
 	mediaMu       sync.Mutex
 	media         *media
@@ -530,9 +533,14 @@ func (s *Session) Close() {
 	// The question is given up once the media is told to stop, and before anything waits, so a microphone
 	// waiting on it sees the stop and is never opened, whatever the answer: a yes given as the call is left
 	// would otherwise open it for a moment. An answer that comes once it is given up is no refusal, whatever
-	// it says (authorize), and the question leaves the screen with the call.
+	// it says (authorize). Giving it up stops the worker waiting and nothing else: AVFoundation's request
+	// has no cancel, so macOS's prompt stays on the screen until the person answers it or the worker exits,
+	// which nobody has watched on a Mac.
 	if m != nil {
 		m.halt()
+	}
+	if s.halted != nil {
+		s.halted()
 	}
 	if s.stopAuth != nil {
 		s.stopAuth()

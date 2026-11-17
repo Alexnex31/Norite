@@ -37,8 +37,9 @@ type Call interface {
 	// delivered.
 	EndedBy() *voiceipc.Devices
 	// Devices delivers the microphone's and the speakers' state each time either changes (M32), the latest
-	// only, or is nil for a call with no devices. One still queued when the call ends is not sent: the
-	// ended state says which devices ended it, and the daemon keeps nothing else of them past an end.
+	// only, or is nil for a call with no devices. One queued as the call ends may be sent before the end or
+	// not at all: the ended state says which devices ended it, and the daemon keeps nothing else of them
+	// past an end.
 	Devices() <-chan voiceipc.Devices
 	// Close ends the call. It may block, which is why the worker bounds how long it waits for it.
 	Close()

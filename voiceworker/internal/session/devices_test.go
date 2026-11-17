@@ -4,6 +4,10 @@
 package session
 
 import (
+	"context"
+	"errors"
+	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,8 +101,8 @@ func TestTheReportsSayWhenTheStartIsJudged(t *testing.T) {
 
 	by = nil
 	d = newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
-	d.begin()
-	d.began[speakers] = time.Now().Add(-judgeWithin - time.Second)
+	d.open(speakers)
+	d.opened[speakers] = time.Now().Add(-judgeWithin - time.Second)
 	d.set(microphone, none, true)
 	d.set(speakers, none, true)
 	if r := last(d); !r.Decided || len(by) != 0 {
@@ -106,12 +110,10 @@ func TestTheReportsSayWhenTheStartIsJudged(t *testing.T) {
 	}
 }
 
-// The time a person takes to answer macOS's question is not the start's: a refusal after it, the speakers
-// having failed, ends the call, and a microphone allowed late has its window from the answer.
-func TestTheQuestionDoesNotRunTheWindow(t *testing.T) {
+// A device that has not opened is never late: its open failing, or macOS's question being refused, is its
+// first answer whenever it comes, however long the speakers have been failing.
+func TestADeviceNotOpenedIsNeverLate(t *testing.T) {
 	none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "a stand-in"}
-	asking := voiceipc.Device{State: voiceipc.DeviceAsking}
-	ago := time.Now().Add(-judgeWithin - time.Second)
 	for _, c := range []struct {
 		name   string
 		answer func(d *devices)
@@ -127,37 +129,27 @@ func TestTheQuestionDoesNotRunTheWindow(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			var by []voiceipc.Devices
 			d := newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
-			d.set(microphone, asking, true)
-			d.begin()
+			d.set(microphone, voiceipc.Device{State: voiceipc.DeviceAsking}, true)
+			d.open(speakers)
 			d.set(speakers, none, true)
-			for w := range d.began { // the devices began long ago, while the question was on the screen
-				if !d.began[w].IsZero() {
-					d.began[w] = ago
-				}
-			}
-			// The speakers change while it is: the microphone has not begun, so is not late.
+			d.opened[speakers] = time.Now().Add(-judgeWithin - time.Second) // long ago, the question still up
 			d.set(speakers, voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "logged out"}, true)
 			c.answer(d)
 			if len(by) != 1 {
-				t.Errorf("a start answered after the question ended by %+v, reporting %+v", by, last(d))
+				t.Errorf("a start answered late ended by %+v, reporting %+v", by, last(d))
 			}
 		})
 	}
 }
 
-// A microphone allowed after the question has its window from the answer: silent past it, the call goes on.
-func TestAMicrophoneAllowedLateHasItsOwnWindow(t *testing.T) {
+// A microphone opened and silent past its window lets the call go on, whatever comes after.
+func TestASilentMicrophonePastItsWindowEndsNoCall(t *testing.T) {
 	none := voiceipc.Device{State: voiceipc.DeviceNoDevice, Reason: "a stand-in"}
 	var by []voiceipc.Devices
 	d := newDevices(func(_ string, r voiceipc.Devices) { by = append(by, r) })
-	d.set(microphone, voiceipc.Device{State: voiceipc.DeviceAsking}, true)
-	d.begin()
 	d.set(speakers, none, true)
-	d.set(microphone, voiceipc.Device{State: voiceipc.DeviceOpening}, true)
-	if d.began[microphone].IsZero() {
-		t.Fatal("the microphone allowed has not begun to open")
-	}
-	d.began[microphone] = time.Now().Add(-judgeWithin - time.Second) // and has been silent since
+	d.open(microphone)
+	d.opened[microphone] = time.Now().Add(-judgeWithin - time.Second) // and silent since
 	d.set(speakers, voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "logged out"}, true)
 	d.set(microphone, none, true)
 	if r := last(d); !r.Decided || len(by) != 0 {
@@ -166,3 +158,62 @@ func TestAMicrophoneAllowedLateHasItsOwnWindow(t *testing.T) {
 }
 
 func last(d *devices) voiceipc.Devices { return <-d.changes }
+
+// Each device's window runs from its own open returning it: neither the speakers' open, slow to fail or to
+// succeed, nor the wait for macOS's answer, counts against either.
+func TestEachWindowRunsFromItsOwnOpen(t *testing.T) {
+	for _, playFails := range []bool{false, true} {
+		m := &media{s: &Session{cc: testController(), ended: make(chan string, 1),
+			opts: Options{Log: io.Discard}, devs: newDevices(func(string, voiceipc.Devices) {})},
+			stop: make(chan struct{}), base: time.Now(),
+			codec: keepOpen{}}
+		d := &slowOpen{playFails: playFails}
+		m.openDevices(context.Background(), d)
+		m.close()
+		m.s.devs.mu.Lock()
+		spk, mic := m.s.devs.opened[speakers], m.s.devs.opened[microphone]
+		m.s.devs.mu.Unlock()
+		d.mu.Lock()
+		played, captured := d.played, d.captured
+		d.mu.Unlock()
+		if playFails && !spk.IsZero() {
+			t.Errorf("speakers that failed to open have a window, from %v", spk)
+		}
+		if !playFails && spk.Before(played) {
+			t.Errorf("the speakers' window ran from %v, before their open returned at %v", spk, played)
+		}
+		if mic.Before(captured) {
+			t.Errorf("the microphone's window ran from %v, before its open returned at %v", mic, captured)
+		}
+	}
+}
+
+// slowOpen is a device whose opens take a moment, noting when each returned.
+type slowOpen struct {
+	playFails        bool
+	mu               sync.Mutex
+	played, captured time.Time
+}
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
+func (d *slowOpen) Play(context.Context, func([]int16)) (io.Closer, error) {
+	time.Sleep(20 * time.Millisecond)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.played = time.Now()
+	if d.playFails {
+		return nil, errors.New("no output")
+	}
+	return nopCloser{}, nil
+}
+
+func (d *slowOpen) Capture(context.Context, func([]int16)) (io.Closer, error) {
+	time.Sleep(20 * time.Millisecond)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.captured = time.Now()
+	return nopCloser{}, nil
+}

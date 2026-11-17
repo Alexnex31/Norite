@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -116,7 +117,7 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 	var user dbus.ObjectPath
 	err := call(ctx, conn.Object(dest, "/org/freedesktop/login1"), "org.freedesktop.login1.Manager.GetUser",
 		&user, uint32(os.Getuid())) //nolint:gosec // a uid
-	if userGone(err) {
+	if noUser(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -156,19 +157,29 @@ func askLogind(ctx context.Context, conn *dbus.Conn) ([]loginSession, error) {
 	return sessions, nil
 }
 
-// gone is whether err is logind saying the session is no more: the object gone, or login1's own word.
-func gone(err error) bool {
-	var de dbus.Error
-	return errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.UnknownObject" ||
-		de.Name == "org.freedesktop.login1.NoSuchSession")
-}
+// What logind's answers mean, each to the one question it answers: the same error from another object is
+// another fact. UnknownObject from the manager, for one, is no manager rather than no account.
+const (
+	unknownObject = "org.freedesktop.DBus.Error.UnknownObject"
+	noSuchUser    = "org.freedesktop.login1.NoSuchUser"
+	noSuchSession = "org.freedesktop.login1.NoSuchSession"
+)
 
-// userGone is whether err is logind saying it has no record of the account: an account with no login and
-// no linger, or one whose last session ended a moment ago. Either has no session.
-func userGone(err error) bool {
+// noUser is whether the manager's GetUser says logind has no record of the account, which then has no
+// session: an account with no login and no linger.
+func noUser(err error) bool { return errorNamed(err, noSuchUser) }
+
+// userGone is whether the account's object is no more as its sessions are read: its last session ended,
+// and logind let go of it, between GetUser and the read. No session either.
+func userGone(err error) bool { return errorNamed(err, unknownObject) }
+
+// gone is whether err is logind saying the session is no more: the object gone, or login1's own word.
+func gone(err error) bool { return errorNamed(err, unknownObject, noSuchSession) }
+
+// errorNamed is whether err is an error over the bus named one of names.
+func errorNamed(err error, names ...string) bool {
 	var de dbus.Error
-	return errors.As(err, &de) && (de.Name == "org.freedesktop.DBus.Error.UnknownObject" ||
-		de.Name == "org.freedesktop.login1.NoSuchUser")
+	return errors.As(err, &de) && slices.Contains(names, de.Name)
 }
 
 // sessionOf is a session from its properties, as GetAll gives them.

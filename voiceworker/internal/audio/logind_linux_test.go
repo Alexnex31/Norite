@@ -101,21 +101,29 @@ func TestASessionIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
 	}
 }
 
-// The account is not logged in when logind has no record of it, asked for it or for its sessions a moment
-// after it let go of it; logind going away is no answer about it.
+// The account is not logged in when the manager has no record of it, or its own object is gone as its
+// sessions are read. The manager's object gone is no answer about the account, nor is logind going away.
 func TestAnAccountIsGoneOnlyWhenLogindSaysSo(t *testing.T) {
-	for name, want := range map[string]bool{
-		"org.freedesktop.DBus.Error.UnknownObject":  true,
-		"org.freedesktop.login1.NoSuchUser":         true,
-		"org.freedesktop.DBus.Error.ServiceUnknown": false,
-		"org.freedesktop.DBus.Error.NoReply":        false,
+	for _, c := range []struct {
+		ask        func(error) bool
+		name       string
+		want       bool
+		whoAnswers string
+	}{
+		{noUser, "org.freedesktop.login1.NoSuchUser", true, "the manager"},
+		{noUser, "org.freedesktop.DBus.Error.UnknownObject", false, "the manager"},
+		{noUser, "org.freedesktop.DBus.Error.ServiceUnknown", false, "the manager"},
+		{userGone, "org.freedesktop.DBus.Error.UnknownObject", true, "the account"},
+		{userGone, "org.freedesktop.DBus.Error.NoReply", false, "the account"},
 	} {
-		if got := userGone(dbus.Error{Name: name}); got != want {
-			t.Errorf("%s: gone %v, want %v", name, got, want)
+		if got := c.ask(dbus.Error{Name: c.name}); got != c.want {
+			t.Errorf("%s from %s: gone %v, want %v", c.name, c.whoAnswers, got, c.want)
 		}
 	}
-	if userGone(nil) || userGone(errors.New("context deadline exceeded")) {
-		t.Error("no error, or the bound running out, is an account gone")
+	for _, ask := range []func(error) bool{noUser, userGone} {
+		if ask(nil) || ask(errors.New("context deadline exceeded")) {
+			t.Error("no error, or the bound running out, is an account gone")
+		}
 	}
 }
 

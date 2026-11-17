@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -299,9 +300,9 @@ func TestAGivenUpQuestionIsNoRefusal(t *testing.T) {
 	}
 }
 
-// Leaving gives the question up before it waits on anything, so it leaves the screen with the call and an
-// answer given while the call closes is no refusal: here the speakers' Close holds the media's close to
-// its bound, and the question is given up all the same.
+// Leaving gives the question up before it waits on anything, so an answer given while the call closes is
+// no refusal: here the speakers' Close holds the media's close to its bound, and the question is given up
+// all the same. What this sees is the worker no longer waiting, not macOS's prompt going away.
 func TestTheQuestionIsGivenUpBeforeTheCloseWaits(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls")
@@ -345,3 +346,51 @@ type heldClose struct {
 }
 
 func (c heldClose) Close() error { <-c.release; return c.Closer.Close() }
+
+// A yes that comes as the call is left, between the media stopping and the question being given up, opens
+// no microphone: the media stops first, so the microphone waiting on the answer sees the stop. Staged with
+// Close's hook between the two, never raced.
+func TestAYesAsTheCallIsLeftOpensNoMicrophone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	yes := make(chan struct{})
+	captured := make(chan struct{}, 1)
+	dev := capturing{Asking: &audiotest.Asking{Device: &audiotest.Device{}, Ask: func(context.Context) error {
+		<-yes
+		return nil
+	}}, captured: captured}
+	s := h.join(t, "1", "1", dev, Options{})
+	reports(t, s, 5*time.Second, is(voiceipc.DeviceAsking, voiceipc.DeviceOpen))
+	opened := false
+	var once sync.Once // the harness closes the call again as the test ends
+	s.halted = func() {
+		once.Do(func() {
+			close(yes)
+			select { // as long as a microphone opened on the yes would take to
+			case <-captured:
+				opened = true
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+	s.Close()
+	if opened {
+		t.Error("a yes given as the call was left opened the microphone")
+	}
+}
+
+// capturing is a device that says when its microphone is opened.
+type capturing struct {
+	*audiotest.Asking
+	captured chan struct{}
+}
+
+func (d capturing) Capture(ctx context.Context, frame func([]int16)) (io.Closer, error) {
+	select {
+	case d.captured <- struct{}{}:
+	default:
+	}
+	return d.Asking.Capture(ctx, frame)
+}

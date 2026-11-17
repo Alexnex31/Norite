@@ -216,7 +216,11 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		if w != nil {
 			select {
 			case <-w.Done():
-				by = w.Exit().Devices
+				// The devices that ended the call, when the failure is that end: a worker that ended so as the
+				// daemon gave up waiting on it leaves the daemon's reason, which they would contradict.
+				if e := w.Exit(); reason(e.Reason) == msg {
+					by = e.Devices
+				}
 			default:
 				w.Leave()
 			}

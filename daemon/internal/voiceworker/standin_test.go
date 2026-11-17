@@ -214,7 +214,7 @@ func standin(mode string) int {
 			send(voiceipc.OpOffer, voiceipc.Offer{SDP: "v=0\r\nstandin\r\n"})
 		case voiceipc.OpAnswer:
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting})
-			if mode == "neverready" {
+			if mode == "neverready" || mode == "endsasleft" {
 				continue
 			}
 			if mode == "devasking" { // macOS's question, asked as the call starts, before it is up
@@ -279,6 +279,13 @@ func standin(mode string) int {
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue
+			}
+			if mode == "endsasleft" { // its devices ending the call as the daemon gives up on it
+				none := voiceipc.Device{State: voiceipc.DeviceNoSession}
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason:  "neither the microphone nor the speakers can be used",
+					Devices: &voiceipc.Devices{Microphone: none, Speakers: none}})
+				return 0
 			}
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"})
 			return 0
