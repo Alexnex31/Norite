@@ -2387,6 +2387,82 @@ of this section.
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.
+
+  **As built** (planned by reading the entry against the code and from a spike on loopback, S1, and built
+  as planned except where a bullet says otherwise):
+  - **The TURN credential comes with the answer, not before the offer** (S1). The SFU is ICE-lite and
+    learns the client's addresses from its checks, so the worker's offer carries no candidate. Once
+    `VOICE_SERVER_UPDATE` names the TURN servers, the worker sets them, then its local description, then the
+    answer, and gathers. With TURN over UDP blackholed a join took 10 ms on loopback, against 8.02 s in the
+    old order, so M28's 8 s wait goes without trickle ICE. ADR 0023 is amended. The credential is minted on
+    a connection whose sign-in the gateway checks on every heartbeat.
+  - **`PionMediaCoordinator` is `backend/internal/voice/coordinator`.** It:
+    - authorizes with `guildauth.Voice` (view, `PermConnectVoice`, membership, and `PermSpeakVoice` for
+      the rights);
+    - counts `user_limit` in accounts, under advisory lock slot 5 per channel;
+    - registers the join before it provisions, so an eviction's cutoff refuses a provision it outran;
+    - then provisions, writes the row and publishes `VOICE_STATE_UPDATE` after the commit.
+
+    Joins are rated ten a minute per account, charged after the checks that cost nothing, with one in
+    flight per session (`busy`).
+  - **Two replies, to the joining session alone:** `VOICE_SERVER_UPDATE` and `VOICE_JOIN_REFUSED`, the
+    second with a code from a fixed vocabulary. Both are sequenced, so a resume replays them, and neither
+    crosses the bus. The daemon routes both to its signaler before the `Sink`, so no attach client sees the
+    credential.
+  - **A call belongs to its gateway session.** A join replaces the session's call and any call the same
+    device left on an older session, which is the half of M36's question taken here. Dropping the session,
+    by a revocation or the resume window, ends the call. So the end of a sign-in reaches the call with no
+    path of its own, where the entry had `revokeEverything` evict.
+  - **Re-checks travel on a topic of their own** (`dispatch.VoiceTopic`), never on the client events,
+    which a busy guild sends far more of: the author's condition, so as not to overload the SFU. They are
+    published by `queuePermissions`, `RemoveMember`, `UpdateMember` when mute or deafen change,
+    `DeleteChannel` and a guild's deletion. Each guild's are coalesced, one running and one waiting. A
+    lost one is accepted in the ledger.
+  - **Who is in a voice channel is `voice_states`** (migration 26), one row per connection, since ADR 0023
+    lets an account hold two. `VOICE_STATE_UPDATE` and `VOICE_STATE_DELETE` reach the channel's viewers,
+    and `GET /channels/{id}/voice-states` is what a client connecting later reads. `self_mute` and
+    `self_deaf` are M34's.
+  - **Speak and the server mute and deafen are applied by the client** (the ledger). Not sending keeps
+    the DSP running, and not hearing plays silence:
+    - they reach the worker in the answer and then as `OpRights` (`voiceipc.Rights`);
+    - they reach the CLI as the status's `rights`.
+
+    A kick, a lost `PermConnectVoice` and a deleted channel evict on the server.
+  - **128 kbps by default, 16 to 224 kbps.** Measured on speech, 224 kbps is 239 kbit/s on the wire at its
+    worst second, under the SFU's 256 kbps track bound. The worker clamps whatever the instance names.
+  - **`[voice] enabled` is on by default.** The alpha guide names the ports.
+  - **The worker bounds its instance's voice server:**
+    - it dials TURN and STUN through `session.guardedNet`, which refuses after resolving what `reachable`
+      refuses for a candidate;
+    - its SRTP streams are counted against its slots (`session/streams.go`), past which the call ends.
+  - **No `/code-review` ran**, at the author's decision. Every guard was removed and a named test failed.
+  - **The manual pass ran in one unprivileged VM** (memory allowed one guest), with two OS accounts, each
+    with its own daemon and virtual devices, against a real `norite-server`. QEMU's user networking hands
+    the host a guest's packets from loopback, which the SFU refuses, so every call went through TURN.
+    - **What worked:**
+      - joins in 2.2 s, each caller heard by the other;
+      - a server mute, a deafen and a lost SPEAK applied by the client;
+      - a lost CONNECT and a kick ending the call within a second;
+      - a restarted daemon's rejoin replacing its predecessor;
+      - TURN over UDP dropped, joining over TCP in 2.2 s;
+      - a channel set to 48 kbps encoding at 48.
+    - **Its four findings were fixed the same day,** each fix proved by removal and walked again in the VM:
+      - an SFU bound to loopback announced nothing, so `norite-server` now warns;
+      - a client that died stayed listed for the two-minute resume window, which is now thirty seconds;
+      - after the instance restarted, a daemon kept a dead call for 32 s, and now ends it when its
+        connection begins a fresh session (1 s);
+      - every end read "the voice server closed the call". `EvictConnection` now takes a reason, which
+        the SFU sends before closing, and the status's `ended_in_call` tells a failed join from an ended
+        call.
+    - **Not walked:**
+      - the direct path, which the tests cover;
+      - Windows, macOS and a real network;
+      - `VOICE_STATE_UPDATE` as an attach client sees it.
+    - **Left:**
+      - A relayed join takes about 2 s in either order (S1, and 2.2 s in the pass): Pion's pacing of a
+        relayed pair's checks or the permission's creation, not measured further.
+      - A channel's bitrate or `user_limit` changed mid-call reaches its callers at their next join, since
+        neither publishes a re-check.
 - **M34 — Voice control surface (command tree and daemon)**: join/leave/mute/deafen as verbs on the command
   tree, the daemon holding call state, and active-speaker plus per-participant local-mute and report exposed
   over the IPC protocol — everything a client needs to drive and display a call, with no client drawing it

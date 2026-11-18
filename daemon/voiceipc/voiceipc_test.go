@@ -248,3 +248,21 @@ func TestACutReasonStaysWithinTheBound(t *testing.T) {
 		require.NoError(t, s.Check())
 	}
 }
+
+// The worker clamps to the bounds the gateway's contract states for VOICE_SERVER_UPDATE's bitrate, which
+// the backend holds to the channel routes and the coordinator (TestTheBitrateBoundsAgreeAcrossTheContracts):
+// one set of bounds, read in three modules that cannot import one another.
+func TestTheClampIsTheGatewaysBounds(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "gateway-events.schema.json"))
+	require.NoError(t, err)
+	var gw struct {
+		Defs map[string]struct {
+			Properties map[string]map[string]any `json:"properties"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &gw))
+	b := gw.Defs["VoiceServer"].Properties["bitrate"]
+	require.NotNil(t, b, "the gateway's contract names no VoiceServer bitrate")
+	require.EqualValues(t, MinBitrate, b["minimum"])
+	require.EqualValues(t, MaxBitrate, b["maximum"])
+}

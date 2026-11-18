@@ -405,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M32 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M33 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -526,6 +526,17 @@ agent never creates a `v*` tag or bumps a version.**
   asks where PulseAudio put its stream and asks logind why. Seven `/code-review` rounds moved the judgement
   of the start into the worker, which says it. Its manual pass ran on Linux (KDE) and Windows 11 in VMs;
   macOS is the author's Mac, not yet walked. The Developer ID was not taken.
+- **M33 — Voice signaling, real**: done. Op 4 joins a call over the daemon's own gateway connection, and
+  `backend/internal/voice/coordinator` authorizes it, provisions it and records it in `voice_states`. The
+  TURN credential comes with the answer, so the worker's offer carries no candidate and gathers afterwards
+  (spike S1: 10 ms with TURN over UDP blackholed, against 8 s). A call belongs to its gateway session, a lost
+  right ends it through a re-check topic of its own, and mute, deafen and Speak are the client's to apply.
+  `[voice]` is on by default, at 128 kbps. No `/code-review` ran, at the author's decision. Its manual pass,
+  two accounts in one VM through TURN, found four things, all fixed:
+  - an SFU on loopback that announced nothing;
+  - a dead caller listed for the two-minute resume window, now thirty seconds;
+  - a daemon keeping a call its restarted instance had dropped;
+  - every end reading "the voice server closed the call".
 
 ## What keeps coming back
 
@@ -606,6 +617,11 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **An identifier minted after the thing that needs it cannot scope it** (M27). The fix that removes the
   sending beats a filter on where it goes (M27).
 - **Assign a `time.AfterFunc` result under the lock its callback takes** (M27).
+- **A resource tied to a session lives as long as the session's resume window** (M33). A dead caller stayed
+  listed for two minutes while the SFU had dropped it in seconds. When something ends with a session, ask
+  what a crash leaves visible, and for how long.
+- **Say why on the channel that closes** (M33). A reason sent on another channel races the close it
+  explains, and the close wins: the SFU sends it on the data channel before closing.
 - **`os/exec` gives a child the parent's whole environment by default** (M28).
 - **A fix for one platform's cosmetics is a change to how that platform stops the program** (M23).
 - **When a fix narrows a rule, ask what the narrower rule cannot say**, and make it say so in the output
@@ -2401,6 +2417,68 @@ And on the call's devices, from M32 (ADR 0034 §1):
   session, so a graphical login in a VM (`loginctl terminate-session` and an SDDM restart move it), and
   undoes any stream it moves: WirePlumber keeps a moved stream's target in
   `~/.local/state/wireplumber/stream-properties`.
+
+And on voice signaling, from M33:
+
+- **A join is op 4, answered to its session alone**:
+  - `VOICE_SERVER_UPDATE` with the answer, the account's TURN credential, the channel's bitrate and the
+    account's rights;
+  - or `VOICE_JOIN_REFUSED` with a code from a fixed vocabulary, which the daemon words
+    (`voiceworker.refusalWords`).
+
+  Both go through the session's sequenced send, so a resume replays them, and neither crosses the bus. The
+  gateway client hands both to the voice signaler before the `Sink` (`Options.Voice`), so no attach client
+  ever sees a credential. A new reply type is a row there and in `gateway-events.schema.json`.
+- **The coordinator is the only thing that decides a call** (`backend/internal/voice/coordinator`), over
+  `voice.Control`. It:
+  - authorizes with `guildauth.Voice`;
+  - counts `user_limit` in accounts under advisory slot 5;
+  - registers the join before it provisions, so an eviction's cutoff refuses a provision it outran;
+  - rates joins ten a minute per account, charged after the free checks, with one in flight per session.
+
+  The guild comes off the channel row, never from the client.
+- **A call belongs to its gateway session**, and dropping the session ends it, so a new way to end a
+  sign-in needs no voice code. The resume window is thirty seconds (`TestTheResumeWindowIsHalfAMinuteAtMost`).
+  On the daemon's side, a fresh session (READY, never RESUMED) ends its call and fails a join still waiting
+  (`Options.NewSession`, `Gateway.SessionLost`).
+- **A re-check is published only by a mutation that can take a voice right away**, with
+  `dispatch.QueueVoiceRecheck` in its transaction, never on the client events: the author's condition, so
+  that a busy guild cannot overload the SFU. Today these are `queuePermissions`, `RemoveMember`,
+  `UpdateMember` on mute or deafen, `DeleteChannel` and a guild's deletion, and M74 adds a ban and a
+  timeout. A new one calls it by name. Re-checks are coalesced per guild, and their reads are written
+  against the generic plan (`GetMembersVoiceFlags` in `TestTheFanOutsRoleReadCannotScanTheWholeGuild`).
+- **A call the instance ends says why.** `EvictConnection` takes a reason (the coordinator's `ended*`
+  constants), which the SFU sends on the data channel before it closes and the worker shows once the call
+  is up. A re-check ends its calls, all at once, before it evicts the user or closes the room, which would
+  close them saying nothing. A call its client left is told nothing. The daemon's status says a failed join
+  apart from an ended call (`ended_in_call`).
+- **Mute, deafen and Speak are applied by the client** (ledger). They are `voiceipc.Rights`:
+  - in the answer, then as `OpRights` from the account's own `VOICE_STATE_UPDATE`;
+  - in the status as `rights`.
+
+  Not sending keeps the DSP running, and not hearing plays silence. The SFU enforces only who is in the
+  call.
+- **The bitrate is 128 kbps by default and 16–224 kbps**, one set of bounds in three modules:
+  - `TestTheBitrateBoundsAgreeAcrossTheContracts` holds the routes, the gateway's contract and the
+    coordinator equal;
+  - `voiceipc`'s `TestTheClampIsTheGatewaysBounds` holds the worker's clamp to that contract.
+
+  224 is measured under the SFU's 256 kbps track bound with headers; raising it is a measurement, not an
+  edit.
+- **`voice_states` is one row per connection** (migration 26), since ADR 0023 lets an account hold two.
+  A single process deletes every row at start (`DeleteAllVoiceStates`); the flagship's replicas sweep their
+  own (M112's entry).
+- **An SFU bound to loopback announces nothing** outside the harness and the tests, which admit loopback,
+  and `StartStack` warns.
+- **Testing:**
+  - **Backend:** `voice_gateway_test.go`'s `newVoiceFixture` plays the daemon with a raw gateway client and
+    the worker with `voicetest`'s Pion client, against real Postgres. `droppedSaying` asserts the reason an
+    end gave, whole.
+  - **Daemon:** `gateway_test.go`'s `fakeLink` plays the gateway connection.
+  - **Manual pass:** QEMU's user networking hands the host a guest's packets from loopback, which the SFU
+    refuses. So a pass in such a guest goes through TURN: the SFU on the docker bridge's address, announced
+    as `10.0.2.2`, and TURN on loopback. Two OS accounts in one guest, each with its own daemon and null
+    sinks, are two callers on one guest's memory.
 
 And on the first run, from the `easier-setup` branch:
 
