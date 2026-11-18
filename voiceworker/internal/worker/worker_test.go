@@ -26,15 +26,19 @@ type fakeCall struct {
 	offerErr error
 	ready    chan struct{}
 	ended    chan string
+	devices  chan voiceipc.Devices
 	closed   chan struct{}
 	// stuck makes Close block for ever, as a library stuck in C would.
 	stuck bool
 	// slowGather makes Offer wait for its context, as a gather waiting out an unreachable TURN does.
 	slowGather bool
+	// by is what EndedBy answers.
+	by *voiceipc.Devices
 }
 
 func newFakeCall() *fakeCall {
-	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), closed: make(chan struct{})}
+	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), devices: make(chan voiceipc.Devices, 1),
+		closed: make(chan struct{})}
 }
 
 func (c *fakeCall) Offer(ctx context.Context) (string, error) {
@@ -44,9 +48,13 @@ func (c *fakeCall) Offer(ctx context.Context) (string, error) {
 	}
 	return "v=0\r\noffer\r\n", c.offerErr
 }
-func (c *fakeCall) Accept(string) error    { return nil }
-func (c *fakeCall) Ready() <-chan struct{} { return c.ready }
-func (c *fakeCall) Ended() <-chan string   { return c.ended }
+func (c *fakeCall) Accept(string) error        { return nil }
+func (c *fakeCall) Ready() <-chan struct{}     { return c.ready }
+func (c *fakeCall) Ended() <-chan string       { return c.ended }
+func (c *fakeCall) EndedBy() *voiceipc.Devices { return c.by }
+func (c *fakeCall) Devices() <-chan voiceipc.Devices {
+	return c.devices
+}
 func (c *fakeCall) Close() {
 	close(c.closed)
 	if c.stuck {
@@ -181,6 +189,80 @@ func TestACallThatEndsByItselfSaysWhyAndExits(t *testing.T) {
 	s := d.state()
 	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, s)
 	require.Equal(t, ExitOK, d.exit())
+}
+
+// What the devices are doing reaches the daemon each time it changes, and the devices that ended a call
+// are said in its end, so the daemon has why (M32).
+func TestTheDevicesAreReportedAndSaidInTheEnd(t *testing.T) {
+	devices := func(d *daemon) voiceipc.Devices {
+		t.Helper()
+		f := d.next()
+		require.Equal(t, voiceipc.OpDevices, f.Op)
+		return devicesOf(t, f)
+	}
+	call := newFakeCall()
+	d := start(t, call, Options{})
+	d.joined()
+	asking := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceAsking},
+		Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}}
+	call.devices <- asking
+	require.Equal(t, asking, devices(d))
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+	call.ended <- "the voice server closed the call"
+	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, d.state())
+	require.Equal(t, ExitOK, d.exit())
+
+	// A call its devices end queues their report as it ends: the loop takes either first, at random, so it
+	// may say them or not, but the end comes once, carries them, and is the last frame. Both are queued
+	// while the loop is still writing READY, held there by the pipe until the test reads the rest of it, so
+	// both are ready when it next selects: queued after, the report was always taken alone first. Run until
+	// each order has been seen.
+	none := voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceNoSession},
+		Speakers: voiceipc.Device{State: voiceipc.DeviceNoSession}}
+	var said, unsaid int
+	for range 64 {
+		call := newFakeCall()
+		call.by = &none
+		d := start(t, call, Options{})
+		d.joined()
+		close(call.ready)
+		var first [1]byte
+		_, err := io.ReadFull(d.fromW, first[:]) // the loop is inside READY's write until the rest is read
+		require.NoError(t, err)
+		call.devices <- none
+		call.ended <- "neither the microphone nor the speakers can be used"
+		f, err := voiceipc.Read(io.MultiReader(bytes.NewReader(first[:]), d.fromW), voiceipc.MaxWorkerFrame)
+		require.NoError(t, err)
+		var ready voiceipc.State
+		require.NoError(t, ipc.Decode(f, &ready))
+		require.Equal(t, voiceipc.StateReady, ready.State)
+		f = d.next()
+		if f.Op == voiceipc.OpDevices {
+			said++
+			require.Equal(t, none, devicesOf(t, f))
+			f = d.next()
+		} else {
+			unsaid++
+		}
+		require.Equal(t, voiceipc.OpState, f.Op)
+		var s voiceipc.State
+		require.NoError(t, ipc.Decode(f, &s))
+		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded,
+			Reason: "neither the microphone nor the speakers can be used", Devices: &none}, s)
+		require.Equal(t, ExitOK, d.exit())
+		_, err = voiceipc.Read(d.fromW, voiceipc.MaxWorkerFrame)
+		require.ErrorIs(t, err, io.EOF, "a frame after the end")
+	}
+	require.Positive(t, said, "the report was never said before the end")
+	require.Positive(t, unsaid, "the end never came first")
+}
+
+func devicesOf(t *testing.T, f gatewayproto.Frame) voiceipc.Devices {
+	t.Helper()
+	var got voiceipc.Devices
+	require.NoError(t, ipc.Decode(f, &got))
+	return got
 }
 
 func TestACallThatNeverConnectsEnds(t *testing.T) {

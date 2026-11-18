@@ -20,19 +20,51 @@ import (
 // MaxHeard bounds what the speakers keep: a minute.
 const MaxHeard = 60 * audio.SampleRate
 
-// Device is the test's microphone and speakers.
+// Device is the test's microphone and speakers. Its fields play each way an OS's device can fail (M32);
+// the zero value opens both and delivers.
 type Device struct {
 	// Source fills frame number i of the microphone. Nil is silence.
 	Source func(i int, frame []int16)
+	// CaptureErr and PlayErr, when set, are what opening each direction returns: an *audio.Failure plays
+	// a refusal, an absent device or no session.
+	CaptureErr, PlayErr error
+	// Silent opens the microphone and never delivers a frame of it, and Paused, when set, stops it
+	// delivering while it returns true: a device that stopped mid-call.
+	Silent bool
+	Paused func() bool
+	// Where, when set, is what each open stream answers when asked where it goes (audio.Watched), for the
+	// microphone when capture is true: PulseAudio's stream moved to a stand-in when the session ends.
+	Where func(capture bool) error
 
 	mu      sync.Mutex
 	heard   []int16
 	heardAt []time.Time // when each frame was played
 }
 
+// Asking is a Device whose OS asks the person first, as macOS does (audio.Authorizer). A Device alone is
+// no Authorizer, so the session's tests run Linux's and Windows' path, where nothing is asked, unless they
+// ask for this.
+type Asking struct {
+	*Device
+	// Ask is the person's answer, which Authorize returns once it has said the question is asked.
+	Ask func(ctx context.Context) error
+}
+
+// Authorize says the question is asked, then returns the answer.
+func (a *Asking) Authorize(ctx context.Context, asking func()) error {
+	asking()
+	return a.Ask(ctx)
+}
+
 // Capture calls frame every 20 ms with the next frame of Source.
 func (d *Device) Capture(_ context.Context, frame func([]int16)) (io.Closer, error) {
-	return run(func(i int, buf []int16) {
+	if d.CaptureErr != nil {
+		return nil, d.CaptureErr
+	}
+	return d.run(true, func(i int, buf []int16) {
+		if d.Silent || (d.Paused != nil && d.Paused()) {
+			return
+		}
 		if d.Source != nil {
 			d.Source(i, buf)
 		} else {
@@ -44,7 +76,10 @@ func (d *Device) Capture(_ context.Context, frame func([]int16)) (io.Closer, err
 
 // Play asks fill for a frame every 20 ms and keeps it.
 func (d *Device) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {
-	return run(func(_ int, buf []int16) {
+	if d.PlayErr != nil {
+		return nil, d.PlayErr
+	}
+	return d.run(false, func(_ int, buf []int16) {
 		fill(buf)
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -63,15 +98,31 @@ func (d *Device) Heard() ([]int16, []time.Time) {
 }
 
 type ticking struct {
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	stop    chan struct{}
+	done    chan struct{}
+	once    sync.Once
+	where   func(bool) error
+	capture bool
+}
+
+// Where answers as the Device's Where does, and nil without one.
+func (t *ticking) Where() error {
+	if t.where == nil {
+		return nil
+	}
+	return t.where(t.capture)
 }
 
 func (t *ticking) Close() error {
 	t.once.Do(func() { close(t.stop) })
 	<-t.done
 	return nil
+}
+
+func (d *Device) run(capture bool, each func(i int, buf []int16)) *ticking {
+	t := run(each)
+	t.where, t.capture = d.Where, capture
+	return t
 }
 
 func run(each func(i int, buf []int16)) *ticking {

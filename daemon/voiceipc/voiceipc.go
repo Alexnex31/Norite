@@ -39,11 +39,13 @@ import (
 )
 
 // The ops. A worker sends HELLO first and once, then OFFER once it has a JOIN, then STATE as its call
-// changes. The daemon sends JOIN once, ANSWER once, and LEAVE when the call should end.
+// changes, and from its first STATE, DEVICES as its microphone and speakers change (M32). The daemon sends
+// JOIN once, ANSWER once, and LEAVE when the call should end.
 const (
-	OpHello gatewayproto.Opcode = 1
-	OpOffer gatewayproto.Opcode = 2
-	OpState gatewayproto.Opcode = 3
+	OpHello   gatewayproto.Opcode = 1
+	OpOffer   gatewayproto.Opcode = 2
+	OpState   gatewayproto.Opcode = 3
+	OpDevices gatewayproto.Opcode = 4
 
 	OpJoin   gatewayproto.Opcode = 10
 	OpAnswer gatewayproto.Opcode = 11
@@ -110,6 +112,10 @@ type State struct {
 	State string `json:"state"`
 	// Reason says why a call ended, in words for a person, or "".
 	Reason string `json:"reason"`
+	// Devices is, on an ended call, the devices that ended it, both failing as it started (M32): the daemon
+	// keeps them in its status after that end alone, from this frame rather than the last DEVICES it read.
+	// Nil after any other end, and on every other state.
+	Devices *Devices `json:"devices"`
 }
 
 // The states a worker reports.
@@ -121,6 +127,74 @@ const (
 	// StateEnded: the call is over, Reason says why, and the worker is about to exit.
 	StateEnded = "ended"
 )
+
+// Devices is how the call's microphone and speakers are doing (M32, ADR 0034 §1): the whole of it, each
+// time either changes.
+type Devices struct {
+	Microphone Device `json:"microphone"`
+	Speakers   Device `json:"speakers"`
+	// Decided is whether the call's start has been judged and the call goes on (D4): a join waiting on a
+	// failing microphone answers on it. A start judged to end the call says so with the ended state, which
+	// follows, and its report is not decided: Decided is the worker's goesOn, never its startJudged.
+	Decided bool `json:"decided"`
+}
+
+// Device is one direction's outcome.
+type Device struct {
+	// State is one of the Device* words.
+	State string `json:"state"`
+	// Reason says what went wrong, in words for a person, or "". A client words the state itself for its
+	// OS, a refusal's setting included, and shows the reason beside it.
+	Reason string `json:"reason"`
+}
+
+// The states a device is reported in. The worker words none of them for a person: it does not know which
+// client will show them, nor, for refused, which setting that client's OS names.
+const (
+	// DeviceOpening: being opened, or opened and not yet delivering.
+	DeviceOpening = "opening"
+	// DeviceOpen: delivering audio, from its first frame.
+	DeviceOpen = "open"
+	// DeviceAsking: the OS is asking the person whether the program may use it (macOS).
+	DeviceAsking = "asking"
+	// DeviceRefused: the OS or the person refused it.
+	DeviceRefused = "refused"
+	// DeviceNoDevice: there is none to open.
+	DeviceNoDevice = "no_device"
+	// DeviceNoSession: the account is not logged in at the machine, and nothing it runs can use a device
+	// until it is (Linux), whoever else is.
+	DeviceNoSession = "no_session"
+	// DeviceFailed: anything else, Reason saying what.
+	DeviceFailed = "failed"
+)
+
+// Failing is whether a device in state s carries no audio and is not waiting to: refused, absent, without
+// a session, or failed.
+func Failing(s string) bool {
+	switch s {
+	case DeviceRefused, DeviceNoDevice, DeviceNoSession, DeviceFailed:
+		return true
+	}
+	return false
+}
+
+// Check refuses a state that is not one of the words, or a reason past MaxReason, in either device.
+func (d Devices) Check() error {
+	for _, dev := range []struct {
+		name string
+		d    Device
+	}{{"microphone", d.Microphone}, {"speakers", d.Speakers}} {
+		switch dev.d.State {
+		case DeviceOpening, DeviceOpen, DeviceAsking, DeviceRefused, DeviceNoDevice, DeviceNoSession, DeviceFailed:
+		default:
+			return fmt.Errorf("the %s in an unknown state %q", dev.name, truncate(dev.d.State, 32))
+		}
+		if len(dev.d.Reason) > MaxReason {
+			return fmt.Errorf("a reason of %d bytes for the %s, past %d", len(dev.d.Reason), dev.name, MaxReason)
+		}
+	}
+	return nil
+}
 
 // Check refuses what no correct worker sends, on top of the strict decoding: a payload the schema allows
 // but the protocol does not. The daemon calls it on every frame from the worker.
@@ -134,7 +208,8 @@ func (o Offer) Check() error {
 	return nil
 }
 
-// Check refuses a state that is not one of the words, or a reason past MaxReason.
+// Check refuses a state that is not one of the words, a reason past MaxReason, or devices that ended a
+// call that has not.
 func (s State) Check() error {
 	switch s.State {
 	case StateConnecting, StateReady, StateEnded:
@@ -143,6 +218,20 @@ func (s State) Check() error {
 	}
 	if len(s.Reason) > MaxReason {
 		return fmt.Errorf("a reason of %d bytes, past %d", len(s.Reason), MaxReason)
+	}
+	if s.Devices != nil {
+		if s.State != StateEnded {
+			return fmt.Errorf("devices that ended a call that is %s", s.State)
+		}
+		if err := s.Devices.Check(); err != nil {
+			return err
+		}
+		if !Failing(s.Devices.Microphone.State) || !Failing(s.Devices.Speakers.State) {
+			return errors.New("devices that ended a call, one of them working")
+		}
+		if s.Devices.Decided {
+			return errors.New("devices that ended a call, saying it goes on")
+		}
 	}
 	return nil
 }

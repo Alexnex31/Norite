@@ -33,6 +33,14 @@ type Call interface {
 	Ready() <-chan struct{}
 	// Ended delivers why the call ended by itself, once.
 	Ended() <-chan string
+	// EndedBy is the devices that ended it, both failing as it started (M32), or nil, asked once Ended has
+	// delivered.
+	EndedBy() *voiceipc.Devices
+	// Devices delivers the microphone's and the speakers' state each time either changes (M32), the latest
+	// only, or is nil for a call with no devices. One queued as the call ends may be sent before the end or
+	// not at all: the ended state says which devices ended it, and the daemon keeps nothing else of them
+	// past an end.
+	Devices() <-chan voiceipc.Devices
 	// Close ends the call. It may block, which is why the worker bounds how long it waits for it.
 	Close()
 }
@@ -161,6 +169,10 @@ func (r *run) loop(ctx context.Context) int {
 	ready := call.Ready()
 	for {
 		select {
+		case d := <-call.Devices():
+			if err := voiceipc.Write(r.out, voiceipc.OpDevices, d); err != nil {
+				return ExitOK
+			}
 		case <-ready:
 			ready = nil
 			connect.Stop()
@@ -170,7 +182,7 @@ func (r *run) loop(ctx context.Context) int {
 		case <-connect.C:
 			return r.end("the call did not connect in time")
 		case reason := <-call.Ended():
-			return r.end(reason)
+			return r.ended(reason)
 		case f := <-r.frames:
 			if f.Op != voiceipc.OpLeave {
 				return r.violation(f)
@@ -262,7 +274,7 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 			}
 			return a, 0, true
 		case reason := <-r.call.Ended():
-			return voiceipc.Answer{}, r.end(reason), false
+			return voiceipc.Answer{}, r.ended(reason), false
 		case err := <-r.gone:
 			return voiceipc.Answer{}, r.daemonGone(err), false
 		case <-ctx.Done():
@@ -272,17 +284,22 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 }
 
 // end reports the call ended, and why, as the worker's last frame.
-func (r *run) end(reason string) int {
-	reason = voiceipc.CutReason(reason)
-	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: reason})
+func (r *run) end(reason string) int { return r.endBy(reason, nil) }
+
+// ended reports the end the call itself delivered, with the devices that ended it when they did.
+func (r *run) ended(reason string) int { return r.endBy(reason, r.call.EndedBy()) }
+
+// endBy is the one writer of the ended frame.
+func (r *run) endBy(reason string, by *voiceipc.Devices) int {
+	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+		Reason: voiceipc.CutReason(reason), Devices: by})
 	return ExitOK
 }
 
 // violation is a frame out of order or malformed. The worker says so and exits: its daemon is of the same
 // install, so this is a bug, and guessing what was meant would hide it.
 func (r *run) violation(f gatewayproto.Frame) int {
-	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-		Reason: fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op)})
+	r.endBy(fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op), nil)
 	return ExitProtocol
 }
 

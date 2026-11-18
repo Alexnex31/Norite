@@ -405,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M31 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M32 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -520,6 +520,12 @@ agent never creates a `v*` tag or bumps a version.**
   in two VMs on a kernel-shaped 64 kbit/s link, held the queue at 28 ms against 380 without the controller,
   and found AEC3 keeping a silent caller sending while another speaks, carried to M35. A real network has
   not been walked.
+- **M32 — Mic permission, real implementation**: done. The worker reports the microphone and the speakers
+  (`OpDevices`), the daemon keeps them in the call state, and `norite voice` words each for its OS. One
+  failing leaves the call up; both failing as it starts end it. On Linux, where nothing refuses, the worker
+  asks where PulseAudio put its stream and asks logind why. Seven `/code-review` rounds moved the judgement
+  of the start into the worker, which says it. Its manual pass ran on Linux (KDE) and Windows 11 in VMs;
+  macOS is the author's Mac, not yet walked. The Developer ID was not taken.
 
 ## What keeps coming back
 
@@ -2355,6 +2361,41 @@ And on adaptive bitrate, from M31:
     answer's candidate port (`through`).
   - `TestTheBitrateFollowsAConstrainedLink` runs it with the controller and without (`fixedBitrate`), and
     asserts at the far end.
+
+And on the call's devices, from M32 (ADR 0034 §1):
+
+- **The worker opens the devices and says how they are doing; nobody else asks.** `OpDevices` carries both,
+  each a state and a reason, on every change, the latest only. The worker words no setting: the client knows
+  its OS, and its words live in `cli/internal/ops`, for the TUI and the GUI to take. A reason is the
+  worker's, cleaned and cut wherever it is shown or kept (rule 19).
+- **A device is open at its first frame, and failed after 2 s of silence**, open again when it resumes.
+  Silence is reported and never judged: only what a backend answered ends a call.
+- **The start is judged in the worker (`session/devices.go`), and the worker says what it judged.** Both
+  first answers failing and both still failing on a backend's answer end the call, the microphone's
+  outcome in the reason. Each device's window runs from its own open returning (`devices.open`), so a slow
+  driver or a person answering macOS's question is never the start's; past 10 s without a first answer the
+  call goes on. The ended state names the devices that ended it, and every report's `decided` is whether
+  the start is judged with the call going on, which is the worker's `goesOn`, never `startJudged`.
+- **The daemon keeps the devices after the end that names them, and nothing else past an end.** A failure
+  that is the daemon's own (a timeout, a protocol breach, a leave) names none, and `fail` keeps only what
+  its caller hands it. A leave with no call clears them and keeps the reason.
+- **A join answers once the microphone is past opening**, at most `micWithin` after ready; macOS's question
+  is past opening, so the join never waits on the person.
+- **Each OS's decision is a pure function in a file every OS compiles** (`audio/outcome.go`): CI runs Linux
+  alone. A new outcome is a row there, a state in both `voiceipc` and `daemon/ipc` (a test holds them and
+  the contracts equal) and a sentence in `ops`.
+- **On Linux, the stand-in is `auto_null`**, read from the stream's own sink or source in one request;
+  another sink's monitor is somebody's microphone. Where keeps one PulseAudio client a stream, and logind
+  is asked over one kept system-bus connection, bounded, its answer kept 5 s. Only logind's own words make
+  a session or the account gone (`errorNamed`, per question); an answer that cannot be read keeps the
+  connection.
+- **Close stops the media, then gives up macOS's question, then waits.** Giving it up stops the worker
+  waiting and nothing else: the prompt stays until answered. `Session.halted` stages a yes between the two.
+- **Testing:** `audiotest.Device` plays each failure an OS returns, `audiotest.Asking` macOS's question;
+  `standin_test.go`'s `dev*` modes play a worker's reports to the daemon. A manual pass needs a seat
+  session, so a graphical login in a VM (`loginctl terminate-session` and an SDDM restart move it), and
+  undoes any stream it moves: WirePlumber keeps a moved stream's target in
+  `~/.local/state/wireplumber/stream-properties`.
 
 And on the first run, from the `easier-setup` branch:
 

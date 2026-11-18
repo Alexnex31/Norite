@@ -84,9 +84,12 @@ type Session struct {
 	// still runs RNNoise, for the voice probability the audio level's V flag follows (M30).
 	processing dsp.Settings
 
-	ready    chan struct{}
-	ended    chan string
-	endOnce  sync.Once
+	ready   chan struct{}
+	ended   chan string
+	endOnce sync.Once
+	// endedBy is the devices that ended the call, when the end Ended delivers was theirs, stored before it is
+	// delivered.
+	endedBy  atomic.Pointer[voiceipc.Devices]
 	readyOne sync.Once
 
 	track  *webrtc.TrackLocalStaticRTP
@@ -102,6 +105,16 @@ type Session struct {
 	dspDone   chan struct{}
 	dsp       dsp.Module
 	dspErr    error
+
+	// devs is what the call's devices are doing (M32), nil with no device. authDone is closed once an
+	// audio.Authorizer has answered, authErr; stopAuth gives up the question when the call closes.
+	devs     *devices
+	authDone chan struct{}
+	authErr  error
+	stopAuth context.CancelFunc
+	// halted, a test's, runs in Close between stopping the media and giving the question up, where an
+	// answer would race the two.
+	halted func()
 
 	mediaMu       sync.Mutex
 	media         *media
@@ -179,6 +192,13 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		cc: newController(time.Now())}
 	if opts.Device != nil {
+		s.devs = newDevices(func(why string, by voiceipc.Devices) { s.endFor(why, &by) })
+		if a, ok := opts.Device.(audio.Authorizer); ok {
+			var ctx context.Context
+			ctx, s.stopAuth = context.WithCancel(context.Background())
+			s.authDone = make(chan struct{})
+			go s.authorize(ctx, a)
+		}
 		mk := opts.Codec
 		if mk == nil {
 			mk = opus.New
@@ -344,8 +364,15 @@ func drain(tr *webrtc.TrackRemote) {
 }
 
 // end reports the call over, once, with why.
-func (s *Session) end(reason string) {
-	s.endOnce.Do(func() { s.ended <- reason })
+func (s *Session) end(reason string) { s.endFor(reason, nil) }
+
+// endFor reports the call over, once, with why, and the devices that are why, or nil: an end that comes
+// second is no end, so endedBy is kept by the one that delivers.
+func (s *Session) endFor(reason string, by *voiceipc.Devices) {
+	s.endOnce.Do(func() {
+		s.endedBy.Store(by)
+		s.ended <- reason
+	})
 }
 
 // Offer adds the call's sections and returns the offer, every candidate gathered.
@@ -503,6 +530,21 @@ func (s *Session) Close() {
 	s.closing = true
 	m, starting := s.media, s.mediaStarting
 	s.mediaMu.Unlock()
+	// The question is given up once the media is told to stop, and before anything waits, so a microphone
+	// waiting on it sees the stop and is never opened, whatever the answer: a yes given as the call is left
+	// would otherwise open it for a moment. An answer that comes once it is given up is no refusal, whatever
+	// it says (authorize). Giving it up stops the worker waiting and nothing else: AVFoundation's request
+	// has no cancel, so macOS's prompt stays on the screen until the person answers it or the worker exits,
+	// which nobody has watched on a Mac.
+	if m != nil {
+		m.halt()
+	}
+	if s.halted != nil {
+		s.halted()
+	}
+	if s.stopAuth != nil {
+		s.stopAuth()
+	}
 	if m != nil {
 		m.close()
 	} else if !starting {

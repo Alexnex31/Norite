@@ -1987,6 +1987,49 @@ carries the condition that would reopen it.
   it already hears the microphone. A panic there is a worker crash, which ends the call (rule 11).
 - **Reopens if**: the worker ever connects to an audio server an instance, a JOIN or anything but the
   account's own environment names.
+- **Checked at M32, and still closed.** `Where` asks the same server, the one the account's environment
+  names, once a second while a call lasts, on a client of its own that each stream keeps for its life and
+  makes again only after a request on it fails. Every request on it is bounded by the library's 1 s, and
+  a panic on it is still a worker crash.
+
+### The worker asks whatever system bus DBUS_SYSTEM_BUS_ADDRESS names
+- **Raised**: M32, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: from M32 the worker asks logind whether its account is logged in at the machine, over the
+  system bus (`audio.loginSessions`), only once a stream has gone to PulseAudio's stand-in. The address is
+  the account's own environment, which the daemon passes on (`env.go`). A bus somebody substituted can only
+  move the answer between `no_session` and `no_device`, words in the call state. Connecting is bounded at
+  1 s, a bus that never answers the authentication included (godbus closes a connection when its context
+  ends, and the bound cancels it), and the questions at 1 s more once connected: 2 s at most, every 5 s at
+  most while a stream stands in. One connection is kept for the worker's life.
+- **Reopens if**: the address, or anything the worker asks of the bus, comes from an instance, a JOIN or
+  anything but the account's own environment; or the answer decides more than which words are shown.
+
+### A worker can make the daemon publish its call state fifty times a second
+- **Raised**: M32, `/security-sweep`
+- **Verdict**: accepted risk
+- **Why**: each DEVICES frame changes the call state, and each change is a `DAEMON_VOICE` to every
+  watching client. The pipe's rate (`framesPerSecond`, 50) bounds it, and the fan-out drops a client that
+  falls behind with 4012 rather than waiting on it (M20). A correct worker sends a change at most every
+  250 ms per device. A worker sending fifty would be one that was exploited, which already runs as the
+  account (the confinement entry above).
+- **Reopens if**: the pipe's rate bound is raised or lifted, or a change of call state costs the daemon
+  more than one encode and a non-blocking queue per client.
+
+### Another program of the account can hide the worker's stream from Where
+- **Raised**: M32, `/security-sweep`
+- **Verdict**: not a vulnerability
+- **Why**: `Where` finds the worker's own stream by `application.process.id`, which a PulseAudio client
+  sets for itself, so another client could claim the worker's id. Two streams claiming it are not judged
+  (`own` answers -1), which leaves the device reported open while it may be on the stand-in. Re-examined
+  within M32, once `Where` came to decide more than a word: its answer is what ends a call whose devices
+  both fail as it starts (D4). So a client claiming the id can keep up a call that should have ended,
+  hearing and sending nothing, or, with a stream of its own on the stand-in where the worker has none
+  yet, end the account's call as it starts. Only a client of the same server can do either, which is the
+  account's own session, and a program running as the account can end the worker's call outright: what it
+  gains is the account's own call, which it already had.
+- **Reopens if**: a server shared between accounts is supported, or `Where`'s answer starts deciding
+  something outside the account's own call.
 
 ### `session.Options` has a packet-dropping hook and a relay-only switch
 - **Raised**: M29, `/security-sweep`

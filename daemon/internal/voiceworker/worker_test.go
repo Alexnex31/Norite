@@ -122,7 +122,7 @@ func TestACallThatEndsByItselfIsNotACrash(t *testing.T) {
 // Every way a worker can break the protocol kills it, and the daemon goes on.
 func TestAHostileWorkerIsKilled(t *testing.T) {
 	fast(t)
-	for _, mode := range []string{"oversized", "garbage", "unknownop", "daemonop", "badstate", "flood",
+	for _, mode := range []string{"oversized", "garbage", "unknownop", "daemonop", "badstate", "baddevices", "flood",
 		"printflood", "nonewline"} {
 		t.Run(mode, func(t *testing.T) {
 			w, err := Start(context.Background(), standinOptions(t, mode, nil))

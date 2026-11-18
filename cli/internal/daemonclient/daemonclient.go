@@ -236,7 +236,9 @@ func local(ctx context.Context, c Caller, method, path string, body, out any) er
 		case ipc.RelayConflict:
 			return &clierr.RefusedError{Message: termsafe.Text(re.Message)}
 		case ipc.RelayFailed:
-			return fmt.Errorf("the daemon could not do it: %s", termsafe.Text(re.Message))
+			// Wrapped, cleaned, so that a caller can read the daemon's reason itself (voicecmd does, M32).
+			return fmt.Errorf("the daemon could not do it: %w",
+				&ipc.RelayError{Code: re.Code, Message: termsafe.Text(re.Message)})
 		case ipc.RelayTooManyRequests, ipc.RelayUnreachable:
 			// Unreachable is the daemon's own request failing to reach somebody else, the release host
 			// (M24): unavailable, like an instance that cannot be reached, and not a refusal.

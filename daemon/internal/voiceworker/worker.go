@@ -103,10 +103,11 @@ type Options struct {
 	Env  []string
 }
 
-// Event is a frame from the worker, decoded and checked: an Offer or a State.
+// Event is a frame from the worker, decoded and checked: an Offer, a State or Devices, one of the three.
 type Event struct {
-	Offer *voiceipc.Offer
-	State *voiceipc.State
+	Offer   *voiceipc.Offer
+	State   *voiceipc.State
+	Devices *voiceipc.Devices
 }
 
 // Worker is one running worker.
@@ -147,6 +148,8 @@ type Exit struct {
 	Crashed bool
 	// Reason says why, for a person: the worker's own, or the daemon's account of a crash.
 	Reason string
+	// Devices is the devices a worker said ended its call, both failing as it started (M32), or nil.
+	Devices *voiceipc.Devices
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
@@ -334,7 +337,11 @@ func (w *Worker) wait() {
 	case err != nil && !w.leaving:
 		w.exit = Exit{Crashed: true, Reason: fmt.Sprintf("the voice worker stopped unexpectedly (%s)", status(err, code))}
 	case w.ended != nil:
-		w.exit = Exit{Reason: termsafe.Text(w.ended.Reason)}
+		why := termsafe.Text(w.ended.Reason)
+		if why == "" {
+			why = "the voice worker ended the call without saying why"
+		}
+		w.exit = Exit{Reason: why, Devices: w.ended.Devices}
 	case w.leaving:
 		w.exit = Exit{Reason: "left"}
 	default:
@@ -416,6 +423,13 @@ func (w *Worker) read(hello chan<- error) {
 		}
 		if unheard {
 			continue
+		}
+		// Into the buffer first: a frame written just before the worker exited, its devices as the microphone
+		// is answered for one, would otherwise be lost to the exit whenever both were ready.
+		select {
+		case w.events <- ev:
+			continue
+		default:
 		}
 		select {
 		case w.events <- ev:
@@ -500,6 +514,15 @@ func (w *Worker) decode(f gatewayproto.Frame) (Event, error) {
 			return Event{}, broke(err.Error())
 		}
 		return Event{State: &s}, nil
+	case voiceipc.OpDevices:
+		var d voiceipc.Devices
+		if err := ipc.Decode(f, &d); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		if err := d.Check(); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		return Event{Devices: &d}, nil
 	}
 	return Event{}, broke(fmt.Sprintf("op %d, which a worker does not send after HELLO", f.Op))
 }

@@ -36,6 +36,61 @@ type Device interface {
 // ErrUnsupported is an OS with no backend.
 var ErrUnsupported = errors.New("audio: this OS has no audio backend")
 
+// Outcome is why a device carries no audio, as the call's state names it (M32, ADR 0034 §1). The client
+// words each for its OS; the backend says which it is, since only the backend can tell.
+type Outcome int
+
+const (
+	// Failed is anything below does not name.
+	Failed Outcome = iota
+	// Refused is the OS, or the person through it, refusing the program the device.
+	Refused
+	// NoDevice is no device to open.
+	NoDevice
+	// NoSession is the account not logged in at the machine, whoever else is, so nothing it runs may use its
+	// devices (Linux).
+	NoSession
+)
+
+// Failure is an error that says which outcome it is. A backend returns one where it knows, from Capture,
+// Play, Authorize or Where; any other error is Failed.
+type Failure struct {
+	Outcome Outcome
+	Err     error
+}
+
+func (f *Failure) Error() string { return f.Err.Error() }
+func (f *Failure) Unwrap() error { return f.Err }
+
+// OutcomeOf is err's outcome: a Failure's, or Failed.
+func OutcomeOf(err error) Outcome {
+	var f *Failure
+	if errors.As(err, &f) {
+		return f.Outcome
+	}
+	return Failed
+}
+
+// An Authorizer is a device whose OS asks the person before a program may capture: macOS, where samples
+// arriving prove nothing (ADR 0034). The session asks it as the call starts, beside ICE, so that the
+// question is on the screen while the call connects, and opens the microphone once it has said yes.
+type Authorizer interface {
+	// Authorize returns nil once the microphone may be used, the refusal, or ctx's error. It calls asking,
+	// on any goroutine, when the OS has put the question to the person and waits on the answer.
+	Authorize(ctx context.Context, asking func()) error
+}
+
+// Watched is a stream whose backend can tell, off the audio path, whether it still reaches a device. What
+// Capture and Play return may implement it. PulseAudio needs it: with the account not logged in at the
+// machine it moves a stream to a stand-in for no device and delivers zeros there, with no error, and moves
+// it back once the account logs in (M32's spike), so neither the open nor the samples can tell.
+type Watched interface {
+	// Where returns nil while the stream reaches a device, or why it does not. The session asks it once a
+	// second, on a goroutine of its own, which may be while Close runs or after: it must not panic, and must
+	// not keep the stream itself from closing.
+	Where() error
+}
+
 // framer cuts what a device delivers, in whatever lengths it chooses, into whole frames.
 type framer struct {
 	buf   [FrameSamples]int16

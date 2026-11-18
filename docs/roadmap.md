@@ -2249,6 +2249,99 @@ of this section.
 
   **Carried from M25, the author's decision: an Apple Developer ID.** An ad-hoc signed daemon is asked again
   after every new daemon build (run at M25), so without one "exactly once" holds per build, not per install.
+
+  **As built** (planned from a spike in a VM without a seat session, and built as planned except where a
+  bullet says otherwise):
+  - **The call state is M28's**, not M34's: `ipc.VoiceStatus`, `GET /@daemon/voice` and `DAEMON_VOICE`
+    exist. This milestone adds the devices to it, and M34 widens it further.
+  - **The speakers are covered too.** With no seat session on Linux they fail as the microphone does, and a
+    call that can neither send nor hear would otherwise be joined and silent.
+  - **The worker reports through a new op, `OpDevices`**, sent on every change: `microphone` and
+    `speakers`, each a state and a reason. The states are `opening`, `open`, `asking`, `refused`,
+    `no_device`, `no_session` and `failed`. `refused` names no setting: the client words it for its OS.
+  - **A device is `open` at its first frame**, and one that delivers nothing for 2 s is `failed`.
+  - **One device failing lets the call go on; both failing at the join end it**, with the microphone's
+    outcome as the reason (ADR 0034 §4). Both first answers count, and both must still be failing when the
+    second comes. A device that has opened has 10 s from its open returning to give its first answer, past
+    which the call goes on whatever comes; an open that fails, and a refusal of macOS's question, are first
+    answers whenever they come, and a microphone allowed has its window from its own open, so a slow driver
+    or a person slow to answer is never the start's. The worker's ended state names the devices that ended
+    the call, which the daemon keeps in its status after that end alone, and each DEVICES report says
+    whether the start has been judged with the call going on, which a join waiting on a failing microphone
+    answers on.
+  - **`norite voice join` waits, at most 3 s, for the microphone to be past `opening`**, and on macOS
+    prints that the question is being asked without waiting for the answer. The worker asks AVFoundation
+    at its start, beside ICE.
+  - **Each OS's decision is a pure function over the OS's answer**, in a file every OS compiles, since CI
+    runs Linux alone: an HRESULT, an `AVAuthorizationStatus`, logind's sessions.
+  - **Linux, from a spike in a VM** (PipeWire 1.4.2, under `--linger`):
+    - With no seat session, the PulseAudio protocol says yes to everything. The default source is the
+      monitor of a "Dummy Output", recording delivers zeros, and today's worker sends silence with no
+      error.
+    - What tells the cases apart is where the worker's stream went: `auto_null`'s monitor is no
+      microphone, and `auto_null` itself no output. Another sink's monitor is somebody's choice, desktop
+      audio shared or a virtual cable, and counts as a microphone (M32's second `/code-review`). The
+      samples decide nothing, since an idle card's are zeros too.
+    - The stream moves silently both ways when a session ends or begins, so the worker reads its stream's
+      source once a second and reports the change, recovery included. A session ending mid-call changes
+      the state and ends nothing.
+    - "No session" is asked of logind over D-Bus (`godbus`, BSD-2-Clause, new in `voiceworker`): a
+      session with a seat, active, of class `user`. The user's `State` is `active` over SSH alone and
+      decides nothing.
+  - **A device lost mid-call** is `failed` once it has delivered nothing for 2 s, since no backend surfaces
+    an error mid-call (WASAPI's invalidation stops the callbacks), and `open` again if it resumes.
+    Following a new default device is carried to M34.
+  - **The Developer ID is not taken now** (the author's decision). It is more than a signature, and the
+    entry that takes it inherits all four parts:
+    - notarizing needs the hardened runtime;
+    - under it, the microphone needs the `com.apple.security.device.audio-input` entitlement;
+    - wazero's compiler writes executable memory, which needs `allow-jit` or
+      `allow-unsigned-executable-memory`, or the codec fails every call;
+    - the usage description goes in an `Info.plist` embedded in an `__info_plist` section, which Go's
+      linker does not write.
+
+    No macOS runner exists, so signing would be `rcodesign` on the Linux runner. Until then the question
+    comes once per daemon build, as ADR 0034 says.
+  - **Seven `/code-review` rounds, a `/security-sweep` and an `/optimization-review` shaped the rest.**
+    Three rounds patched how the daemon guessed what the worker had decided, each opening the next case, so
+    the worker says it:
+    - **the ended state names the devices that ended the call**, and the daemon keeps those, never the
+      last DEVICES it read;
+    - **each report says whether the start is judged with the call going on**, which a join waiting on a
+      failing microphone answers on.
+
+    The rest:
+    - **The start is judged only on what the backends answered**, never on silence, and each device's window
+      runs from its own open returning.
+    - **Where keeps one PulseAudio client a stream**, where it made one each second; logind is asked over one
+      kept system-bus connection, its answer shared and kept 5 s, and only logind's own words for a session or
+      an account gone count as gone.
+    - **A question given up as the call is left is no refusal**, and the media stops before it is given up,
+      so a yes then opens no microphone. Giving it up does not take macOS's prompt off the screen:
+      AVFoundation's request has no cancel.
+    - **An inactive session of the account** is no device, not no session, and macOS's restricted is worded
+      as a policy, not a setting.
+
+    The sweep's three rejections are in the ledger: the system bus the account's environment names, a
+    worker publishing the call state at the pipe's rate, and another client of the account claiming the
+    worker's process id, which was judged again once the stream's place came to decide a call's end.
+  - **The manual pass ran in two unprivileged VMs.** A KDE Plasma guest on PipeWire 1.4.2, after the build
+    and again after the second, third and seventh reviews, and Windows 11 build 26300.9457:
+    - **Linux:** joined at the desktop with no prompt, wired to the card; with the seat session ended, the
+      join fails saying the account is not logged in at the machine; logged out mid-call, the call stays up
+      and says so, and logging in again brings both devices back; a capture moved to another sink's monitor
+      stays a microphone, and one moved to a null sink named `auto_null` does not.
+    - **Windows:** joined with no prompt, `norite-voice` listed by Settings; with "Let desktop apps access
+      your microphone" off, the join names it and the call listens. The refusal is `IAudioClient::Initialize`
+      answering `E_ACCESSDENIED`, and the per-app prompt Microsoft is testing has not reached that build.
+    - **A gotcha for the next pass:** WirePlumber keeps a moved stream's target
+      (`~/.local/state/wireplumber/stream-properties`), so a pass that moves a stream undoes the move, or the
+      next call opens where the last test left it.
+    - **Not walked:** macOS, on the author's Mac with the AVFoundation spike (S2); a PulseAudio server rather
+      than PipeWire, and a desktop other than KDE; a device unplugged on real hardware.
+    - **Left:** after a call ended for want of a session, `norite voice status` says the reason twice, in
+      "The last call ended" and the line after it. On Windows a refusal names the desktop-apps switch
+      alone; a build with the device-wide switch above it on that page would need the wording widened.
 - **M33 — Voice signaling, real**: op 4 (Voice State Update) and `VOICE_SERVER_UPDATE`, which do not
   exist yet: op 4 is reserved and a client sending it is closed as an unknown opcode. `norite-server`
   has started the SFU and TURN since M27, when `[voice] enabled` is set; this milestone turns that
@@ -2313,6 +2406,12 @@ of this section.
   packets never shows one and its overflow below 25% reads as random loss. The delivered rate, arrival
   spacing against departure spacing, sees it at any depth (M31's entry, architecture.md §17). It is built
   here with the downlink's subscription, or given an entry of its own.
+
+  **From M32:** a device lost mid-call is reported `failed`, by its silence, and `open` again only if the
+  same stream resumes, which an unplugged device's does not. Following the new default device
+  is built here with the rest of the call's control: on Windows, reopening after
+  `AUDCLNT_E_DEVICE_INVALIDATED`, and on macOS after the queue stops. PulseAudio moves a stream itself, and
+  M32 already reports where it went.
 
   **From M31:** a receiver's downlink adapts to nothing. The sender's controller follows its own uplink,
   per hop, and the SFU forwards every slot at its sender's bitrate. Subscription is where a receiver on a

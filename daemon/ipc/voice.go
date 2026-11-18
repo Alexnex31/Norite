@@ -137,4 +137,36 @@ type VoiceStatus struct {
 	// Processing is the call's audio processing as its join asked (M30), while there is a call; nil when
 	// there is none.
 	Processing *VoiceJoin `json:"processing"`
+	// Microphone and Speakers are what the call's devices are doing (M32), as its worker last said; nil
+	// before it has said. They stay after a call they ended, both failing, so a client can say why it
+	// ended, and go after any other end, a leave and the next join.
+	Microphone *VoiceDevice `json:"microphone"`
+	Speakers   *VoiceDevice `json:"speakers"`
 }
+
+// VoiceDevice is one of a call's devices: a VoiceDevice* state, and the worker's reason, cleaned, or "".
+// A client words the state for its OS, a refusal's setting included (ADR 0034 §1).
+type VoiceDevice struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+}
+
+// The states of a call's device, voiceipc's words, which this package cannot import: a test in
+// daemon/internal/voiceworker holds the two lists equal.
+const (
+	// VoiceDeviceOpening is being opened, or opened and not yet delivering.
+	VoiceDeviceOpening = "opening"
+	// VoiceDeviceOpen is delivering audio.
+	VoiceDeviceOpen = "open"
+	// VoiceDeviceAsking is the OS asking the person whether norite-daemon may use it (macOS).
+	VoiceDeviceAsking = "asking"
+	// VoiceDeviceRefused is the OS or the person refusing it.
+	VoiceDeviceRefused = "refused"
+	// VoiceDeviceNoDevice is no device to use.
+	VoiceDeviceNoDevice = "no_device"
+	// VoiceDeviceNoSession is the account not logged in at the machine, whoever else is, so nothing it runs
+	// may use a device (Linux).
+	VoiceDeviceNoSession = "no_session"
+	// VoiceDeviceFailed is anything else, its reason saying what.
+	VoiceDeviceFailed = "failed"
+)

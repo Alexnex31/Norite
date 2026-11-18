@@ -6,7 +6,6 @@ package audio
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -17,7 +16,9 @@ import (
 // System is WASAPI in shared mode, through COM called from Go with no cgo: the default devices, asked for
 // 48 kHz mono 16-bit, which the audio engine converts to and from whatever the device runs at
 // (AUTOCONVERTPCM). Windows names the worker's executable in its microphone switch (ADR 0034); with the
-// switch off, activating the microphone is refused and the reason says so.
+// switch off, activating the microphone is refused, and the error is a Refused Failure (outcome.go). A
+// device that goes away mid-call stops the engine's events, which the session sees as the device falling
+// silent.
 //
 // Written at M29 against Microsoft's documentation and cross-compiled; run in M24's Windows VM by the
 // milestone's manual pass, which is the first time it ran.
@@ -107,18 +108,6 @@ func release(obj unsafe.Pointer) {
 	if obj != nil {
 		com(obj, unkRelease)
 	}
-}
-
-func hresult(what string, hr uint32) error {
-	switch hr {
-	case 0x80070005:
-		return fmt.Errorf("audio: %s: access is denied (Settings, Privacy, Microphone)", what)
-	case 0x88890004:
-		return fmt.Errorf("audio: %s: the device was removed", what)
-	case 0x80070490:
-		return fmt.Errorf("audio: %s: no such device", what)
-	}
-	return fmt.Errorf("audio: %s: HRESULT 0x%08x", what, hr)
 }
 
 // stream is one direction's client, run on a thread of its own: COM objects are used where they were

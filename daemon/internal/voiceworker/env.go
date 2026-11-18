@@ -14,13 +14,15 @@ import (
 // shell's: NORITE_API_TOKEN, NORITE_PASSWORD, a cloud provider's keys. The worker, which from M29 decodes a
 // stranger's audio, gets what reaching the audio system, the network and its own files needs. M29 adds what
 // its capture library reads, and nothing else (its roadmap entry): jfreymuth/pulse reads PULSE_SERVER,
-// XDG_RUNTIME_DIR, HOME and PULSE_COOKIE, the last its one addition.
+// XDG_RUNTIME_DIR, HOME and PULSE_COOKIE, the last its one addition. M32 adds DBUS_SYSTEM_BUS_ADDRESS, by
+// which the worker asks logind whether its account is logged in, set only where the system bus is not at its
+// default path.
 var passed = map[string][]string{
 	"unix": {
 		"HOME", "USER", "LOGNAME", "PATH", "LANG", "LANGUAGE", "TZ", "TMPDIR",
 		// PipeWire and PulseAudio find their sockets through these, and the portal M32 may ask through D-Bus.
 		"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_DATA_DIRS",
-		"DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER", "PULSE_RUNTIME_PATH", "PULSE_COOKIE", "PIPEWIRE_REMOTE",
+		"DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS", "PULSE_SERVER", "PULSE_RUNTIME_PATH", "PULSE_COOKIE", "PIPEWIRE_REMOTE",
 		"PIPEWIRE_RUNTIME_DIR",
 		// Pion verifies TURN over TLS against the system's roots, which these may name.
 		"SSL_CERT_FILE", "SSL_CERT_DIR",

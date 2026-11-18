@@ -20,7 +20,8 @@ const latency = 0.02
 // System is the PulseAudio protocol, which PipeWire speaks on every mainstream desktop through
 // pipewire-pulse. The server is found through PULSE_SERVER or $XDG_RUNTIME_DIR/pulse/native, and a
 // PulseAudio cookie through PULSE_COOKIE or ~/.config/pulse/cookie, all of which the daemon passes to the
-// worker. An ALSA-only system has no server, and capture fails with the reason.
+// worker. An ALSA-only system has no server, and capture fails with the reason. With the account not
+// logged in at the machine, nothing fails, and Where is what tells (M32).
 func System() Device { return pulseDevice{} }
 
 type pulseDevice struct{}
@@ -31,12 +32,31 @@ type stream struct {
 	once  sync.Once
 	c     *pulse.Client
 	close func()
+	// capture is whether it is the microphone's, for Where. asker is Where's client, and closed says Close
+	// has run, both under askMu (pulse_where_linux.go).
+	capture bool
+	askMu   sync.Mutex
+	asker   *pulse.Client
+	closed  bool
 }
 
+// Close closes the stream at once and returns. Where's client is closed once a question in progress on it
+// has had its answer, each request bounded by the library's second, on a goroutine of its own: a server
+// that stopped answering would otherwise hold the close past the session's bound, and the speakers and the
+// codec are closed after the microphone.
 func (s *stream) Close() error {
 	s.once.Do(func() {
 		s.close()
 		s.c.Close()
+		go func() {
+			s.askMu.Lock()
+			defer s.askMu.Unlock()
+			s.closed = true
+			if s.asker != nil {
+				s.asker.Close()
+				s.asker = nil
+			}
+		}()
 	})
 	return nil
 }
@@ -70,7 +90,7 @@ func (pulseDevice) Capture(_ context.Context, frame func([]int16)) (io.Closer, e
 		return nil, fmt.Errorf("audio: the microphone opened at %d Hz and %d channels", r.SampleRate(), r.Channels())
 	}
 	r.Start()
-	return &stream{c: c, close: r.Close}, nil
+	return &stream{c: c, close: r.Close, capture: true}, nil
 }
 
 func (pulseDevice) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {

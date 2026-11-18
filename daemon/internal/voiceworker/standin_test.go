@@ -142,6 +142,9 @@ func standin(mode string) int {
 		send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
 	case "badstate":
 		send(voiceipc.OpState, voiceipc.State{State: "dancing"})
+	case "baddevices":
+		send(voiceipc.OpDevices, voiceipc.Devices{Microphone: voiceipc.Device{State: "deaf"},
+			Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}})
 	case "flood":
 		for range 10 * framesPerSecond {
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting})
@@ -211,10 +214,60 @@ func standin(mode string) int {
 			send(voiceipc.OpOffer, voiceipc.Offer{SDP: "v=0\r\nstandin\r\n"})
 		case voiceipc.OpAnswer:
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting})
-			if mode == "neverready" {
+			if mode == "neverready" || mode == "endsasleft" {
 				continue
 			}
+			if mode == "devasking" { // macOS's question, asked as the call starts, before it is up
+				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: voiceipc.Device{State: voiceipc.DeviceAsking},
+					Speakers: voiceipc.Device{State: voiceipc.DeviceOpening}})
+			}
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateReady})
+			dev := func(mic, spk, why string) voiceipc.Devices {
+				return voiceipc.Devices{Microphone: voiceipc.Device{State: mic, Reason: why},
+					Speakers: voiceipc.Device{State: spk}}
+			}
+			switch mode {
+			case "devopen": // the microphone's first frame a moment after ready, then unplugged mid-call
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpening, voiceipc.DeviceOpening, ""))
+				time.Sleep(300 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(300 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceFailed, voiceipc.DeviceOpen,
+					"it stopped delivering audio \x1b[31m"))
+			case "devneither":
+				// The ended state names the devices, which the DEVICES before it need not have reached the daemon.
+				none := voiceipc.Device{State: voiceipc.DeviceNoSession, Reason: "nobody is logged in"}
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason:  "neither the microphone nor the speakers can be used: nobody is logged in",
+					Devices: &voiceipc.Devices{Microphone: none, Speakers: none}})
+				return 0
+			case "devfailedlate": // both failing, the speakers only after their first frame: the call goes on
+				d := dev(voiceipc.DeviceNoDevice, voiceipc.DeviceNoDevice, "a stand-in")
+				send(voiceipc.OpDevices, d)
+				time.Sleep(300 * time.Millisecond)
+				d.Decided = true
+				send(voiceipc.OpDevices, d)
+			case "devclaims": // the devices working, and the status's devices failing as an end comes from elsewhere
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(100 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession, "a stand-in"))
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "their end"})
+				return 0
+			case "endsilently": // ended as the microphone is waited for, saying nothing
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded})
+				return 0
+			}
+			if mode == "devdropped" {
+				// The devices working, then both on the stand-in as the session ends mid-call, which leaves the
+				// call up, then the voice server closing it.
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
+				time.Sleep(200 * time.Millisecond)
+				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession, "nobody is logged in"))
+				time.Sleep(100 * time.Millisecond)
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason: "the voice server closed the call"})
+				return 0
+			}
 			if mode == "dropcall" {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
 					Reason: "the voice server closed the call \x1b[31m"})
@@ -226,6 +279,13 @@ func standin(mode string) int {
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue
+			}
+			if mode == "endsasleft" { // its devices ending the call as the daemon gives up on it
+				none := voiceipc.Device{State: voiceipc.DeviceNoSession}
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+					Reason:  "neither the microphone nor the speakers can be used",
+					Devices: &voiceipc.Devices{Microphone: none, Speakers: none}})
+				return 0
 			}
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"})
 			return 0

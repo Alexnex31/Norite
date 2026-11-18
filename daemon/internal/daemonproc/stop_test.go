@@ -37,11 +37,20 @@ func matchesDefinition(t *testing.T, name string, body []byte) {
 	}
 	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.Contains(t, doc.Defs, name)
-	def, err := jsonschema.UnmarshalJSON(bytes.NewReader(doc.Defs[name]))
-	require.NoError(t, err)
+	// The whole document under its own id, and the gateway's beside it, so that a definition referring to
+	// another (VoiceStatus to VoiceDevice, a Snowflake to the gateway's) resolves.
 	c := jsonschema.NewCompiler()
-	require.NoError(t, c.AddResource("stopping.json", def))
-	schema, err := c.Compile("stopping.json")
+	for _, f := range []struct{ id, file string }{
+		{"https://norite.example/contracts/daemon-ipc.schema.json", "daemon-ipc.schema.json"},
+		{"https://norite.example/contracts/gateway-events.schema.json", "gateway-events.schema.json"},
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", f.file))
+		require.NoError(t, err)
+		d, err := jsonschema.UnmarshalJSON(bytes.NewReader(b))
+		require.NoError(t, err)
+		require.NoError(t, c.AddResource(f.id, d))
+	}
+	schema, err := c.Compile("https://norite.example/contracts/daemon-ipc.schema.json#/$defs/" + name)
 	require.NoError(t, err)
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(body))
 	require.NoError(t, err)
