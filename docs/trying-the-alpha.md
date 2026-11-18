@@ -182,7 +182,9 @@ everybody's machines on one private network wherever they are.
   for example `http://192.168.1.20:8080`, or `http://my-server:8080` if your network resolves names.
   On Linux, `ip -4 addr` shows the machine's addresses; on Tailscale, `tailscale ip -4`.
 - **The server's firewall** must let that network reach TCP port 8080. With `ufw`, for example:
-  `sudo ufw allow 8080/tcp`.
+  `sudo ufw allow 8080/tcp`. A server built from `main` since M33 also listens for voice calls, on UDP 3479
+  and on UDP and TCP 3478: `sudo ufw allow 3479/udp`, `sudo ufw allow 3478`. `enabled = false` under
+  `[voice]` in its configuration turns calls off and binds neither.
 - **The trade-off**: passwords cross the network unencrypted, and the client says so every time it is
   about to send one. Inside a VPN that is fine — the tunnel encrypts everything. On a shared network
   where you do not trust everybody, use shape B instead.
@@ -202,7 +204,9 @@ chat.example.com {
 
 - **The instance URL** is `https://chat.example.com`.
 - **The firewall** must allow TCP ports 80 and 443 from the internet (80 is how Let's Encrypt checks you own
-  the name), and should *not* allow 8080.
+  the name), and should *not* allow 8080. A server built from `main` since M33 also listens for voice
+  calls, on UDP 3479 and on UDP and TCP 3478, which the proxy does not carry: allow those three to the
+  server itself, which clients reach at the name's address.
 - **Three settings** go into Norite's configuration in step 2, each for a reason:
   - `--listen-addr 127.0.0.1:8080`, so Norite only answers the proxy on the same machine and the unencrypted
     port is not reachable from outside at all;

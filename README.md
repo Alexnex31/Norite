@@ -81,8 +81,9 @@ holds a call, which the daemon starts and stops; `M29`, the call's audio in that
 microphone to the others' speakers on Linux, Windows and macOS; `M30`, which cancels the echo of your
 speakers, suppresses the noise around you and evens out your level; `M31`, which lowers the bitrate
 your voice is sent at when your connection cannot carry it, and raises it again when it can; and `M32`,
-which says when your microphone or speakers cannot be used, and which setting gives them back. The instance can start the server and the relay, off by
-default, and none of it is used until `M33` lets a client join a call.**
+which says when your microphone or speakers cannot be used, and which setting gives them back. Since
+`M33` a client joins a call over its connection to the instance, which starts the server and the relay by
+default, and the people who can see a voice channel see who is in it.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>

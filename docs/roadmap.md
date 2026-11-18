@@ -2418,6 +2418,12 @@ of this section.
   weak link asks for fewer slots (ADR 0023), so it is built here or given an entry of its own
   (architecture.md §17).
 
+  **From M33:** the worker already stops sending while keeping the DSP running, and plays silence, for a
+  moderator's server mute, a channel without `SPEAK` and a server deafen (`voiceipc.Rights`, `OpRights`),
+  which reach the call as `VoiceStatus.rights` and are worded by `ops.VoiceRights`. Self-mute and
+  self-deafen are the same two switches set by the person, and `voice_states` gains `self_mute` and
+  `self_deaf` with them, which op 4 then carries (a MINOR change to the frame).
+
   **From M30:**
   - **Mute keeps the DSP running and stops only the sending**, or AEC3 loses its convergence and the first
     words after unmuting echo. **Deafen makes the mix play silence**, which is then the reference, so
@@ -2472,15 +2478,20 @@ of this section.
   end with its reason. **M28 found a rejoin can be refused**: the SFU counts a killed worker's connection
   until ICE gives up on it, and holds two per user in a room (`ConnsPerUser`), so two crashes in quick
   succession leave a third join refused for some seconds. This milestone decides whether M33's provision
-  replaces an account's oldest connection in the room or the rejoin waits. Done when: killing the daemon
-  process mid-call results in automatic rejoin within a few seconds of restart.
+  replaces an account's oldest connection in the room or the rejoin waits. **M33 took that half**: a call
+  belongs to its gateway session, a join from a device replaces the call any older session of the same
+  device left, and the daemon tells the instance (op 4 with no channel) whenever its call ends, a worker's
+  crash included, which evicts the connection at once. So a restarted daemon's rejoin is not refused by
+  its previous run's call. What is left here is the breadcrumb and the respawn. Done when: killing the
+  daemon process mid-call results in automatic rejoin within a few seconds of restart.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
   `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,
   voice UI is hidden entirely (not grayed out) in CLI/TUI/GUI when disabled. Done when: an instance with
   voice disabled shows no voice-related UI anywhere and never starts the SFU/TURN processes. **The toggle
   exists since M27**: `[voice] enabled`, which starts or never starts both, with a test that a disabled
   instance binds none of their ports. What is left here is the wizard's question, the UI and the
-  degradation.
+  degradation. **From M33:** the toggle is on by default, and a join on an instance with it off is refused
+  `voice_disabled`; a client that hides voice needs to know before it joins, which nothing says yet.
 - **M37a — Snap package**: `norite` and `norite-server` in the Snap Store, the one channel
   [ADR 0035](adr/0035-package-managers.md) held back. Both names were registered when that ADR landed,
   so nobody else takes them. Placed after Phase E because the client snap carries the voice-worker, and
@@ -3163,6 +3174,11 @@ of this section.
   note that only reporter-attached content is visible — the honest statement of ADR 0013's break-glass
   posture.
 
+  **From M33:** a guild ban and a timeout take a voice right away, so each publishes a voice re-check
+  (`dispatch.QueueVoiceRecheck`) in its transaction, as `RemoveMember` and `queuePermissions` do: the
+  re-check is published only from the mutations that can take a right, by name. An instance ban (M72)
+  needs nothing, since its revocation drops the sessions and their calls.
+
   **`PermModerateMembers` is not a nicer `muted` role, and M13 is where that stopped being a matter of
   taste.** A timeout is enforced by a bit on the member rather than by a role, and the reason is
   structural: a positional hierarchy cannot protect a restriction that is placed low, and a restricting
@@ -3628,7 +3644,9 @@ when a constraint the terminal imposed is lifted.
   the codec-agnostic track model from M26. M26 keys admission by connection, so this is a second
   connection id for the same user, and its offer passes M26's validation once video's section bounds are
   raised. Done when: a GUI client can open a video track alongside its existing audio session with no daemon
-  changes required.
+  changes required. **From M33:** a join replaces the call any older session of the same device left
+  (`coordinator.replace`), and a GUI's video connection is a second connection of the same device, so it
+  must be exempt from that, keyed on `supports_video` or a connection of its own kind.
 - **M106 — Screen/camera capture and selection UI**: GUI-side capture and source-selection interface. Done
   when: a user can choose and share a specific window/screen or camera source.
 - **M107 — SFU video track forwarding activation**: verify the already-track-kind-agnostic SFU from M26
@@ -3713,6 +3731,11 @@ does not appear to disagree with them.
 
   Done when: `helm install` against an empty cluster brings the API up behind an Ingress and
   `/api/v1/healthz` answers 200 from outside the cluster.
+
+  **From M33:** the voice coordinator deletes every `voice_states` row as its process starts, since a
+  single process held every call. With several API replicas that is one replica deleting the others'
+  calls, so the rows gain the replica that holds them and each sweeps its own, and a re-check is each
+  replica's for the calls it holds, which it already is.
 - **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, with backup and
   point-in-time recovery on **CSI volume snapshots** rather than an object store.
 

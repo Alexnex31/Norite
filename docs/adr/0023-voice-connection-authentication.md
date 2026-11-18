@@ -30,6 +30,20 @@ offer, because the client gathers its relayed candidate with it and the offer ca
 (roadmap, M33). Its secret is derived from the instance signing key, so at M116 a TURN pod holds the
 derived secret and nothing replayable against the API.
 
+**Amended at M33 (2026-11-18)**, in two places, neither changing what authenticates a connection:
+- **The TURN credential arrives with the answer**, in `VOICE_SERVER_UPDATE`, no longer before the offer.
+  The SFU is ICE-lite and learns the client's addresses from its checks, so the offer needs no candidate:
+  the worker creates its offer, sends it, and gathers only once the answer has named the servers. Measured
+  by M33's spike S1: a client relayed over UDP, TCP or TLS connects as before, and one whose TURN over UDP
+  is unreachable joins in 10 ms where gathering first took 8 s. The credential is still the account's, ten
+  minutes, and reaches the SFU's port and nothing else.
+- **What a participant may do in a call is applied by the client**: a server mute or a channel without
+  `SPEAK` stops the worker sending, a server deafen makes it play silence, and the SFU enforces neither,
+  so `Control` is unchanged. A kick, a lost `CONNECT` and the end of a sign-in still end the connection
+  on the server, by `Evict` and `EvictConnection`. The security ledger records the trade.
+- `MediaCoordinator.AllocateSession`, which this record names below, is built as the voice coordinator's
+  join (`backend/internal/voice/coordinator`), and `VoiceServerInfo` as `VOICE_SERVER_UPDATE`.
+
 ## Context
 A client's voice-worker holds a **direct WebRTC connection to the SFU** — media never passes through the
 daemon or the backend, which is what makes both the latency and the fault isolation real. So the SFU has to

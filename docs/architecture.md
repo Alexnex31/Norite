@@ -91,7 +91,8 @@ Locked-in decisions:
 │   │   │                        #   (block-aware from M70); the wire format is backend/gatewayproto,
 │   │   │                        #   outside internal/ so the daemon can import it (M19)
 │   │   ├── voice/                # Pion SFU: rooms, connections, slots, the control interface (M26);
-│   │   │   │                    #   the stack starting it with TURN (M27); PionMediaCoordinator (M33)
+│   │   │   │                    #   the stack starting it with TURN (M27)
+│   │   │   ├── coordinator/      # op 4's other half: authorize, provision, voice_states, re-checks (M33)
 │   │   │   ├── turn/             # embedded pion/turn server, relaying to the SFU alone (M27)
 │   │   │   ├── rate/             # the one-second meter and strikes the SFU and TURN share
 │   │   │   ├── pionlog/          # Pion's logs into the server's logger
@@ -634,14 +635,16 @@ CREATE TABLE email_verification_tokens (       -- added at M10; the same shape a
   consumed_at timestamptz NULL
 );
 
-CREATE TABLE voice_states (                    -- now ACTIVE, not reserved
-  guild_id bigint NOT NULL, channel_id bigint NOT NULL, user_id bigint NOT NULL, session_id text NOT NULL,
-  self_mute boolean NOT NULL DEFAULT false, self_deaf boolean NOT NULL DEFAULT false,
-  mute boolean NOT NULL DEFAULT false, deaf boolean NOT NULL DEFAULT false,
+CREATE TABLE voice_states (                    -- M33; migration 000026 is its authority
+  connection_id bigint PRIMARY KEY,              -- one row per connection, which ADR 0023 lets an account
+                                                 --   hold two of; this sketch had (guild_id, user_id)
+  guild_id bigint NOT NULL, channel_id bigint NOT NULL, user_id bigint NOT NULL,
+  session_id text NOT NULL, device_id text NOT NULL,   -- the gateway session the call belongs to
+  mute boolean NOT NULL DEFAULT false, deaf boolean NOT NULL DEFAULT false,   -- as last told the channel
+  suppress boolean NOT NULL DEFAULT false,       -- the account lacks SPEAK here
   supports_video boolean NOT NULL DEFAULT false,   -- client capability flag; terminal clients always false
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (guild_id, user_id)
-);
+  created_at timestamptz NOT NULL DEFAULT now()
+);                                               -- self_mute and self_deaf are M34's, added with it
 
 CREATE TABLE audit_log_entries (
   id bigint PRIMARY KEY, guild_id bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,
@@ -959,8 +962,8 @@ WS endpoint `wss://<host>/gateway`, envelope `{ "op": <int>, "d": <object|null>,
 The **daemon**, not each attach client, is the actual gateway client — see §3.
 
 Op-codes: Server→Client `0` Dispatch, `7` Reconnect, `9` Invalid Session, `10` Hello, `11` Heartbeat ACK.
-Client→Server `1` Heartbeat, `2` Identify, `3` Presence Update, `4` Voice State Update (reserved: closed as
-an unknown opcode until M33 wires it to `PionMediaCoordinator`), `6` Resume, `8` Request Guild Members.
+Client→Server `1` Heartbeat, `2` Identify, `3` Presence Update, `4` Voice State Update (since M33: join a
+voice channel with the voice-worker's offer, or leave with no channel), `6` Resume, `8` Request Guild Members.
 
 **Auth transport**: `Identify` carries the daemon's Bearer access token (obtained via the token-based auth
 flow, §"Auth design" below) — never a cookie, since there is no browser. **`Hello` carries the backend's
@@ -1054,9 +1057,34 @@ guild-channel message/presence/`@mention` events, a blocked author's content is 
 target list entirely, at `gateway.withoutBlocked`, the stage M18 left empty for M70 to fill — never sent over the wire to the blocker's connection, and never merely hidden
 client-side. A block/unblock action updates the affected connection's cached set immediately.
 
-**Voice signaling** (M33): `internal/voice.MediaCoordinator` is built as `PionMediaCoordinator`, over the
-SFU's control interface from M26 (§6). The voice-join payload carries `supports_video: bool` (the terminal
-clients always `false`) and the client's SDP offer, under 12 KiB so op 4 fits the 16 KiB inbound frame.
+**Voice signaling** (M33): op 4 carries a join, the voice-worker's SDP offer for a voice channel under M26's
+12 KiB bound with `supports_video` (the terminal clients always `false`), or a leave, whose channel is null.
+It reaches the voice coordinator (`backend/internal/voice/coordinator`), which reads the database the SFU
+must not, over the SFU's control interface (§6).
+- **A join is answered to the session that sent it and to nobody else**, by `VOICE_SERVER_UPDATE` (the SFU's
+  answer, the account's TURN credential, the channel's bitrate and the account's rights) or
+  `VOICE_JOIN_REFUSED` (a code from a fixed vocabulary). Both are numbered like any dispatch, so a resume
+  replays them; neither crosses the bus, and the daemon forwards neither to attach clients, since the first
+  carries a credential. A refused join never closes the connection. Joins are rated ten a minute per
+  account, charged once the checks that cost nothing have passed.
+- **A call belongs to its gateway session.** One per session; a join replaces the session's call and any
+  call its device left on an older session; dropping the session, by a revocation or by its resume window
+  running out, ends the call. So the end of a sign-in ends its calls with no path of its own.
+- **A lost right ends the call on the server.** The mutations that can take `CONNECT` away (permissions, a
+  kick, a deleted channel or guild) and those that change a server mute or deafen publish a re-check on a
+  topic of their own (`dispatch.VoiceTopic`), never on the client-facing events, which a busy guild sends far
+  more of. Each process re-checks the calls it holds in that guild against fresh rows (`guildauth.Voice`,
+  the join's own question), one running and one waiting per guild. A join registers before it is
+  authorized, and an eviction's cutoff refuses a provision issued before it. The bus is at most once, so a
+  lost re-check leaves a caller in the call until the guild's next one (ledger).
+- **Who is in a voice channel** is `voice_states`, one row per connection, keyed by it: ADR 0023 lets an
+  account hold two. `VOICE_STATE_UPDATE` and `VOICE_STATE_DELETE` reach the channel's viewers, and
+  `GET /channels/{id}/voice-states` is what a client connecting later reads. `user_limit` is counted there,
+  in accounts, under a lock on the channel. A single process deletes every row at start; the flagship's
+  replicas sweep their own (Phase P).
+- **Mute, deafen and suppress are the client's to apply.** A row carries a moderator's server mute and
+  deafen and `suppress`, the account lacking `SPEAK`; the worker stops sending or plays silence, and the SFU
+  enforces neither (ADR 0023 as amended at M33, ledger).
 
 ### REST API
 
@@ -2266,9 +2294,13 @@ deferred but architected now so it's additive later. See [ADR 0012](adr/0012-voi
 **Media server**: a self-hosted, custom-built SFU on Pion (Go), not LiveKit, not a plain P2P mesh.
 
 ```go
-// internal/voice — the backend's seam (M33): chooses which SFU serves a session, then provisions it.
-type MediaCoordinator interface {
-    AllocateSession(ctx context.Context, guildID, channelID, userID snowflake.ID, supportsVideo bool, offer string) (VoiceServerInfo, error)
+// internal/voice/coordinator — the backend's seam, as built at M33: op 4's join for a gateway session,
+// answered with VOICE_SERVER_UPDATE or VOICE_JOIN_REFUSED. Which SFU serves the call is decided here, one
+// SFU per process until proximity routing; the guild comes off the channel row, never from the client.
+type Voice interface { // as the gateway names it
+    Join(ctx context.Context, userID snowflake.ID, sessionID, deviceID string, v gatewayproto.VoiceStateUpdate) (event string, payload any)
+    Leave(ctx context.Context, userID snowflake.ID, sessionID string)
+    Ended(userID snowflake.ID, sessionID string) // a dropped session's call
 }
 
 // internal/voice — the SFU's control interface (M26). A Go call on a self-hosted instance, where the SFU
@@ -2319,18 +2351,19 @@ is what makes fault isolation real: a media-pipeline bug can only crash the work
 - **A crash is a closed pipe the daemon did not ask for, or a non-zero exit.** The daemon logs it with the
   worker's last lines, and the call ends with that reason. Nothing else in the daemon notices.
 - **It is part of the daemon's install**, never released alone. It is in the client archive beside
-  `norite-daemon`, and the updater stages, smoke-runs and installs the three together. Until M33 the
-  daemon signals through M26's harness, compiled in only under the `norite_voiceharness` tag.
+  `norite-daemon`, and the updater stages, smoke-runs and installs the three together. Since M33 the
+  daemon signals over its own gateway connection; M26's harness is reached only by a build with the
+  `norite_voiceharness` tag.
 
 **Connection authentication** (settled by ADR 0023): **no bearer token participates in a voice connection.**
 The voice-worker generates an ephemeral DTLS keypair and ICE credentials per call; its fingerprint travels up
-through the daemon and over the already-authenticated gateway (op 4); the backend resolves
-`PermConnectVoice` against fresh data and provisions the chosen SFU over internal mTLS; the DTLS handshake
-then mutually verifies both fingerprints. `VoiceServerInfo` carries connection parameters, never a
-credential, with one exception settled at M27: a TURN credential, which reaches the SFU's port and
-nothing else, and arrives before the offer (see TURN below). A compromised SFU pod therefore holds nothing replayable, and the client verifies the SFU's
-identity too — which a bearer token would not give. Revocation mid-call (ban, kick, lost permission) is a
-**push** from the backend over the same control channel, not an expiry.
+through the daemon and over the already-authenticated gateway (op 4); the backend resolves `PermConnectVoice`
+against fresh data and provisions the chosen SFU over internal mTLS; the DTLS handshake then mutually verifies
+both fingerprints. `VoiceServerInfo` carries connection parameters, never a credential, with one exception
+settled at M27: a TURN credential, which reaches the SFU's port and nothing else, and since M33 arrives with
+the answer (see TURN below). A compromised SFU pod therefore holds nothing replayable, and the client verifies
+the SFU's identity too — which a bearer token would not give. Revocation mid-call (ban, kick, lost permission)
+is a **push** from the backend over the same control channel, not an expiry.
 
 **Stream model**: streams are always per-sender and **never mixed** — the client mixes locally in the
 voice-worker. The SFU forwards **tracks**, each of a kind, never "the participant's track": a connection
@@ -2367,10 +2400,12 @@ in the stack, and uses none. AEC3 rather
 than speexdsp because the echo canceller is the single most audible determinant of call quality, and
 double-talk handling is where the older component falls behind what users expect.
 
-**Call quality**: Opus at **64 kbps** by default, per-channel configurable, with in-band FEC and DTX enabled
-— parity with the commercial platforms users compare against. The remaining determinant is geography:
+**Call quality**: Opus at **128 kbps** by default since M33, per-channel configurable from 16 to 224 kbps,
+with in-band FEC and DTX enabled. 224 kbps is the most a 20 ms packet with its headers carries under the
+SFU's 256 kbps per-track bound, measured on speech. The cost of the default is downstream: twenty callers are
+about 2.5 Mbps to each listener until subscription caps it (M34). The remaining determinant is geography:
 mouth-to-ear latency is dominated by the network leg, so a user far from the SFU sees a less fluid
-conversation that no codec or DSP work compensates for. `MediaCoordinator.AllocateSession` chooses which SFU
+conversation that no codec or DSP work compensates for. The coordinator's join chooses which SFU
 serves a session, so **proximity routing is a seam already in place**; v1 runs a single region deliberately.
 
 **Adaptive bitrate** (M31): the SFU's transport-wide (TWCC) feedback drives the encoder's runtime bitrate and
@@ -2395,11 +2430,13 @@ network refusing UDP usually allows only 80 and 443 out (M27).
   public or one of its interfaces', and the relay sends to the media address whichever it named,
   answering as that address: a STUN response as the one its request went to.
 - **Its credential is the TURN REST shape**, `expiry:user`, signed with a secret HKDF-derived from the
-  instance signing key, and scoped to the account: the client gathers its relayed candidate before it
-  makes the offer, so the credential precedes the connection id. Its expiry is asked of an Allocate alone,
-  so it lives ten minutes and the allocation as long as it is refreshed; an allocation the SFU sends
-  nothing through for 30 seconds closes. What it grants is reach to the SFU's port, which anyone may send
-  to already, and the SFU admits nothing it was not told to expect.
+  instance signing key, and scoped to the account. Since M33 it arrives with the SFU's answer: the offer
+  carries no candidate, since the ICE-lite SFU learns the client's addresses from its checks, and the worker
+  gathers only once the answer has named the servers, so an unreachable TURN server no longer holds the
+  offer back (8 s on M28's Windows pass). Clients are told TURN is at `public_base_url`'s host name. Its
+  expiry is asked of an Allocate alone, so it lives ten minutes and the allocation as long as it is
+  refreshed; an allocation the SFU sends nothing through for 30 seconds closes. What it grants is reach to
+  the SFU's port, which anyone may send to already, and the SFU admits nothing it was not told to expect.
 - **The SFU is ICE-lite**: it answers checks and never sends one, so no address an offer names is ever
   sent anything.
 
@@ -3191,7 +3228,8 @@ during implementation, and must be documented plainly wherever the relevant subs
 - **A receiver's downlink adapts to nothing.**
   - **Why:** the controller is per hop. A sender follows its own uplink, and the SFU forwards every slot at
     its sender's bitrate, with no simulcast and no transcoding.
-  - **The effect:** a receiver on a weak link gets up to 16 slots of up to 64 kbps, whatever it can carry.
+  - **The effect:** a receiver on a weak link gets up to 16 slots of up to 128 kbps by default, whatever it
+    can carry.
   - **The answer:** subscription, which is client-driven and capped (ADR 0023). M34's entry carries it.
 - **A browser alone cannot complete an OAuth sign-in, by design.** The flow is bound to the *client* that
   started it rather than to the browser that walks through it: `/authorize` requires a `flow_challenge` and

@@ -2083,7 +2083,7 @@ And on the SFU, from M26 (ADR 0023 as amended):
 - **The data channel is `contracts/voice-datachannel.schema.json`**, decoded strictly; a field added is a
   MINOR change. Every test client's messages are held to it.
 - **`voicetest`'s harness is never in a release**, and a test reads `.goreleaser.yaml` to hold that.
-  M27 and M29 signal through it until M33.
+  M27 and M29 signalled through it until M33, and the worker's tests still do.
 - **Testing the SFU**: `join` gives a connected Pion client over loopback, `TonePackets` real Opus, and
   `testPanic` a panic or an eviction at a named point. A sender's sequence numbers continue across sends,
   or SRTP drops the burst. A race between an eviction and a provision is staged with cutoffs and
@@ -2099,7 +2099,8 @@ And on TURN, from M27:
   its request went to.
 - **No pion/turn default is trusted.** Its auth handler, permission handler, listeners and relay
   generator are all this package's; a new pion/turn option is read in its source before it is used.
-- **A credential is the account's, minted by `turn.Mint`, and reaches the client before its offer.**
+- **A credential is the account's, minted by `turn.Mint`**, and since M33 reaches the client with the
+  SFU's answer, before the worker gathers.
   Expiry is asked of an Allocate alone; nothing else in a credential is time-bound. Nothing is logged per
   request: a username is a stranger's text, and pion's own lines are sampled, ten a minute.
 - **An allocation ends when the SFU stops sending through it** (`Limits.Idle`), which is also how it ends
@@ -2157,22 +2158,26 @@ And on the voice-worker, from M28:
   twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
   after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
 - **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns once
-  the worker is reaped. Each call ends with the sign-in it was joined under, through the session's own `Ended`
-  channel and never the gateway connection's end, which a sign-out made while the instance is unreachable does
-  not reach; a join that read a sign-in since ended is refused. The SFU is reached through a `Signaler`; until
-  M33 the only one is M26's harness, compiled in under `norite_voiceharness` alone, which no release build
-  passes (a test holds both).
+  the worker is reaped. Each call ends with the sign-in it was joined under, through the session's own
+  `Ended` channel and never the gateway connection's end, which a sign-out made while the instance is
+  unreachable does not reach; a join that read a sign-in since ended is refused. The SFU is reached through
+  a `Signaler`; since M33 every build's is the gateway's (`voiceworker.Gateway`, op 4), and M26's harness is
+  reached only under `norite_voiceharness` with `NORITE_VOICE_HARNESS` set, which no release build passes (a
+  test holds it).
 - **A join's path carries a channel id**, so a client asks `GET /@daemon/voice` first, M22's answer to
   the ledger's entry on the prefix.
 - **The worker ships beside the daemon and updates with it.** It has no release of its own. The updater
   stages and smoke-runs three programs; an install from before M28 has none to keep, and undoing to it
   removes the worker. A worker and a daemon of different versions are refused at the first frame.
-- **The worker offers at most `voiceproto.MaxCandidates` candidate lines, each once in the first
-  section**, relays first, which is where Pion reads them and what the SFU admits.
-- **What the voice server answers is a stranger's too** (from M33 an instance's). The worker's ICE agent
-  takes up only the candidates `session.reachable` admits, never this host, its link or a metadata
-  address unless the join admits loopback, and at most `maxRemotes`. The pipe's bounds confine nothing: the
-  worker runs as the account, and whether the OS confines it is M29's decision.
+- **The worker's offer carries no candidate** (M33): it is created before anything gathers, and the
+  worker gathers only once the answer names the TURN servers, since the ICE-lite SFU learns its addresses
+  from its checks.
+- **What the voice server answers is a stranger's too**, since M33 an instance's. The worker's ICE agent takes
+  up only the candidates `session.reachable` admits, never this host, its link or a metadata address unless
+  the join admits loopback, and at most `maxRemotes`; it dials the instance's TURN servers through
+  `session.guardedNet`, which refuses the same addresses after resolving; and the SRTP streams the server
+  can make it open are counted against its slots (`session/streams.go`). The pipe's bounds confine nothing:
+  the worker runs as the account, and whether the OS confines it is M29's decision.
 - **Testing the worker**: `standin_test.go` re-runs the package's test binary as a worker playing each
   hostile case; wait on a stand-in with `drain`, which fails rather than hangs. `e2e_test.go` builds
   `norite-voice` and M26's harness from the checkout and makes real calls. The worker's own loop is tested

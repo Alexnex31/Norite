@@ -1871,15 +1871,17 @@ carries the condition that would reopen it.
 
 ### A TURN credential survives the end of the sign-in it was minted for
 - **Raised**: M27, `/security-sweep`
-- **Verdict**: accepted risk, with M33's half named there
+- **Verdict**: accepted risk; M33 built its half
 - **Why**: a credential is a stateless HMAC (`turn.Mint`), so rule 17's revocation cannot reach one; it
   starts allocations for ten minutes after a logout, a ban or an account deletion. What it reaches is the
   SFU's media port, and the SFU admits only a connection provisioned for it, which an ended sign-in
-  cannot get. A call already under way is the SFU's to end: M33 evicts on a kick, a ban and a lost
-  permission, and its entry now says a sign-in ending evicts too, after which the relay goes quiet and
-  closes 30 s later.
-- **Reopens if**: a credential's lifetime grows, it authorizes anything beyond the relay, or M33 ships
-  without evicting on the end of a sign-in.
+  cannot get. A call already under way is ended on the server: since M33 a call belongs to its gateway
+  session, which every end of a sign-in drops (the revocation topic, and the resume window for one never
+  resumed), and dropping it evicts the connection, after which the relay goes quiet and closes 30 s
+  later. A kick and a lost permission evict by the voice re-check. Since M33 the credential arrives with
+  the SFU's answer, minted for a session the gateway has just checked is live.
+- **Reopens if**: a credential's lifetime grows, it authorizes anything beyond the relay, or a call stops
+  belonging to a session whose end the revocation reaches.
 
 
 ## M28 — Voice-worker subprocess and IPC
@@ -2266,3 +2268,43 @@ carries the condition that would reopen it.
   just signed that daemon in to the link's instance by hand, and `v0.1.2` reads no links, so a bare code
   is the only way it joins.
 - **Reopens if**: the note outlives `v0.2.0`, or a guide offers a bare code where a link would do.
+
+
+## M33 — Voice signaling, real
+
+### A lost voice re-check leaves a caller in the call
+- **Raised**: M33, planning
+- **Verdict**: accepted risk
+- **Why**: a kick, a lost `CONNECT` or a deleted channel ends a call by a re-check `guilds` publishes on
+  `dispatch.VoiceTopic` after its commit, and the bus is at most once (`internal/platform/events`). One that
+  is lost leaves the caller in the call until the guild's next re-check, or until the call ends. The
+  in-process bus every self-hosted instance runs loses nothing short of a crash; Redis pub/sub can. A
+  periodic re-check of every call was weighed and not built: it costs a resolution per guild with calls,
+  on every process, whether anything changed or not, and the author chose the topic alone.
+- **Reopens if**: the Redis bus is seen losing messages, a griefer is seen surviving a kick, or a voice
+  right starts mattering more than a call's audio (a stage's speakers, M105).
+
+### A server mute and a channel without SPEAK are applied by the client
+- **Raised**: M33, planning
+- **Verdict**: accepted risk
+- **Why**: a moderator's server mute, a role or overwrite denying `SPEAK`, and a server deafen reach the
+  caller as its rights (`VoiceState.mute`, `deaf`, `suppress`), and its worker stops sending or plays
+  silence. The SFU forwards whatever an admitted connection sends, so a modified client ignoring a mute
+  is heard. What the server does enforce is who is in the call at all: a kick and a lost `CONNECT`
+  evict, and a ban will from M74. Enforcing in the SFU needs a rights call on `voice.Control`, which
+  crosses M116's mTLS; the author chose the client's half for M33 (ADR 0023 as amended).
+- **Reopens if**: a guild is seen griefed through a mute a client ignored, public matchmaking (M66) puts
+  strangers in calls with no moderator to kick, or `Control` gains a rights call for another reason.
+
+### The worker dialing an instance's TURN servers
+- **Raised**: M28, `/security-sweep`, carried to M33
+- **Verdict**: fixed at M33, recorded for its limit
+- **Why**: the TURN servers a call gathers with are the instance's words, and the worker dials them over
+  UDP, TCP and TLS. Its ICE agent now dials through `session.guardedNet`, which refuses after resolving
+  what `reachable` refuses for a remote candidate: loopback unless the join admits it, this host's link,
+  and the metadata services. Private ranges are dialed, because a self-hosted instance on a LAN is in one,
+  so an instance can still make its clients send TURN requests to a host on their own network; each is a
+  STUN-framed Allocate, which an ordinary service drops.
+- **Reopens if**: the worker gains a way to dial that is not the agent's, or a request it sends to a TURN
+  server carries anything a service on a LAN would act on.
+
