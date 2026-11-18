@@ -33,6 +33,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/sdp/v3"
+	"github.com/pion/transport/v5/stdnet"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -184,6 +185,16 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(join.Loopback)
 	se.SetRemoteIPFilter((&remotes{loopback: join.Loopback}).admit)
+	// What the agent dials, the instance's TURN servers among it, is judged where it is dialed (dialnet.go).
+	host, err := stdnet.NewNet()
+	if err != nil {
+		return nil, err
+	}
+	se.SetNet(guardedNet{Net: host, loopback: join.Loopback})
+	// Every SRTP stream's buffer is counted against what the call accounts for (streams.go).
+	st := &streams{}
+	se.BufferFactory = st.buffer
+
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(reg),
 		webrtc.WithSettingEngine(se))
 	// No ICE server yet: the answer names them, and Accept sets them before anything gathers.
@@ -228,6 +239,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		close(s.codecDone)
 		close(s.dspDone)
 	}
+	st.over = func() { s.end("the voice server sent on more streams than the call has slots") }
 	pc.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) { s.trackArrived(remote{tr, rcv}) })
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
