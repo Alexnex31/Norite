@@ -296,7 +296,7 @@ func (c *Coordinator) Join(
 
 	state, code, err := c.record(ctx, cl, row, mine, *v.SupportsVideo)
 	if err != nil || code != "" {
-		_ = c.opts.SFU.EvictConnection(context.WithoutCancel(ctx), connID)
+		_ = c.opts.SFU.EvictConnection(context.WithoutCancel(ctx), connID, "")
 		if err != nil {
 			c.log.Error().Err(err).Msg("a voice join could not be recorded")
 			code = gatewayproto.VoiceUnavailable
@@ -307,7 +307,7 @@ func (c *Coordinator) Join(
 	// Ended while it was under way: by its session going, a leave, or a re-check finding the right gone.
 	// The record stands until now, so the end that canceled it could not have removed it; this does.
 	if reason := c.establish(cl); reason != "" {
-		c.end(context.WithoutCancel(ctx), cl)
+		c.end(context.WithoutCancel(ctx), cl, "")
 		if reason == canceledByRecheck {
 			return refuse(gatewayproto.VoiceForbidden)
 		}
@@ -438,7 +438,7 @@ func memberFlags(ctx context.Context, q *db.Queries, guildID snowflake.ID, users
 // Leave ends the session's call, and a join it has under way.
 func (c *Coordinator) Leave(ctx context.Context, userID snowflake.ID, sessionID string) {
 	if cl := c.take(sessionID, canceledByLeave); cl != nil {
-		c.end(ctx, cl)
+		c.end(ctx, cl, "")
 	}
 }
 
@@ -459,7 +459,7 @@ func (c *Coordinator) Ended(userID snowflake.ID, sessionID string) {
 		defer c.wg.Done()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), endWithin)
 		defer cancel()
-		c.end(ctx, cl)
+		c.end(ctx, cl, endedSession)
 	}()
 }
 
@@ -530,7 +530,7 @@ func (c *Coordinator) forgetLocked(cl *call) {
 // daemon's new session takes over from the one its previous run left behind for the resume window.
 func (c *Coordinator) replace(ctx context.Context, joining *call) {
 	if cl := c.take(joining.session, ""); cl != nil {
-		c.end(ctx, cl)
+		c.end(ctx, cl, "")
 	}
 	rows, err := c.q.ListVoiceStatesOfDevice(ctx, db.ListVoiceStatesOfDeviceParams{
 		UserID: int64(joining.user), DeviceID: joining.device,
@@ -544,14 +544,25 @@ func (c *Coordinator) replace(ctx context.Context, joining *call) {
 		// replica's to forget, and its end finds the row gone.
 		c.take(r.SessionID, "")
 		c.end(ctx, &call{conn: snowflake.ID(r.ConnectionID), guild: snowflake.ID(r.GuildID),
-			channel: snowflake.ID(r.ChannelID), user: snowflake.ID(r.UserID)})
+			channel: snowflake.ID(r.ChannelID), user: snowflake.ID(r.UserID)}, endedReplaced)
 	}
 }
 
-// end closes a call on the SFU, deletes its row and tells the channel. Each step is idempotent: an end
-// racing another, or a cascade, finds the row gone and says nothing.
-func (c *Coordinator) end(ctx context.Context, cl *call) {
-	if err := c.opts.SFU.EvictConnection(ctx, cl.conn); err != nil && !errors.Is(err, voice.ErrClosed) {
+// Why a call was ended, as the SFU tells its client before it closes the connection, in words the client
+// shows the person (M33's manual pass, where every one of them read "the voice server closed the call").
+// A call its client left is told nothing.
+const (
+	endedChannelGone = "the voice channel was deleted"
+	endedNotMember   = "you are no longer a member of this guild"
+	endedNoConnect   = "you may no longer join this voice channel"
+	endedSession     = "this device's session with the instance ended"
+	endedReplaced    = "this device joined a voice channel again"
+)
+
+// end closes a call on the SFU, saying why unless why is empty, deletes its row and tells the channel. Each
+// step is idempotent: an end racing another, or a cascade, finds the row gone and says nothing.
+func (c *Coordinator) end(ctx context.Context, cl *call, why string) {
+	if err := c.opts.SFU.EvictConnection(ctx, cl.conn, why); err != nil && !errors.Is(err, voice.ErrClosed) {
 		c.log.Warn().Err(err).Msg("the SFU could not end a call")
 	}
 	err := database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {

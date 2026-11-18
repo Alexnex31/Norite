@@ -322,6 +322,28 @@ func TestSeveralPublicAddressesAreWarnedAbout(t *testing.T) {
 	}
 }
 
+// An SFU bound to loopback announces nothing a client can reach, so norite-server warns: every join on it
+// times out with nothing logged (M33's manual pass). The harness and the tests, which admit loopback, are
+// not warned.
+func TestALoopbackMediaAddressIsWarnedAbout(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		var log syncLog
+		opts := stackOptions(t)
+		opts.Loopback = admitted
+		opts.Public = []netip.Addr{netip.MustParseAddr("203.0.113.7")}
+		opts.Logger = zerolog.New(&log)
+		st, err := StartStack(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned := strings.Contains(log.String(), "media_listen is a loopback address")
+		_ = st.Close()
+		if warned == admitted {
+			t.Errorf("loopback admitted %v: warned %v: %s", admitted, warned, log.String())
+		}
+	}
+}
+
 // syncLog is a log the stack's goroutines write while a test reads it.
 type syncLog struct {
 	mu  sync.Mutex

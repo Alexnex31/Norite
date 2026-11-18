@@ -250,8 +250,13 @@ func (v view) Text(t *output.Text) {
 		t.Line("Joining voice channel %s.", channel)
 	default:
 		t.Line("Not in a voice call.")
-		if v.Reason != "" && v.Reason != "left" {
+		// A join that failed is not a call that ended, which the status says apart since M33.
+		switch {
+		case v.Reason == "" || v.Reason == "left":
+		case v.EndedInCall:
 			t.Line("The last call ended: %s.", output.Clean(v.Reason))
+		default:
+			t.Line("The last join failed: %s.", output.Clean(v.Reason))
 		}
 	}
 	if p := v.Processing; p != nil && v.State != ipc.VoiceIdle {

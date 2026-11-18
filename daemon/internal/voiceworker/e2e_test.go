@@ -166,7 +166,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.True(t, v.Busy())
 
 	st = v.Leave()
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, st)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", EndedInCall: true, Available: true}, st)
 	require.False(t, v.Busy())
 	require.Equal(t, []string{ipc.VoiceJoining, ipc.VoiceInCall, ipc.VoiceIdle}, seen.states())
 

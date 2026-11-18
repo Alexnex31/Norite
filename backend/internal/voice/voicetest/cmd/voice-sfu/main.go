@@ -168,7 +168,7 @@ func run(media, public, httpAddr string, loopback bool, turnAddr, turnTLS, cert,
 			http.Error(w, "not a connection id", http.StatusBadRequest)
 			return
 		}
-		_ = sfu.EvictConnection(r.Context(), id)
+		_ = sfu.EvictConnection(r.Context(), id, "")
 		w.WriteHeader(http.StatusNoContent)
 	})
 

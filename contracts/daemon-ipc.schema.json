@@ -685,12 +685,13 @@
     "VoiceStatus": {
       "type": "object",
       "description": "The body of a 200 answer to every request under /@daemon/voice (M28): GET /@daemon/voice, POST /@daemon/voice/join/{channel} and POST /@daemon/voice/leave. Only the join takes a body, a VoiceJoin (M30). The join's path carries a channel id and its body the user's settings, so a client asks GET /@daemon/voice first and sends either only to a daemon that answered it: a daemon older than these requests relays the path to its instance (docs/security-ledger.md). Trust tier: the attach socket's alone; the port for scripts serves nothing under /@daemon/. A join answers once the call is up; one refused for a reason the daemon understood (signed out, not available in this build) answers the relay's conflict error, and one that was tried and failed (the voice worker, the voice server) answers failed, each with the reason.",
-      "required": ["state", "channel", "reason", "available", "unavailable", "processing", "microphone", "speakers", "rights"],
+      "required": ["state", "channel", "reason", "ended_in_call", "available", "unavailable", "processing", "microphone", "speakers", "rights"],
       "additionalProperties": false,
       "properties": {
         "state": { "enum": ["idle", "joining", "in_call"], "description": "idle is no call; joining is a join under way; in_call is connected, the voice server having said ready." },
         "channel": { "type": "string", "pattern": "^([0-9]{1,20})?$", "description": "The call's channel id while there is a call, or empty." },
         "reason": { "type": "string", "maxLength": 256, "description": "Why the last call ended or the last join failed, for a person, or empty. Sanitized: it may be the voice worker's or the voice server's words." },
+        "ended_in_call": { "type": "boolean", "description": "Whether reason is why a call that was up ended, rather than why a join failed before it was (M33), so that a client words the two apart. False while there is a call, and before any." },
         "available": { "type": "boolean", "description": "Whether this daemon can join a call at all. Until M33 only a build for M26's harness could; since, a daemon signed in to an instance that runs voice." },
         "unavailable": { "type": "string", "description": "Why not, when available is false; empty otherwise." },
         "processing": { "oneOf": [{ "type": "null" }, { "type": "object", "required": ["echo_cancellation", "noise_suppression", "auto_gain"], "additionalProperties": false, "properties": { "echo_cancellation": { "type": "boolean" }, "noise_suppression": { "type": "boolean" }, "auto_gain": { "type": "boolean" } } }], "description": "The call's audio processing as its join asked (M30), a VoiceJoin, while there is a call; null when there is none." },

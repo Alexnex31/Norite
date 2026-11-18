@@ -219,7 +219,7 @@ func TestAPanicInSelectionIsContainedWhereverItRuns(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = s.EvictConnection(context.Background(), a.conn)
+		_ = s.EvictConnection(context.Background(), a.conn, "")
 		close(done)
 	}()
 	select {

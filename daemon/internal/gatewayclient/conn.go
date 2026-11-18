@@ -164,6 +164,11 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 					c.sessionID = ready.SessionID
 				}
 				out.established = true
+				// Before the connection is live, so a join can only be sent on the new session once its
+				// predecessor's call has been let go.
+				if c.newSession != nil {
+					c.newSession()
+				}
 				c.live.Store(ws)
 				c.log.Info().Int64("seq", seq.Load()).Msg("connected to the gateway")
 			case "RESUMED":

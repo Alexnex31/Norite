@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -102,3 +104,40 @@ func TestTheRepliesToOp4NeverReachTheSink(t *testing.T) {
 }
 
 func strictJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
+
+// A session that begins afresh is told, before the connection is live, and one resumed is not: a voice call
+// belongs to its session (M33), so the daemon's ends with the session the instance no longer holds.
+func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
+	var fresh atomic.Int32
+	var liveWhenTold atomic.Bool
+	var h *harness
+	h = start(t, func(o *Options) {
+		o.NewSession = func() {
+			fresh.Add(1)
+			liveWhenTold.Store(h.client.Connected())
+		}
+	})
+	c := h.g.next()
+	c.handshake("sess-1")
+	require.Eventually(t, func() bool { return fresh.Load() == 1 }, 5*time.Second, time.Millisecond)
+	assert.False(t, liveWhenTold.Load(), "told after the connection was live, where a join could be sent first")
+
+	c.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
+	c2 := h.g.next()
+	c2.hello(time.Now(), gatewayproto.DevVersion, time.Minute)
+	c2.expect(gatewayproto.OpResume)
+	c2.seq = 1
+	c2.dispatch("RESUMED", map[string]any{})
+	require.Eventually(t, h.client.Connected, 5*time.Second, time.Millisecond)
+	assert.Equal(t, int32(1), fresh.Load(), "a resumed session was told it was fresh")
+
+	c2.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
+	c3 := h.g.next()
+	c3.hello(time.Now(), gatewayproto.DevVersion, time.Minute)
+	c3.expect(gatewayproto.OpResume)
+	c3.send(gatewayproto.OpInvalidSess, false, nil, nil)
+	c3.expect(gatewayproto.OpIdentify)
+	c3.ready("sess-2")
+	require.Eventually(t, func() bool { return fresh.Load() == 2 }, 5*time.Second, time.Millisecond,
+		"a session that could not be resumed was not told")
+}

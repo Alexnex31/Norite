@@ -172,7 +172,7 @@ func TestASlotChangingHandsStaysOneStream(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	wg.Go(func() { _ = second.client.Send(ctx, tagged('B', 100), voicetest.SendOptions{}) })
 	time.Sleep(300 * time.Millisecond)
-	if err := s.EvictConnection(context.Background(), first.conn); err != nil {
+	if err := s.EvictConnection(context.Background(), first.conn, ""); err != nil {
 		t.Fatal(err)
 	}
 	wg.Wait()

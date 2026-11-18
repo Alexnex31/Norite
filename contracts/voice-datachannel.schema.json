@@ -227,7 +227,7 @@
       }
     },
     "Refused": {
-      "description": "The SFU's last message before it closes the connection, in words a person can act on.",
+      "description": "The SFU's last message before it closes the connection, in words a person can act on: why a connection was refused, or since M33 why the instance ended a call that was up (a kick, a lost CONNECT, a deleted channel). A call its client left is told nothing.",
       "type": "object",
       "additionalProperties": false,
       "required": [

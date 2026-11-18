@@ -45,15 +45,22 @@ type Gateway struct {
 	// waiting is the join whose reply is expected, by nonce; one at a time, since the daemon joins one call
 	// at a time (Voice).
 	waiting map[string]chan reply
-	// conn is the call's connection id, once answered, and changes where its rights go.
+	// conn is the call's connection id, once answered, changes where its rights go, and lost what is
+	// closed if the instance drops the session the call was signaled on.
 	conn    string
 	changes chan voiceipc.Rights
+	lost    chan struct{}
 }
 
 type reply struct {
 	event string
 	data  json.RawMessage
+	// lost is no reply: the session the join was sent on is gone.
+	lost bool
 }
+
+// SessionLostReason is a call's end when the instance no longer holds the session it was joined on.
+const SessionLostReason = "the connection to the instance was lost, and the call with it; join again"
 
 var _ Signaler = (*Gateway)(nil)
 
@@ -97,7 +104,7 @@ func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, e
 	replies := make(chan reply, 1)
 	g.mu.Lock()
 	g.waiting = map[string]chan reply{nonce: replies}
-	g.conn, g.changes = "", nil
+	g.conn, g.changes, g.lost = "", nil, nil
 	g.mu.Unlock()
 	defer func() {
 		g.mu.Lock()
@@ -118,6 +125,9 @@ func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, e
 		return Answer{}, errors.New("the instance did not answer the join in time")
 	}
 
+	if r.lost {
+		return Answer{}, errors.New("the connection to the instance was lost during the join; try again")
+	}
 	if r.event == gatewayproto.EventVoiceJoinRefused {
 		var refused gatewayproto.VoiceJoinRefused
 		if err := strictJSON(r.data, &refused); err != nil {
@@ -137,11 +147,11 @@ func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, e
 	if err := (voiceipc.Answer{SDP: a.SDP, ICEServers: a.ICEServers, Bitrate: a.Bitrate}).Check(); err != nil {
 		return Answer{}, fmt.Errorf("the instance's answer is past a bound: %w", err)
 	}
-	changes := make(chan voiceipc.Rights, 1)
+	changes, lost := make(chan voiceipc.Rights, 1), make(chan struct{})
 	g.mu.Lock()
-	g.conn, g.changes = s.ConnectionID, changes
+	g.conn, g.changes, g.lost = s.ConnectionID, changes, lost
 	g.mu.Unlock()
-	a.Changes = changes
+	a.Changes, a.Lost = changes, lost
 	return a, nil
 }
 
@@ -179,9 +189,27 @@ func refusalWords(code string) string {
 // instance whose session ends ends the call with it.
 func (g *Gateway) Leave(ctx context.Context, _ string) {
 	g.mu.Lock()
-	g.conn, g.changes = "", nil
+	g.conn, g.changes, g.lost = "", nil, nil
 	g.mu.Unlock()
 	_ = g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{})
+}
+
+// SessionLost is the gateway client's NewSession: the instance holds a new session for this daemon, so the
+// one a call or a join under way was signaled on is gone, and the call with it (M33's D3). Without it, a
+// daemon whose instance restarted kept a call the instance no longer held until ICE gave up on it, 32 s at
+// M33's manual pass. From the read loop, so it never blocks.
+func (g *Gateway) SessionLost() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for nonce, replies := range g.waiting {
+		delete(g.waiting, nonce)
+		// Buffered for one, and nothing else sends on a reply still waiting.
+		replies <- reply{lost: true}
+	}
+	if g.lost != nil {
+		close(g.lost)
+	}
+	g.conn, g.changes, g.lost = "", nil, nil
 }
 
 // Deliver takes a voice dispatch from the gateway client's read loop, so it never blocks.

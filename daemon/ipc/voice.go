@@ -130,6 +130,9 @@ type VoiceStatus struct {
 	Channel string `json:"channel"`
 	// Reason says why the last call ended, or why a join was refused, for a person; "" when nothing has.
 	Reason string `json:"reason"`
+	// EndedInCall is whether Reason is why a call that was up ended, rather than why a join failed before it
+	// was (M33): a client words the two apart. False while there is a call, and before any.
+	EndedInCall bool `json:"ended_in_call"`
 	// Available is whether this daemon can join a call at all, and Unavailable says why not when it
 	// cannot. Before M33 only a build for M26's harness could.
 	Available   bool   `json:"available"`

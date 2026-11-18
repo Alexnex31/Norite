@@ -123,9 +123,11 @@ const DefaultIdentifyTimeout = 10 * time.Second
 const DefaultMaxUnidentifiedPerAddress = 64
 
 // DefaultResumeWindow is how long a disconnected session waits to be resumed. Long enough for a laptop
-// changing networks or a daemon restarting; short enough that a client which is not coming back does not
-// hold a buffer for long.
-const DefaultResumeWindow = 2 * time.Minute
+// changing networks, whose daemon retries from a second after the drop; short enough that a client which is
+// not coming back does not hold a buffer for long, nor a voice call: since M33 a call ends with its session,
+// so a client that died stays listed in its channel, and counted against its user_limit, for this long.
+// It was two minutes until M33's manual pass watched a killed daemon's caller stay that long.
+const DefaultResumeWindow = 30 * time.Second
 
 // DefaultResumeBuffer is how many frames a session keeps for replay, alongside maxResumeBytes. A client that
 // missed more than this identifies afresh and resyncs over REST, which is always correct and only slower.

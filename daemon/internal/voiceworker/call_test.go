@@ -294,6 +294,7 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 	require.False(t, v.Busy())
 	require.Equal(t, ipc.VoiceIdle, st.State)
 	require.Contains(t, st.Reason, "503")
+	require.False(t, st.EndedInCall, "a join that failed is not a call that ended")
 }
 
 func (*refusingServer) Leave(context.Context, string)  {}

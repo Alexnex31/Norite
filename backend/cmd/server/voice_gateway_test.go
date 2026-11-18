@@ -193,6 +193,22 @@ func dropped(t *testing.T, c *voicetest.Client, what string) {
 	}
 }
 
+// droppedSaying is dropped, the SFU having told the client why first, in exactly these words (M33's manual
+// pass: every end read "the voice server closed the call").
+func droppedSaying(t *testing.T, c *voicetest.Client, what, reason string) {
+	t.Helper()
+	dropped(t, c, what)
+	var said []string
+	for _, m := range c.Messages() {
+		if op, _ := voiceproto.OpOf(m); op == voiceproto.OpRefused {
+			var r voiceproto.Refused
+			require.NoError(t, voiceproto.Decode(m, &r))
+			said = append(said, r.Reason)
+		}
+	}
+	assert.Equal(t, []string{reason}, said, "what %s told the client", what)
+}
+
 // The done-when: a join over the real gateway path allocates a real SFU connection, end to end, and the
 // channel is told who is in it.
 func TestAJoinOverTheGatewayIsProvisionedOnTheSFU(t *testing.T) {
@@ -222,6 +238,10 @@ func TestAJoinOverTheGatewayIsProvisionedOnTheSFU(t *testing.T) {
 	// Leaving ends the connection on the SFU, and the channel is told.
 	member.gw.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": nil})
 	dropped(t, member.client, "a leave")
+	for _, m := range member.client.Messages() {
+		op, _ := voiceproto.OpOf(m)
+		assert.NotEqual(t, voiceproto.OpRefused, op, "a call its client left was told why: %s", m)
+	}
 	_, raw = watcher.until(gatewayproto.EventVoiceStateDelete)
 	require.NoError(t, json.Unmarshal(raw, &state))
 	assert.Equal(t, server.ConnectionID, state["connection_id"])
@@ -236,7 +256,7 @@ func TestAKickMidCallDropsTheConnection(t *testing.T) {
 	res := f.api.call(http.MethodDelete,
 		fmt.Sprintf("/api/v1/guilds/%s/members/%s", f.guildID, f.memberID), nil, withToken(f.ownerToken))
 	require.Equal(t, http.StatusNoContent, res.Code, res)
-	dropped(t, member.client, "a kick")
+	droppedSaying(t, member.client, "a kick", "you are no longer a member of this guild")
 	require.Eventually(t, func() bool { return len(f.voiceStates(t, f.ownerToken, f.channel)) == 0 },
 		5*time.Second, 50*time.Millisecond, "the kicked member is still listed in the channel")
 }
@@ -263,7 +283,7 @@ func TestALostPermissionEndsTheCallAndALostSpeakSuppressesIt(t *testing.T) {
 	}
 
 	deny(fmt.Sprint((roles.PermSpeakVoice | roles.PermConnectVoice).Int64()))
-	dropped(t, member.client, "a lost CONNECT")
+	droppedSaying(t, member.client, "a lost CONNECT", "you may no longer join this voice channel")
 }
 
 // A server mute reaches the caller's voice state; the SFU enforces nothing (M33's D6).
@@ -286,7 +306,7 @@ func TestALogoutEndsTheCall(t *testing.T) {
 	member, _ := f.joinCall(t, pair.AccessToken, f.channel)
 	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": pair.RefreshToken})
 	require.Equal(t, http.StatusNoContent, res.Code, res)
-	dropped(t, member.client, "a logout")
+	droppedSaying(t, member.client, "a logout", "this device's session with the instance ended")
 }
 
 // A session that is not resumed in its window ends its call with it.
@@ -294,7 +314,8 @@ func TestASessionExpiredPastItsResumeWindowEndsItsCall(t *testing.T) {
 	f := newVoiceFixture(t, func(o *gateway.Options) { o.ResumeWindow = 200 * time.Millisecond })
 	member, _ := f.joinCall(t, f.memberToken, f.channel)
 	require.NoError(t, member.gw.ws.CloseNow())
-	dropped(t, member.client, "the resume window running out")
+	droppedSaying(t, member.client, "the resume window running out",
+		"this device's session with the instance ended")
 }
 
 // A second join from the same session replaces its call, and one from a new session of the same device
@@ -467,5 +488,5 @@ func TestADeletedVoiceChannelEndsItsCalls(t *testing.T) {
 	member, _ := f.joinCall(t, f.memberToken, f.channel)
 	res := f.api.call(http.MethodDelete, "/api/v1/channels/"+f.channel, nil, withToken(f.ownerToken))
 	require.Equal(t, http.StatusNoContent, res.Code, res)
-	dropped(t, member.client, "deleting the channel")
+	droppedSaying(t, member.client, "deleting the channel", "the voice channel was deleted")
 }

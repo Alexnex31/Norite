@@ -1010,10 +1010,10 @@ a lost close.
 
 **Limits on a connection**: IDENTIFY within ten seconds of HELLO; at most sixty-four connections per address
 (IPv6 by /64) that have not yet identified, refused with 429 before the upgrade; IDENTIFY thirty a minute per
-account, and frames 120 a minute per connection; sixteen sessions per account per process, a disconnected
-one included, since it holds a buffer. A disconnected session buffers for two minutes, up to 512 frames and
-1 MiB; RESUME inside that replays every missed frame in order, then `RESUMED`, and a gap the buffer cannot
-cover is op 9 rather than a replay with a hole. Every refusal is a close code in
+account, and frames 120 a minute per connection; sixteen sessions per account per process, a disconnected one
+included, since it holds a buffer. A disconnected session buffers for thirty seconds (two minutes until M33),
+up to 512 frames and 1 MiB; RESUME inside that replays every missed frame in order, then `RESUMED`, and a gap
+the buffer cannot cover is op 9 rather than a replay with a hole. Every refusal is a close code in
 `gateway-events.schema.json`, never a reason a client has to parse.
 
 `dm_channels` and `presences` are absent from READY until M57 and M38 fill them. Adding a field later is
@@ -1069,7 +1069,14 @@ must not, over the SFU's control interface (§6).
   account, charged once the checks that cost nothing have passed.
 - **A call belongs to its gateway session.** One per session; a join replaces the session's call and any
   call its device left on an older session; dropping the session, by a revocation or by its resume window
-  running out, ends the call. So the end of a sign-in ends its calls with no path of its own.
+  running out, ends the call. So the end of a sign-in ends its calls with no path of its own. The window
+  is thirty seconds, which is how long a client that died stays listed in its channel; the daemon, on its
+  side, ends its call whenever its connection begins a fresh session (READY), since the instance no longer
+  holds the one the call was on.
+- **A call the instance ends is told why**: the coordinator passes `EvictConnection` a reason (no longer a
+  member, no longer allowed to connect, the channel deleted, the session ended), which the SFU sends on the
+  data channel before closing and the worker shows as the call's end. A re-check tells each caller before
+  it closes the room or evicts the user, which would close the connection saying nothing.
 - **A lost right ends the call on the server.** The mutations that can take `CONNECT` away (permissions, a
   kick, a deleted channel or guild) and those that change a server mute or deafen publish a re-check on a
   topic of their own (`dispatch.VoiceTopic`), never on the client-facing events, which a busy guild sends far
@@ -1860,7 +1867,7 @@ content.
 semantics). RESUME does **not** rebuild it, which this sentence claimed until M19's planning: the gateway
 session id lives in the process that dies, so a restarted daemon identifies afresh and starts with empty
 scrollback, refilled over REST as clients open channels. RESUME covers a dropped *connection*, inside the
-server's two-minute resume window, and nothing else. The one deliberate exception is a "last active voice
+server's thirty-second resume window, and nothing else. The one deliberate exception is a "last active voice
 channel" breadcrumb, persisted so voice can auto-rejoin after a crash (§6). **Read state is a separate,
 durable concern**: `channel_read_states` (§2) is Postgres-backed and synced via its own gateway dispatch
 event — a channel is marked read automatically when the client's viewport reaches the latest message,
@@ -2309,7 +2316,7 @@ type Voice interface { // as the gateway names it
 type Control interface {
     Provision(ctx context.Context, room, user, conn, issued snowflake.ID, offer string) (answer string, err error)
     Evict(ctx context.Context, room, user, cutoff snowflake.ID) error
-    EvictConnection(ctx context.Context, conn snowflake.ID) error
+    EvictConnection(ctx context.Context, conn snowflake.ID, reason string) error
     SetExclusion(ctx context.Context, room, receiver snowflake.ID, excluded []snowflake.ID) error
     CloseRoom(ctx context.Context, room, cutoff snowflake.ID) error
 }
@@ -2319,7 +2326,8 @@ Admission is keyed by **connection**, not by user, so one user may hold two (a s
 separate video connection). `Evict` carries a cutoff: a provision issued before it and delivered after it
 is refused, which is M18's cutoff for a revocation racing a sign-in, applied to a kick racing a join.
 `CloseRoom` carries one for a channel deleted while a join is in flight, and `EvictConnection` refuses
-its connection's provision if that arrives after it.
+its connection's provision if that arrives after it. Since M33 `EvictConnection` takes a reason, which the
+SFU sends the client on the data channel before it closes, so a kick or a lost right says so.
 `SetExclusion` is a per-receiver set the server controls and the client cannot override (M70 decides
 whether blocks fill it).
 

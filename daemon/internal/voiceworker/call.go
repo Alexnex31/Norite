@@ -185,11 +185,12 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 	v.current = c
 	asked := processing
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceJoining, channel, "", &asked
+	v.status.EndedInCall = false
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	v.mu.Unlock()
 	v.publish()
 
-	go v.endsWith(c, signIn.Ended)
+	go v.endsWith(c, signIn.Ended, "the sign-in ended")
 	go v.run(callCtx, c, signIn.Account, result)
 	select {
 	case err := <-result:
@@ -296,6 +297,9 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		v.opts.Signaler.Leave(leaveCtx, account)
 	}()
 	v.rights(c, answer.Rights)
+	if answer.Lost != nil {
+		go v.endsWith(c, answer.Lost, SessionLostReason)
+	}
 	if err := w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: answer.SDP, ICEServers: orEmpty(answer.ICEServers),
 		Bitrate: answer.Bitrate, Rights: answer.Rights}); err != nil {
 		<-w.Done()
@@ -484,6 +488,7 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 		return
 	}
 	v.current = nil
+	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	if by != nil {
@@ -493,11 +498,12 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 	v.publish()
 }
 
-// endsWith ends c when its sign-in ends, unless c has finished first.
-func (v *Voice) endsWith(c *call, ended <-chan struct{}) {
+// endsWith ends c for why when ended closes, its sign-in's end or its session's, unless c has finished
+// first.
+func (v *Voice) endsWith(c *call, ended <-chan struct{}, why string) {
 	select {
 	case <-ended:
-		v.leave(c, "the sign-in ended")
+		v.leave(c, why)
 	case <-c.finished:
 	}
 }
@@ -540,6 +546,7 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 		return v.Status()
 	}
 	v.current = nil
+	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", why, nil
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	w := c.worker

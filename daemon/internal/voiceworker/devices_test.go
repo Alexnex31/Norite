@@ -195,6 +195,7 @@ func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
 	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 5*time.Second, 10*time.Millisecond)
 	st = v.Status()
 	require.Equal(t, "the voice server closed the call", st.Reason)
+	require.True(t, st.EndedInCall, "a call that was up ended, and the status says it was a call")
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)
 }
@@ -261,4 +262,33 @@ func TestTheRightsReachTheStatusAndTheWorker(t *testing.T) {
 	st = v.Leave()
 	require.Nil(t, st.Rights, "a call left has no rights")
 	require.Equal(t, int32(1), srv.leaves.Load(), "the voice server was not told the call was left")
+}
+
+// losingServer answers with a Lost the test closes, as the gateway's signaler does when the instance no
+// longer holds the session.
+type losingServer struct {
+	lost   chan struct{}
+	leaves atomic.Int32
+}
+
+func (*losingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (s *losingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}, Lost: s.lost}, nil
+}
+func (s *losingServer) Leave(context.Context, string) { s.leaves.Add(1) }
+
+// A call whose session the instance no longer holds ends at once, saying so (M33's manual pass).
+func TestACallEndsWithItsLostSession(t *testing.T) {
+	fast(t)
+	srv := &losingServer{lost: make(chan struct{})}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	close(srv.lost)
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.State == ipc.VoiceIdle && st.Reason == SessionLostReason
+	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
+	require.True(t, v.Status().EndedInCall, "a call that was up ended, and the status says it was a call")
+	require.False(t, v.Busy())
 }

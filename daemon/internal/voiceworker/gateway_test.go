@@ -176,3 +176,61 @@ func TestTheGatewaySignalerRefuses(t *testing.T) {
 	_, err = g.Join(ctx, "9", "42", "v=0\r\n")
 	require.ErrorContains(t, err, "did not answer", "an instance that never answers")
 }
+
+// A session that begins afresh ends what the old one held (M33's manual pass, where a daemon kept a call
+// its restarted instance no longer held for 32 s): a join waiting for its reply fails at once, and an
+// answered call's Lost closes. A call left before is not touched, nor is the next one.
+func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
+	link := &fakeLink{connected: true}
+	g := &Gateway{Link: link}
+
+	failed := make(chan error, 1)
+	go func() {
+		_, err := g.Join(context.Background(), "9", "42", "v=0\r\n")
+		failed <- err
+	}()
+	require.Eventually(t, func() bool {
+		link.mu.Lock()
+		defer link.mu.Unlock()
+		return len(link.sent) == 1
+	}, 5*time.Second, time.Millisecond)
+	g.SessionLost()
+	select {
+	case err := <-failed:
+		require.ErrorContains(t, err, "lost during the join")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a join under way waited out its bound for a session that is gone")
+	}
+
+	link.mu.Lock()
+	link.reply = func(v gatewayproto.VoiceStateUpdate) {
+		deliver(t, g, gatewayproto.EventVoiceServerUpdate, server(v.Nonce, *v.ChannelID))
+	}
+	link.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a, err := g.Join(ctx, "9", "42", "v=0\r\n")
+	require.NoError(t, err)
+	select {
+	case <-a.Lost:
+		t.Fatal("an answered call was lost before its session was")
+	default:
+	}
+	g.SessionLost()
+	select {
+	case <-a.Lost:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call's session was lost and the call was not told")
+	}
+	g.SessionLost() // a second fresh session, with no call: nothing to close twice
+
+	b, err := g.Join(ctx, "9", "42", "v=0\r\n")
+	require.NoError(t, err)
+	g.Leave(context.Background(), "9")
+	g.SessionLost()
+	select {
+	case <-b.Lost:
+		t.Fatal("a call already left was told its session was lost")
+	default:
+	}
+}

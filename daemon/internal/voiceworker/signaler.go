@@ -50,6 +50,9 @@ type Answer struct {
 	// Changes delivers the account's rights each time the voice server says they changed, the latest
 	// only, until the call ends; nil for a voice server that says nothing of them.
 	Changes <-chan voiceipc.Rights
+	// Lost is closed if the instance drops the session the call was signaled on, which ends the call there;
+	// nil for a voice server with no such session.
+	Lost <-chan struct{}
 }
 
 // Harness signals through M26's harness (backend/internal/voice/voicetest/cmd/voice-sfu): POST

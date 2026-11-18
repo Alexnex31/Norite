@@ -12,6 +12,7 @@
         "state",
         "channel",
         "reason",
+        "ended_in_call",
         "available",
         "unavailable",
         "processing",
@@ -37,6 +38,10 @@
           "type": "string",
           "maxLength": 256,
           "description": "Why the last call ended, or why the last join failed, for a person; `left` when it was left; empty when nothing has ended yet."
+        },
+        "ended_in_call": {
+          "type": "boolean",
+          "description": "Whether `reason` is why a call that was up ended (true), or why a join failed before it was (false). False while there is a call, and before any (M33)."
         },
         "available": {
           "type": "boolean",

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 
@@ -104,13 +105,15 @@ func (c *Coordinator) recheckChannel(
 		return err
 	}
 	if gone || row.GuildID == nil || snowflake.ID(*row.GuildID) != guildID || row.Type != ChannelGuildVoice {
-		// The rows went with the channel, so there is nobody to tell: its CHANNEL_DELETE says as much.
+		// The rows went with the channel, so there is nobody in the channel to tell: its CHANNEL_DELETE says as
+		// much. Each caller is told why before the room closes, which would close them saying nothing.
+		ending := map[*call]string{}
+		for _, cl := range calls {
+			ending[cl] = endedChannelGone
+		}
+		c.endAll(ctx, ending)
 		if err := c.opts.SFU.CloseRoom(ctx, channelID, cutoff); err != nil {
 			c.log.Warn().Err(err).Msg("the SFU could not close a deleted channel's room")
-		}
-		for _, cl := range calls {
-			c.drop(cl)
-			c.end(ctx, cl)
 		}
 		return nil
 	}
@@ -128,23 +131,46 @@ func (c *Coordinator) recheckChannel(
 		return err
 	}
 	var kept []*call
-	evicted := map[snowflake.ID]bool{}
+	ending := map[*call]string{}
 	for _, cl := range calls {
-		if r, ok := rights[cl.user]; ok && r.Connect {
+		r, member := rights[cl.user]
+		switch {
+		case member && r.Connect:
 			kept = append(kept, cl)
-			continue
+		case member:
+			ending[cl] = endedNoConnect
+		default:
+			ending[cl] = endedNotMember
 		}
+	}
+	// Each told why first. The eviction after it closes whatever else of the user's is in the room, which
+	// this process holds no call for, and refuses any provision issued before the cutoff.
+	c.endAll(ctx, ending)
+	evicted := map[snowflake.ID]bool{}
+	for cl := range ending {
 		if !evicted[cl.user] {
 			evicted[cl.user] = true
-			// Every connection of the user's in the room, and any provision issued before the cutoff.
 			if err := c.opts.SFU.Evict(ctx, channelID, cl.user, cutoff); err != nil {
 				c.log.Warn().Err(err).Msg("the SFU could not evict a caller who lost the right")
 			}
 		}
-		c.drop(cl)
-		c.end(ctx, cl)
 	}
 	return c.updateRights(ctx, guildID, kept, rights)
+}
+
+// endAll drops and ends each call, saying its reason, all at once: telling a client why waits a moment for
+// the reason to leave, and a guild-wide change ending many calls would otherwise wait once per call.
+func (c *Coordinator) endAll(ctx context.Context, ending map[*call]string) {
+	var wg sync.WaitGroup
+	for cl, why := range ending {
+		c.drop(cl)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.end(ctx, cl, why)
+		}()
+	}
+	wg.Wait()
 }
 
 // drop takes a call off this process's books for a re-check: an established one is forgotten, and a join

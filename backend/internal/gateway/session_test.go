@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -122,4 +123,13 @@ func TestTheSessionIndexFollowsEachSessionsGuilds(t *testing.T) {
 	c.stop()
 	c.becomeReady(ready{}, map[snowflake.ID]struct{}{50: {}})
 	assert.Empty(t, candidateIDs(srv, guildEvent(50)), "nor does a READY that lost the race with a revocation")
+}
+
+// A client that died stays listed in its voice channel, and counted against its user_limit, until its
+// session's resume window runs out, since a call ends with its session (M33). M33's manual pass watched a
+// killed daemon's caller stay two minutes, and the author set half a minute as the most.
+func TestTheResumeWindowIsHalfAMinuteAtMost(t *testing.T) {
+	if DefaultResumeWindow > 30*time.Second {
+		t.Fatalf("the resume window is %v: a dead caller stays in its voice channel that long", DefaultResumeWindow)
+	}
 }

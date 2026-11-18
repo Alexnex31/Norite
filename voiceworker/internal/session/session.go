@@ -515,12 +515,19 @@ func (s *Session) message(b []byte) {
 			}
 		})
 	case voiceproto.OpRefused:
+		// The SFU's last word. Once the call is up it is why the instance ended the call, a kick or a lost
+		// right (M33), which is said as it is; before, it is why the call was refused.
 		var m voiceproto.Refused
-		if voiceproto.Decode(b, &m) != nil {
-			s.end("the voice server refused the call")
+		if voiceproto.Decode(b, &m) != nil || m.Reason == "" {
+			s.end("the voice server ended the call")
 			return
 		}
-		s.end(voiceipc.CutReason("the voice server refused the call: " + m.Reason))
+		select {
+		case <-s.ready:
+			s.end(voiceipc.CutReason(m.Reason))
+		default:
+			s.end(voiceipc.CutReason("the voice server refused the call: " + m.Reason))
+		}
 	}
 }
 

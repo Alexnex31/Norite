@@ -148,6 +148,14 @@ func StartStack(opts StackOptions) (_ *Stack, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// Pion drops a loopback host candidate before any rewrite, so an SFU bound there answers every offer
+	// with no candidate at all, public_addresses or not, and each join waits out its timeout. Only the
+	// harness and the tests admit loopback (M33's manual pass).
+	if bound.IsLoopback() && !opts.Loopback {
+		opts.Logger.Warn().Str("media", opts.MediaListen).Msg("voice: [voice] media_listen is a loopback " +
+			"address, where the SFU announces nothing a client can reach, whatever public_addresses says, so " +
+			"no call can connect; name an address clients reach, or \":3479\" for every interface")
+	}
 	if bound.IsUnspecified() {
 		if shared := sharedPublic(interfaceAddrs()); len(shared) > 1 {
 			names := make([]string, len(shared))
