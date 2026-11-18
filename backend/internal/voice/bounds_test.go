@@ -261,3 +261,35 @@ func TestBindingRequestsFromManyAddressesAreBounded(t *testing.T) {
 		t.Fatalf("binding requests from %d addresses left %d remote candidates, past the bound of %d", sources, n, bound)
 	}
 }
+
+// An eviction that says why sends on the peer's data channel from the coordinator's goroutine, which is not
+// one of this package's: a panic there is contained to the connection, which closes, and the process goes
+// on (M33's /code-review).
+func TestAPanicSayingGoodbyeIsContained(t *testing.T) {
+	s := newSFU(t, nil)
+	room := ids.MustNext()
+	a := join(t, s, room, ids.MustNext(), 1)
+	var panics atomic.Int32
+	hook := func(where string, _ []byte) {
+		if where == "goodbye" {
+			panics.Add(1)
+			panic("a panic saying goodbye")
+		}
+	}
+	testPanic.Store(&hook)
+	t.Cleanup(func() { testPanic.Store(nil) })
+
+	if err := s.EvictConnection(context.Background(), a.conn, "you are no longer a member of this guild"); err != nil {
+		t.Fatal(err)
+	}
+	if panics.Load() != 1 {
+		t.Fatalf("the goodbye ran %d times", panics.Load())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.hasConn(a.conn) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.hasConn(a.conn) {
+		t.Fatal("the connection whose goodbye panicked was left open")
+	}
+}

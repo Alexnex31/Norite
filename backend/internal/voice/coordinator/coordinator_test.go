@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -268,4 +269,136 @@ func TestTwoJoinsRacingForTheLastPlaceGetOne(t *testing.T) {
 	got := []string{<-events, <-events}
 	assert.ElementsMatch(t, []string{gatewayproto.EventVoiceServerUpdate, gatewayproto.EventVoiceJoinRefused}, got)
 	assert.Equal(t, 1, f.rows(t))
+}
+
+// A SPEAK removed while a join is provisioned is seen by a re-check that has no row to write yet: the join
+// asks for another once it is established, which writes suppress (M33's /code-review). Staged with the hook.
+func TestASpeakLostMidJoinReachesTheCall(t *testing.T) {
+	f := newFixture(t)
+	sdp := f.offer(t)
+	authorized, release := make(chan struct{}), make(chan struct{})
+	beforeProvision = func() {
+		close(authorized)
+		<-release
+	}
+	t.Cleanup(func() { beforeProvision = nil })
+	done := make(chan string, 1)
+	go func() {
+		event, _ := f.join(t, f.member, "s1", sdp)
+		done <- event
+	}()
+	<-authorized
+	f.exec(t, `UPDATE roles SET permissions = $1 WHERE id = $2`,
+		(voiceGrant &^ roles.PermSpeakVoice).Int64(), int64(f.everyone))
+	f.recheck(t)
+	close(release)
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, <-done)
+	require.Eventually(t, func() bool {
+		var suppress bool
+		err := f.pool.QueryRow(f.ctx, `SELECT suppress FROM voice_states WHERE user_id = $1`,
+			int64(f.member)).Scan(&suppress)
+		return err == nil && suppress
+	}, 10*time.Second, 10*time.Millisecond, "a SPEAK removed mid-join never reached the call's row")
+}
+
+// The device's newest join wins: an older one that reaches its replacing after a newer one has
+// established ends nothing of it, and is refused (M33's /code-review).
+func TestAnOlderJoinOfTheDeviceEndsNothingOfANewerOne(t *testing.T) {
+	f := newFixture(t)
+	older, newer := f.offer(t), f.offer(t)
+	held, release := make(chan struct{}), make(chan struct{})
+	// The first join is held, and the second passes: a sync.Once would hold the second until the first
+	// returned.
+	var first atomic.Bool
+	beforeReplace = func() {
+		if first.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+	}
+	t.Cleanup(func() { beforeReplace = nil })
+	join := func(session, sdp string) string {
+		ch, video := f.channel.String(), false
+		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+		return event
+	}
+	old := make(chan string, 1)
+	go func() { old <- join("old", older) }()
+	<-held
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, join("new", newer))
+	close(release)
+	assert.Equal(t, gatewayproto.EventVoiceJoinRefused, <-old, "the replaced join established a call")
+	require.Eventually(t, func() bool { return f.rows(t) == 1 }, 5*time.Second, 10*time.Millisecond)
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	assert.NotContains(t, f.c.calls, "old")
+	assert.Contains(t, f.c.calls, "new")
+}
+
+// A join of the device's past its replacing when a newer one comes is canceled by it, and never
+// establishes (M33's /code-review).
+func TestAJoinUnderWayOnAnotherSessionOfTheDeviceIsReplaced(t *testing.T) {
+	f := newFixture(t)
+	older, newer := f.offer(t), f.offer(t)
+	held, release := make(chan struct{}), make(chan struct{})
+	// The first join is held, and the second passes: a sync.Once would hold the second until the first
+	// returned.
+	var first atomic.Bool
+	beforeProvision = func() {
+		if first.CompareAndSwap(false, true) {
+			close(held)
+			<-release
+		}
+	}
+	t.Cleanup(func() { beforeProvision = nil })
+	join := func(session, sdp string) string {
+		ch, video := f.channel.String(), false
+		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+		return event
+	}
+	old := make(chan string, 1)
+	go func() { old <- join("old", older) }()
+	<-held
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, join("new", newer))
+	close(release)
+	assert.Equal(t, gatewayproto.EventVoiceJoinRefused, <-old, "the replaced join established a call")
+	require.Eventually(t, func() bool { return f.rows(t) == 1 }, 5*time.Second, 10*time.Millisecond)
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	assert.NotContains(t, f.c.calls, "old")
+	assert.Contains(t, f.c.calls, "new")
+}
+
+// A full channel is refused before the join's budget is charged: somebody retrying until a place frees is
+// never rate limited out of it (M33's /code-review).
+func TestAFullChannelSpendsNoBudget(t *testing.T) {
+	f := newFixture(t)
+	f.exec(t, `UPDATE channels SET user_limit = 1 WHERE id = $1`, int64(f.channel))
+	event, _ := f.join(t, f.owner, "owner", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+	sdp := f.offer(t)
+	for i := range 12 {
+		event, payload := f.join(t, f.member, "member", sdp)
+		require.Equal(t, gatewayproto.EventVoiceJoinRefused, event)
+		require.Equal(t, gatewayproto.VoiceFull, payload.(gatewayproto.VoiceJoinRefused).Code, "retry %d", i)
+	}
+}
+
+// A connection the SFU closed by itself ends its call: the row and the channel's view go then, not when
+// the session does (M33's /code-review). The client here never connects, and the SFU gives up on it.
+func TestAConnectionTheSFUClosesEndsItsCall(t *testing.T) {
+	f := newFixture(t)
+	event, payload := f.join(t, f.member, "s1", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event, "%+v", payload)
+	conn, err := snowflake.Parse(payload.(gatewayproto.VoiceServer).ConnectionID)
+	require.NoError(t, err)
+	require.Equal(t, 1, f.rows(t))
+	f.c.ConnectionClosed(conn)
+	require.Eventually(t, func() bool { return f.rows(t) == 0 }, 5*time.Second, 10*time.Millisecond)
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	assert.Empty(t, f.c.calls)
+	assert.Empty(t, f.c.inGuild)
 }

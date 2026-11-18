@@ -490,3 +490,20 @@ func TestADeletedVoiceChannelEndsItsCalls(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, res.Code, res)
 	droppedSaying(t, member.client, "deleting the channel", "the voice channel was deleted")
 }
+
+// A client that goes without leaving, its worker killed and its gateway session still there, ends its call
+// once the SFU loses its connection: the channel is told, and the listing no longer shows it (M33's
+// /code-review, where it stayed listed for its session's life).
+func TestAClientThatGoesWithoutLeavingEndsItsCall(t *testing.T) {
+	f := newVoiceFixture(t, nil)
+	watcher := f.connect(t, f.ownerToken)
+	member, server := f.joinCall(t, f.memberToken, f.channel)
+	watcher.until(gatewayproto.EventVoiceStateUpdate)
+
+	require.NoError(t, member.client.Close())
+	_, raw := watcher.until(gatewayproto.EventVoiceStateDelete)
+	var state map[string]any
+	require.NoError(t, json.Unmarshal(raw, &state))
+	assert.Equal(t, server.ConnectionID, state["connection_id"])
+	assert.Empty(t, f.voiceStates(t, f.ownerToken, f.channel))
+}

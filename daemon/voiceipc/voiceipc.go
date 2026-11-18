@@ -64,10 +64,12 @@ const (
 	// MaxReason bounds the reason a STATE carries, in bytes.
 	MaxReason = 256
 	// MaxICEServers and MaxURLs bound what an ANSWER names: TURN over UDP, TCP and TLS in each family is
-	// six. MaxURL and MaxCredential bound each string, which come from the instance.
+	// six. MaxURL and MaxCredential bound each string, which come from the instance. A URL is built from the
+	// instance's host name, up to DNS's 253 bytes, and its scheme, port and transport: 512 holds any
+	// (M33's /code-review: at 256, a host name past about 235 bytes failed every join on its instance).
 	MaxICEServers = 4
 	MaxURLs       = 8
-	MaxURL        = 256
+	MaxURL        = 512
 	MaxCredential = 128
 
 	// MinBitrate and MaxBitrate bound the call's bitrate (M33): the congestion controller's floor, and the

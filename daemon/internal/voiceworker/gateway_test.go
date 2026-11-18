@@ -234,3 +234,30 @@ func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
 	default:
 	}
 }
+
+// The account's own VOICE_STATE_UPDATE can arrive before the reply it follows, since the reply goes
+// straight to the session and the update through the bus: what it says wins over the reply's rights, which
+// were read as the row was written. Another account's, or another channel's, says nothing of the call
+// (M33's /code-review: a mute set during the join was lost).
+func TestAnUpdateBeforeTheReplyIsTheCallsRights(t *testing.T) {
+	link := &fakeLink{connected: true}
+	g := &Gateway{Link: link}
+	link.reply = func(v gatewayproto.VoiceStateUpdate) {
+		deliver(t, g, gatewayproto.EventVoiceStateUpdate, map[string]any{
+			"connection_id": "77", "user_id": "9", "channel_id": *v.ChannelID, "mute": true})
+		// After it, so that taking them would overwrite it.
+		deliver(t, g, gatewayproto.EventVoiceStateUpdate, map[string]any{
+			"connection_id": "77", "user_id": "8", "channel_id": *v.ChannelID, "deaf": true})
+		deliver(t, g, gatewayproto.EventVoiceStateUpdate, map[string]any{
+			"connection_id": "77", "user_id": "9", "channel_id": "43", "deaf": true})
+		s := server(v.Nonce, *v.ChannelID)
+		s.Suppress = false
+		deliver(t, g, gatewayproto.EventVoiceServerUpdate, s)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a, err := g.Join(ctx, "9", "42", "v=0\r\noffer\r\n")
+	require.NoError(t, err)
+	assert.Equal(t, voiceipc.Rights{Send: false, Hear: true}, a.Rights,
+		"the mute that came before the reply was lost, or another's update was taken")
+}

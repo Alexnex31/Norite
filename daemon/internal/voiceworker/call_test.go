@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -301,3 +302,95 @@ func (*refusingServer) Leave(context.Context, string)  {}
 func (*blockingServer) Leave(context.Context, string)  {}
 func (*recordingServer) Leave(context.Context, string) {}
 func (routelessServer) Leave(context.Context, string)  {}
+
+// orderingServer records what it is asked, in order. A join waits for its context when hold is set; the
+// first leave waits for release when slowLeave is set; every join is refused.
+type orderingServer struct {
+	mu        sync.Mutex
+	asked     []string
+	hold      bool
+	slowLeave chan struct{}
+	joined    chan struct{}
+}
+
+func (s *orderingServer) note(what string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.asked = append(s.asked, what)
+}
+
+func (s *orderingServer) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.asked...)
+}
+
+func (s *orderingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+
+func (s *orderingServer) Join(ctx context.Context, _, _, _ string) (Answer, error) {
+	s.note("join")
+	if s.joined != nil {
+		select {
+		case s.joined <- struct{}{}:
+		default:
+		}
+	}
+	if s.hold {
+		<-ctx.Done()
+		return Answer{}, ctx.Err()
+	}
+	return Answer{}, errors.New("the voice server refused: 409 room full")
+}
+
+func (s *orderingServer) Leave(context.Context, string) {
+	s.mu.Lock()
+	slow := s.slowLeave
+	s.slowLeave = nil
+	s.mu.Unlock()
+	if slow != nil {
+		<-slow
+	}
+	s.note("leave")
+}
+
+// A join given up while the instance works on it still tells the instance the call is over: it may have
+// been sent, and the instance would establish it and keep it for the session's life (M33's /code-review).
+func TestAJoinGivenUpWhileSentIsLeftOnTheServer(t *testing.T) {
+	fast(t)
+	srv := &orderingServer{hold: true, joined: make(chan struct{}, 1)}
+	v := standinVoice(t, "good", srv)
+	go func() { _, _ = v.Join(context.Background(), "1", ipc.VoiceAllOn()) }()
+	select {
+	case <-srv.joined:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the join never reached the voice server")
+	}
+	v.Leave()
+	require.Eventually(t, func() bool { return slices.Contains(srv.seen(), "leave") }, 5*time.Second,
+		10*time.Millisecond, "a join given up was never left on the voice server: %v", srv.seen())
+}
+
+// A join waits for the previous call to have told the voice server it is over, which that call's run does
+// after answering: a leave arriving after the next join would end it (M33's /code-review).
+func TestAJoinWaitsForThePreviousCallsLeave(t *testing.T) {
+	fast(t)
+	release := make(chan struct{})
+	srv := &orderingServer{slowLeave: release}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.Error(t, err, "the voice server refuses every join")
+	second := make(chan struct{})
+	go func() {
+		_, _ = v.Join(context.Background(), "2", ipc.VoiceAllOn())
+		close(second)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(release)
+	select {
+	case <-second:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second join never finished")
+	}
+	require.Equal(t, []string{"join", "leave", "join", "leave"}, srv.seen(),
+		"the second join reached the voice server before the first call's leave")
+}

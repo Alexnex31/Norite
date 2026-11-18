@@ -117,7 +117,14 @@ func (s *session) runVoice() {
 			s.reply(event, payload)
 			s.mu.Lock()
 			s.voiceJoining = false
+			ended := s.ended
 			s.mu.Unlock()
+			// The session ended while the join ran: stop told the voice side before the join had registered,
+			// so the call it then made belongs to a session nobody holds. It is told again, and finds it
+			// (M33's /code-review).
+			if ended {
+				s.srv.opts.Voice.Ended(s.userID, s.id)
+			}
 		} else {
 			s.srv.opts.Voice.Leave(ctx, s.userID, s.id)
 		}

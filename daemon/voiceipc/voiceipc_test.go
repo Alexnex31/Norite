@@ -266,3 +266,17 @@ func TestTheClampIsTheGatewaysBounds(t *testing.T) {
 	require.EqualValues(t, MinBitrate, b["minimum"])
 	require.EqualValues(t, MaxBitrate, b["maximum"])
 }
+
+// The longest TURN URL an instance builds, from a host name of DNS's 253 bytes, is within the bound: one
+// past it failed every join on that instance (M33's /code-review).
+func TestTheLongestHostNamesTURNURLIsAdmitted(t *testing.T) {
+	host := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." +
+		strings.Repeat("d", 61)
+	require.Len(t, host, 253)
+	a := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{
+		"turns:" + host + ":65535?transport=tcp", "turn:" + host + ":65535?transport=udp"}}}}
+	require.NoError(t, a.Check())
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpAnswer, a)))
+	require.NoError(t, err)
+	require.NoError(t, compile(t, "DaemonFrame").Validate(doc), "the contract refuses what the check admits")
+}

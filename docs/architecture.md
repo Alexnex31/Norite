@@ -1070,9 +1070,11 @@ must not, over the SFU's control interface (§6).
 - **A call belongs to its gateway session.** One per session; a join replaces the session's call and any
   call its device left on an older session; dropping the session, by a revocation or by its resume window
   running out, ends the call. So the end of a sign-in ends its calls with no path of its own. The window
-  is thirty seconds, which is how long a client that died stays listed in its channel; the daemon, on its
-  side, ends its call whenever its connection begins a fresh session (READY), since the instance no longer
-  holds the one the call was on.
+  is thirty seconds. A call also ends with its connection: the SFU tells the coordinator whenever it
+  closes one (`voice.Closes`), so a client that died goes from its channel within seconds. The daemon, on
+  its side, ends its call whenever its connection begins a fresh session (READY), since the instance no
+  longer holds the one the call was on. The device's newest join, by its connection id, wins over an older
+  one still under way.
 - **A call the instance ends is told why**: the coordinator passes `EvictConnection` a reason (no longer a
   member, no longer allowed to connect, the channel deleted, the session ended), which the SFU sends on the
   data channel before closing and the worker shows as the call's end. A re-check tells each caller before

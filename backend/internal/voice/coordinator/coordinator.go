@@ -48,6 +48,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/roles"
 	"github.com/Alexnex31/Norite/backend/internal/voice"
 	"github.com/Alexnex31/Norite/backend/internal/voice/turn"
+	"github.com/Alexnex31/Norite/backend/internal/voice/voicestate"
 )
 
 // ChannelGuildVoice is channels.type for a voice channel. guilds.ChannelGuildVoice is the same value, and
@@ -72,6 +73,10 @@ const joinRate = "10-M"
 // beforeProvision is a test's hook between a join's authorization and its provision, where a re-check
 // racing the join is staged rather than raced (CLAUDE.md, "a race is staged").
 var beforeProvision func()
+
+// beforeReplace is the same between authorization and the replacing of the device's older calls, where a
+// newer join of the same device is staged.
+var beforeReplace func()
 
 // endWithin bounds an end the gateway asks for from a goroutine of its own.
 const endWithin = 10 * time.Second
@@ -125,6 +130,8 @@ type call struct {
 	// canceled is a join ended while it was under way, and why: the join ends it once its provision is
 	// done, rather than leave a call nobody holds.
 	canceled string
+	// rechecked is a join a re-check kept while it was under way, which asks for another once established.
+	rechecked bool
 }
 
 type recheckState struct{ again bool }
@@ -156,6 +163,10 @@ func New(opts Options) (*Coordinator, error) {
 			cancel()
 			return nil, fmt.Errorf("coordinator: subscribing to voice re-checks: %w", err)
 		}
+	}
+	// A call ends with its connection, however the SFU came to close it (voice.Closes).
+	if closes, ok := opts.SFU.(voice.Closes); ok {
+		closes.OnClose(c.ConnectionClosed)
 	}
 	return c, nil
 }
@@ -259,8 +270,18 @@ func (c *Coordinator) Join(
 		return refuse(gatewayproto.VoiceForbidden)
 	}
 
-	// Charged last, once everything that costs nothing has passed (M22): a refused join spends none of the
-	// account's budget.
+	// A full channel is refused before the charge, so somebody retrying until a place frees is not rate
+	// limited out of it (M33's /code-review). record counts again under the channel's lock.
+	if full, err := c.channelFull(ctx, c.q, row, userID); err != nil {
+		c.log.Error().Err(err).Msg("a voice join could not count its channel")
+		return refuse(gatewayproto.VoiceUnavailable)
+	} else if full {
+		return refuse(gatewayproto.VoiceFull)
+	}
+
+	// Charged once every check that only reads has passed (M22): a join refused for its channel, its
+	// rights or a full channel spends none of the account's budget. What is refused after this, by the SFU
+	// or by the count under the lock, has cost a provision and spends it.
 	res, err := c.limiter.Allow(ctx, userID.String())
 	if err != nil {
 		c.log.Error().Err(err).Msg("the voice join limiter could not be read")
@@ -270,20 +291,19 @@ func (c *Coordinator) Join(
 		return refuse(gatewayproto.VoiceRateLimited)
 	}
 
-	if full, err := c.channelFull(ctx, c.q, row, userID); err != nil {
-		c.log.Error().Err(err).Msg("a voice join could not count its channel")
+	if beforeReplace != nil {
+		beforeReplace()
+	}
+
+	// The session's call and its device's older ones go before the new one is provisioned, so a person
+	// switching channels is never in two, and the SFU's per-user bound is not spent on a call being left.
+	if !c.replace(ctx, cl) {
 		return refuse(gatewayproto.VoiceUnavailable)
-	} else if full {
-		return refuse(gatewayproto.VoiceFull)
 	}
 
 	if beforeProvision != nil {
 		beforeProvision()
 	}
-
-	// The session's call and its device's older ones go before the new one is provisioned, so a person
-	// switching channels is never in two, and the SFU's per-user bound is not spent on a call being left.
-	c.replace(ctx, cl)
 
 	answer, err := c.opts.SFU.Provision(ctx, channelID, userID, connID, issued, v.Offer)
 	if err != nil {
@@ -306,7 +326,8 @@ func (c *Coordinator) Join(
 
 	// Ended while it was under way: by its session going, a leave, or a re-check finding the right gone.
 	// The record stands until now, so the end that canceled it could not have removed it; this does.
-	if reason := c.establish(cl); reason != "" {
+	reason, stale := c.establish(cl)
+	if reason != "" {
 		c.end(context.WithoutCancel(ctx), cl, "")
 		if reason == canceledByRecheck {
 			return refuse(gatewayproto.VoiceForbidden)
@@ -314,6 +335,12 @@ func (c *Coordinator) Join(
 		return refuse(gatewayproto.VoiceUnavailable)
 	}
 	established = true
+	// A re-check that kept this join while it was under way could not write its rights, the row not being
+	// there yet, and what it read may be newer than what record did: the guild is checked again now that
+	// it is (M33's /code-review, a SPEAK removed as the join was provisioned).
+	if stale {
+		c.requestRecheck(guildID)
+	}
 
 	server := gatewayproto.VoiceServer{
 		Nonce: v.Nonce, GuildID: guildID.String(), ChannelID: channelID.String(), ConnectionID: connID.String(),
@@ -468,6 +495,8 @@ const (
 	canceledByLeave   = "left"
 	canceledBySession = "session"
 	canceledByRecheck = "recheck"
+	canceledByReplace = "replace"
+	canceledByClose   = "closed"
 )
 
 // register records a join under way for its session, or reports one is already under way.
@@ -492,16 +521,17 @@ func (c *Coordinator) unregister(cl *call) {
 	}
 }
 
-// establish makes a join the session's call, unless it was canceled meanwhile, and then says why.
-func (c *Coordinator) establish(cl *call) string {
+// establish makes a join the session's call, unless it was canceled meanwhile, and then says why. stale is
+// a join a re-check saw while it was under way.
+func (c *Coordinator) establish(cl *call) (reason string, stale bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cl.canceled != "" {
-		return cl.canceled
+		return cl.canceled, false
 	}
 	delete(c.joining, cl.session)
 	c.calls[cl.session] = cl
-	return ""
+	return "", cl.rechecked
 }
 
 // take removes the session's call and returns it, and cancels a join it has under way.
@@ -528,24 +558,108 @@ func (c *Coordinator) forgetLocked(cl *call) {
 
 // replace ends the joining session's own call, and every call its device holds on any session: a restarted
 // daemon's new session takes over from the one its previous run left behind for the resume window.
-func (c *Coordinator) replace(ctx context.Context, joining *call) {
+//
+// The device's newest join wins, by its connection id, which is minted as the join starts and orders in
+// time. A join the device has under way on another session is canceled, so it does not establish a call
+// after this one: its row may not be written yet, so the listing below cannot find it. A join that finds
+// the device has a newer one, under way or established, ends nothing and reports false: it is the one
+// replaced (M33's /code-review). The ends run at once, since one that says why waits a moment for the
+// reason to leave, and this is on the join's path.
+func (c *Coordinator) replace(ctx context.Context, joining *call) bool {
+	sameDevice := func(o *call) bool {
+		return o != joining && o.user == joining.user && o.device == joining.device
+	}
+	c.mu.Lock()
+	for _, set := range []map[string]*call{c.joining, c.calls} {
+		for _, o := range set {
+			if sameDevice(o) && o.conn > joining.conn {
+				c.mu.Unlock()
+				return false
+			}
+		}
+	}
+	for _, j := range c.joining {
+		if sameDevice(j) && j.canceled == "" {
+			j.canceled = canceledByReplace
+		}
+	}
+	c.mu.Unlock()
+	ending := map[*call]string{}
 	if cl := c.take(joining.session, ""); cl != nil {
-		c.end(ctx, cl, "")
+		ending[cl] = ""
 	}
 	rows, err := c.q.ListVoiceStatesOfDevice(ctx, db.ListVoiceStatesOfDeviceParams{
 		UserID: int64(joining.user), DeviceID: joining.device,
 	})
 	if err != nil {
 		c.log.Error().Err(err).Msg("a voice join could not list its device's calls")
-		return
 	}
 	for _, r := range rows {
+		// A newer call of the device's, on another replica, is not this join's to end.
+		if snowflake.ID(r.ConnectionID) > joining.conn {
+			return false
+		}
 		// Taken from this process's books if it is one of its sessions; a call on another replica is that
 		// replica's to forget, and its end finds the row gone.
-		c.take(r.SessionID, "")
-		c.end(ctx, &call{conn: snowflake.ID(r.ConnectionID), guild: snowflake.ID(r.GuildID),
-			channel: snowflake.ID(r.ChannelID), user: snowflake.ID(r.UserID)}, endedReplaced)
+		if r.SessionID != joining.session {
+			c.take(r.SessionID, canceledByReplace)
+		}
+		ending[&call{conn: snowflake.ID(r.ConnectionID), guild: snowflake.ID(r.GuildID),
+			channel: snowflake.ID(r.ChannelID), user: snowflake.ID(r.UserID)}] = endedReplaced
 	}
+	c.endEach(ctx, ending)
+	return true
+}
+
+// endEach ends each call, saying its reason, all at once: telling a client why waits a moment for the
+// reason to leave, and many ends would otherwise wait once each.
+func (c *Coordinator) endEach(ctx context.Context, ending map[*call]string) {
+	var wg sync.WaitGroup
+	for cl, why := range ending {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.end(ctx, cl, why)
+		}()
+	}
+	wg.Wait()
+}
+
+// ConnectionClosed is the SFU telling the coordinator it closed a connection, by itself or as asked. A call
+// this process still holds with that connection ended without anybody here ending it: ICE gave up, the
+// provision was never connected, the peer broke a bound or went away. Its row and the channel's view go at
+// once, rather than when its session does (M33's /code-review). A join under way is canceled and ends
+// itself. Called on the SFU's goroutine, so it returns at once.
+func (c *Coordinator) ConnectionClosed(conn snowflake.ID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	for _, j := range c.joining {
+		if j.conn == conn && j.canceled == "" {
+			j.canceled = canceledByClose
+		}
+	}
+	var cl *call
+	for _, held := range c.calls {
+		if held.conn == conn {
+			cl = held
+			break
+		}
+	}
+	if cl == nil {
+		return
+	}
+	delete(c.calls, cl.session)
+	c.forgetLocked(cl)
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), endWithin)
+		defer cancel()
+		c.end(ctx, cl, "")
+	}()
 }
 
 // Why a call was ended, as the SFU tells its client before it closes the connection, in words the client
@@ -580,50 +694,17 @@ func (c *Coordinator) end(ctx context.Context, cl *call, why string) {
 	}
 }
 
-// voiceState is VoiceState on the wire (openapi.yaml), built from a row.
-type voiceState struct {
-	ConnectionID  snowflake.ID `json:"connection_id"`
-	GuildID       snowflake.ID `json:"guild_id"`
-	ChannelID     snowflake.ID `json:"channel_id"`
-	UserID        snowflake.ID `json:"user_id"`
-	Mute          bool         `json:"mute"`
-	Deaf          bool         `json:"deaf"`
-	Suppress      bool         `json:"suppress"`
-	SupportsVideo bool         `json:"supports_video"`
-	JoinedAt      time.Time    `json:"joined_at"`
-}
-
-// VoiceState is a row as the channel is told about it.
-func VoiceState(r db.VoiceState) any {
-	return voiceState{
-		ConnectionID: snowflake.ID(r.ConnectionID), GuildID: snowflake.ID(r.GuildID),
-		ChannelID: snowflake.ID(r.ChannelID), UserID: snowflake.ID(r.UserID),
-		Mute: r.Mute, Deaf: r.Deaf, Suppress: r.Suppress, SupportsVideo: r.SupportsVideo,
-		JoinedAt: r.CreatedAt.Time.UTC(),
-	}
-}
-
-type voiceStateDeleted struct {
-	ConnectionID snowflake.ID `json:"connection_id"`
-	GuildID      snowflake.ID `json:"guild_id"`
-	ChannelID    snowflake.ID `json:"channel_id"`
-	UserID       snowflake.ID `json:"user_id"`
-}
-
 // queueState tells the channel's viewers about a row, after the transaction commits (rule 5).
 func (c *Coordinator) queueState(ctx context.Context, r db.VoiceState) error {
 	return c.opts.Events.Queue(ctx, dispatch.Event{
 		Type: gatewayproto.EventVoiceStateUpdate, Audience: dispatch.Guild,
 		GuildID: snowflake.ID(r.GuildID), ChannelID: snowflake.ID(r.ChannelID),
-	}, VoiceState(r))
+	}, voicestate.Of(r))
 }
 
 func (c *Coordinator) queueDeleted(ctx context.Context, r db.VoiceState) error {
 	return c.opts.Events.Queue(ctx, dispatch.Event{
 		Type: gatewayproto.EventVoiceStateDelete, Audience: dispatch.Guild,
 		GuildID: snowflake.ID(r.GuildID), ChannelID: snowflake.ID(r.ChannelID),
-	}, voiceStateDeleted{
-		ConnectionID: snowflake.ID(r.ConnectionID), GuildID: snowflake.ID(r.GuildID),
-		ChannelID: snowflake.ID(r.ChannelID), UserID: snowflake.ID(r.UserID),
-	})
+	}, voicestate.DeletedOf(r))
 }

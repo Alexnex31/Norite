@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/jackc/pgx/v5"
 
@@ -30,25 +29,31 @@ func (c *Coordinator) onRecheck(payload []byte) {
 		c.log.Error().Err(err).Msg("a voice re-check could not be decoded")
 		return
 	}
+	c.requestRecheck(r.GuildID)
+}
+
+// requestRecheck re-checks a guild's calls on a goroutine of its own, coalesced with any running: the bus's
+// re-checks, and a join a re-check saw while it was under way.
+func (c *Coordinator) requestRecheck(guildID snowflake.ID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.inGuild[r.GuildID] == 0 {
+	if c.closed || c.inGuild[guildID] == 0 {
 		return
 	}
-	if st := c.rechecks[r.GuildID]; st != nil {
+	if st := c.rechecks[guildID]; st != nil {
 		st.again = true
 		return
 	}
-	c.rechecks[r.GuildID] = &recheckState{}
+	c.rechecks[guildID] = &recheckState{}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
 		for {
-			c.recheck(c.ctx, r.GuildID)
+			c.recheck(c.ctx, guildID)
 			c.mu.Lock()
-			st := c.rechecks[r.GuildID]
+			st := c.rechecks[guildID]
 			if !st.again || c.ctx.Err() != nil {
-				delete(c.rechecks, r.GuildID)
+				delete(c.rechecks, guildID)
 				c.mu.Unlock()
 				return
 			}
@@ -89,15 +94,23 @@ func (c *Coordinator) recheck(ctx context.Context, guildID snowflake.ID) {
 	for _, cl := range c.local(guildID) {
 		byChannel[cl.channel] = append(byChannel[cl.channel], cl)
 	}
+	// The calls kept, and whether each may speak in its own channel, for one update of the guild's rows
+	// rather than one per channel, each of which read the whole guild's (M33's /code-review).
+	speaks := map[*call]bool{}
 	for channelID, calls := range byChannel {
-		if err := c.recheckChannel(ctx, guildID, channelID, calls, cutoff); err != nil {
+		if err := c.recheckChannel(ctx, guildID, channelID, calls, cutoff, speaks); err != nil {
 			c.log.Error().Err(err).Msg("a voice re-check failed")
 		}
 	}
+	if err := c.updateRights(ctx, guildID, speaks); err != nil {
+		c.log.Error().Err(err).Msg("a voice re-check could not update its callers' rights")
+	}
 }
 
+// recheckChannel ends what lost its right in one channel, and adds the calls it keeps to speaks.
 func (c *Coordinator) recheckChannel(
 	ctx context.Context, guildID, channelID snowflake.ID, calls []*call, cutoff snowflake.ID,
+	speaks map[*call]bool,
 ) error {
 	row, err := c.q.GetChannel(ctx, int64(channelID))
 	gone := errors.Is(err, pgx.ErrNoRows)
@@ -130,13 +143,12 @@ func (c *Coordinator) recheckChannel(
 	if err != nil {
 		return err
 	}
-	var kept []*call
 	ending := map[*call]string{}
 	for _, cl := range calls {
 		r, member := rights[cl.user]
 		switch {
 		case member && r.Connect:
-			kept = append(kept, cl)
+			speaks[cl] = r.Speak
 		case member:
 			ending[cl] = endedNoConnect
 		default:
@@ -155,22 +167,16 @@ func (c *Coordinator) recheckChannel(
 			}
 		}
 	}
-	return c.updateRights(ctx, guildID, kept, rights)
+	return nil
 }
 
 // endAll drops and ends each call, saying its reason, all at once: telling a client why waits a moment for
 // the reason to leave, and a guild-wide change ending many calls would otherwise wait once per call.
 func (c *Coordinator) endAll(ctx context.Context, ending map[*call]string) {
-	var wg sync.WaitGroup
-	for cl, why := range ending {
+	for cl := range ending {
 		c.drop(cl)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.end(ctx, cl, why)
-		}()
 	}
-	wg.Wait()
+	c.endEach(ctx, ending)
 }
 
 // drop takes a call off this process's books for a re-check: an established one is forgotten, and a join
@@ -190,17 +196,25 @@ func (c *Coordinator) drop(cl *call) {
 	}
 }
 
-// updateRights writes the server mute, deafen and suppress of the established calls kept, where they
-// changed, and tells the channel. Joins under way record their rights as they are written.
-func (c *Coordinator) updateRights(
-	ctx context.Context, guildID snowflake.ID, kept []*call, rights map[snowflake.ID]guildauth.VoiceRights,
-) error {
-	if len(kept) == 0 {
+// updateRights writes the server mute, deafen and suppress of the calls kept in a guild, where they
+// changed, and tells the channel. A join under way has no row to write yet: it is marked, and asks for
+// another re-check once established, since what was read here may be newer than what it recorded.
+func (c *Coordinator) updateRights(ctx context.Context, guildID snowflake.ID, speaks map[*call]bool) error {
+	if len(speaks) == 0 {
 		return nil
 	}
-	users := make([]snowflake.ID, 0, len(kept))
-	for _, cl := range kept {
+	c.mu.Lock()
+	for cl := range speaks {
+		if c.joining[cl.session] == cl {
+			cl.rechecked = true
+		}
+	}
+	c.mu.Unlock()
+	users := make([]snowflake.ID, 0, len(speaks))
+	held := make(map[snowflake.ID]bool, len(speaks))
+	for cl, speak := range speaks {
 		users = append(users, cl.user)
+		held[cl.conn] = speak
 	}
 	flags, err := memberFlags(ctx, c.q, guildID, users)
 	if err != nil {
@@ -210,16 +224,13 @@ func (c *Coordinator) updateRights(
 	if err != nil {
 		return err
 	}
-	held := make(map[snowflake.ID]bool, len(kept))
-	for _, cl := range kept {
-		held[cl.conn] = true
-	}
 	for _, r := range rows {
-		if !held[snowflake.ID(r.ConnectionID)] {
+		speak, ok := held[snowflake.ID(r.ConnectionID)]
+		if !ok {
 			continue
 		}
 		user := snowflake.ID(r.UserID)
-		f, suppress := flags[user], !rights[user].Speak
+		f, suppress := flags[user], !speak
 		if r.Mute == f.mute && r.Deaf == f.deaf && r.Suppress == suppress {
 			continue
 		}

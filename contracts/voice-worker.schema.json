@@ -372,7 +372,7 @@
           "items": {
             "type": "string",
             "pattern": "^turns?:",
-            "maxLength": 256
+            "maxLength": 512
           }
         },
         "username": {

@@ -60,6 +60,10 @@ type Voice struct {
 
 	// joinMu serializes joins. Leave never takes it, so a leave can end a join under way.
 	joinMu sync.Mutex
+	// last is the latest join's call, under joinMu. A join waits for it to finish, since its run tells the
+	// voice server the call is over after it has answered, and that leave, reaching the instance after the
+	// next join, would end it (M33's /code-review).
+	last *call
 	// pubMu orders what Changed is told: each publish sends the status as it is then, so concurrent
 	// changes converge on the last.
 	pubMu sync.Mutex
@@ -163,9 +167,13 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 		return v.Status(), &Refusal{Msg: "the join was given up before its turn came"}
 	}
 	v.leaveCurrent()
+	if v.last != nil {
+		<-v.last.finished
+	}
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{})}
+	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
 	if v.closed {
@@ -281,6 +289,16 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		return
 	}
 
+	// From the moment the join may have been sent, however the call ends, the voice server is told, just
+	// before the worker is reaped (the deferred reaping above runs after this). A join given up while the
+	// instance still works on it, by a leave, the bound or an answer this daemon refuses, is otherwise
+	// established there and kept for the session's life (M33's /code-review). Its row and the channel's
+	// view of the call go at once rather than when the session ends.
+	defer func() {
+		leaveCtx, cancelLeave := context.WithTimeout(context.Background(), signalLeaveWithin)
+		defer cancelLeave()
+		v.opts.Signaler.Leave(leaveCtx, account)
+	}()
 	answerCtx, cancelAnswer := context.WithTimeout(ctx, answerWithin)
 	answer, err := v.opts.Signaler.Join(answerCtx, account, c.channel, offer.Offer.SDP)
 	cancelAnswer()
@@ -288,14 +306,6 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		fail(true, nil, "%v", err)
 		return
 	}
-	// Provisioned: however the call ends from here, the voice server is told, just before the worker is
-	// reaped (the deferred reaping above runs after this). Its row and the channel's view of the call go
-	// at once rather than when the session ends.
-	defer func() {
-		leaveCtx, cancelLeave := context.WithTimeout(context.Background(), signalLeaveWithin)
-		defer cancelLeave()
-		v.opts.Signaler.Leave(leaveCtx, account)
-	}()
 	v.rights(c, answer.Rights)
 	if answer.Lost != nil {
 		go v.endsWith(c, answer.Lost, SessionLostReason)

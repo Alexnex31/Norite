@@ -50,7 +50,16 @@ type Gateway struct {
 	conn    string
 	changes chan voiceipc.Rights
 	lost    chan struct{}
+	// early is what the account's own VOICE_STATE_UPDATEs in the joined channel said while the join waited,
+	// by connection, at most maxEarly: one can arrive before the reply, or before Join has read it, since
+	// the reply goes straight to the session and the update through the bus, and nothing orders the two.
+	// Its rights are newer than the reply's, which were read as the row was written (M33's /code-review).
+	early                    map[string]voiceipc.Rights
+	joinAccount, joinChannel string
 }
+
+// maxEarly bounds early: the account's connections in one channel, which the SFU holds two of.
+const maxEarly = 8
 
 type reply struct {
 	event string
@@ -81,7 +90,7 @@ func (g *Gateway) instance() string {
 }
 
 // localInstance is an instance URL whose host is a loopback address or exactly localhost, read as a host
-// and never as text (the harness's rule).
+// and never as text: the gateway's and the harness's one check of whether loopback is admitted.
 func localInstance(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -96,7 +105,7 @@ func localInstance(raw string) bool {
 }
 
 // Join sends op 4 and waits for its reply.
-func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, error) {
+func (g *Gateway) Join(ctx context.Context, account, channel, offer string) (Answer, error) {
 	nonce, err := newNonce()
 	if err != nil {
 		return Answer{}, err
@@ -105,10 +114,12 @@ func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, e
 	g.mu.Lock()
 	g.waiting = map[string]chan reply{nonce: replies}
 	g.conn, g.changes, g.lost = "", nil, nil
+	g.early, g.joinAccount, g.joinChannel = map[string]voiceipc.Rights{}, account, channel
 	g.mu.Unlock()
 	defer func() {
 		g.mu.Lock()
 		delete(g.waiting, nonce)
+		g.early = nil
 		g.mu.Unlock()
 	}()
 
@@ -149,6 +160,9 @@ func (g *Gateway) Join(ctx context.Context, _, channel, offer string) (Answer, e
 	}
 	changes, lost := make(chan voiceipc.Rights, 1), make(chan struct{})
 	g.mu.Lock()
+	if r, ok := g.early[s.ConnectionID]; ok {
+		a.Rights = r
+	}
 	g.conn, g.changes, g.lost = s.ConnectionID, changes, lost
 	g.mu.Unlock()
 	a.Changes, a.Lost = changes, lost
@@ -233,6 +247,8 @@ func (g *Gateway) Deliver(event string, data json.RawMessage) {
 	case gatewayproto.EventVoiceStateUpdate:
 		var s struct {
 			ConnectionID string `json:"connection_id"`
+			UserID       string `json:"user_id"`
+			ChannelID    string `json:"channel_id"`
 			Mute         bool   `json:"mute"`
 			Deaf         bool   `json:"deaf"`
 			Suppress     bool   `json:"suppress"`
@@ -242,6 +258,11 @@ func (g *Gateway) Deliver(event string, data json.RawMessage) {
 		}
 		g.mu.Lock()
 		defer g.mu.Unlock()
+		if g.early != nil && s.UserID == g.joinAccount && s.ChannelID == g.joinChannel {
+			if _, kept := g.early[s.ConnectionID]; kept || len(g.early) < maxEarly {
+				g.early[s.ConnectionID] = rights(s.Mute, s.Deaf, s.Suppress)
+			}
+		}
 		if g.changes == nil || s.ConnectionID != g.conn {
 			return
 		}

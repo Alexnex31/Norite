@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"strings"
 	"time"
 
@@ -76,18 +74,7 @@ func (h Harness) Prepare(context.Context, string) (Route, error) {
 // loopback is a harness on this machine, whose SFU announces loopback addresses: its URL's host is a
 // loopback address or exactly localhost. A test of the URL's text took http://localhost.example.com for one,
 // which admits the loopback candidates of whatever that host answers.
-func (h Harness) loopback() bool {
-	u, err := url.Parse(h.URL)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	a, err := netip.ParseAddr(host)
-	return err == nil && a.Unmap().IsLoopback()
-}
+func (h Harness) loopback() bool { return localInstance(h.URL) }
 
 // Join asks the harness for a TURN credential, then provisions the call. The credential comes with the
 // answer, as op 4's does, so the worker is driven the same way whichever signaler it has.

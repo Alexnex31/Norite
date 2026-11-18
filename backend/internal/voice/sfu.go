@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -111,6 +112,8 @@ type SFU struct {
 	// closedRooms and evictedConns are CloseRoom's and EvictConnection's memory, kept as cutoffs are.
 	closedRooms  map[snowflake.ID]cutoff
 	evictedConns map[snowflake.ID]time.Time
+	// onClose is told each connection's id once it is closed (Closes).
+	onClose atomic.Pointer[func(snowflake.ID)]
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -383,6 +386,21 @@ func (s *SFU) Evict(_ context.Context, roomID, user, cut snowflake.ID) error {
 	closeAll(victims, ErrEvicted, "evicted")
 	return nil
 }
+
+// Closes is what an SFU offers besides Control: being told when a connection closes, whoever closed it
+// (M33's /code-review). The coordinator subscribes when its SFU offers it, so a call ends as soon as its
+// connection does: ICE giving up, a provision never connected, a peer past a bound or gone. It is outside
+// Control because M116 carries Control as calls over mTLS, and this as a stream back.
+type Closes interface {
+	// OnClose names what is told each connection's id once it is closed. It is called on the SFU's
+	// goroutines, outside its locks, so it must not block. A later call replaces an earlier one.
+	OnClose(f func(conn snowflake.ID))
+}
+
+var _ Closes = (*SFU)(nil)
+
+// OnClose implements Closes.
+func (s *SFU) OnClose(f func(conn snowflake.ID)) { s.onClose.Store(&f) }
 
 // EvictConnection implements Control.
 func (s *SFU) EvictConnection(_ context.Context, connID snowflake.ID, reason string) error {
