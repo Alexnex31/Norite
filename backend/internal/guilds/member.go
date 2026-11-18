@@ -233,6 +233,13 @@ func (s *Service) UpdateMember(
 		}
 
 		out = memberFromRow(row, snowflakes(held))
+		// A server mute or deafen reaches the member's call as its rights (M33), which the re-check tells
+		// the channel about.
+		if in.Mute != nil || in.Deaf != nil {
+			if err := s.events.QueueVoiceRecheck(ctx, guildID); err != nil {
+				return err
+			}
+		}
 		return s.events.Queue(ctx, dispatch.Event{
 			Type: "GUILD_MEMBER_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
 		}, out)
@@ -403,6 +410,10 @@ func (s *Service) RemoveMember(
 		if err := s.events.Queue(ctx, dispatch.Event{
 			Type: "GUILD_DELETE", Audience: dispatch.Users, GuildID: guildID, Users: []snowflake.ID{userID},
 		}, guildDeleted{ID: guildID}); err != nil {
+			return err
+		}
+		// A kick, or leaving, ends the account's calls in the guild (M33).
+		if err := s.events.QueueVoiceRecheck(ctx, guildID); err != nil {
 			return err
 		}
 		return s.events.Queue(ctx, dispatch.Event{

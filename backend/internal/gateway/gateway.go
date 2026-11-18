@@ -91,6 +91,9 @@ type Options struct {
 	// LivenessInterval is how often a connection's sign-in is asked again whether it is still live.
 	// Zero means DefaultLivenessInterval.
 	LivenessInterval time.Duration
+	// Voice is op 4's other half (M33); nil answers every join voice_disabled.
+	Voice Voice
+
 	// FanoutLanes is how many events are fanned out at once, each lane holding a guild's events in order
 	// (onEvent). Every lane can hold a database connection while it resolves an audience, so cmd/server sizes
 	// it from the pool rather than from the CPU count. Zero means one.

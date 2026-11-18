@@ -3735,6 +3735,46 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
+  /channels/{channel_id}/voice-states:
+    parameters:
+      - name: channel_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/Snowflake"
+    get:
+      summary: Who is in a voice channel
+      description: >
+        The channel's voice connections, oldest first, as `VOICE_STATE_UPDATE` and `VOICE_STATE_DELETE`
+        have told its viewers about them: what a client connecting later reads before following those
+        events. An account on two machines is two entries.
+
+
+        Requires `VIEW_CHANNEL` in the channel, the same audience the two events reach. A channel that is
+        not a voice channel answers an empty list. Bounded by the SFU's participants per room, so there is
+        no cursor.
+      operationId: listChannelVoiceStates
+      tags: [guilds]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The channel's voice connections.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VoiceState"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: An API token without the `guilds.read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /invites/preview:
     post:
       summary: See where an invite leads
@@ -5672,8 +5712,13 @@ components:
           default: false
         bitrate:
           type: integer
-          minimum: 8000
-          maximum: 384000
+          minimum: 16000
+          maximum: 224000
+          description: >
+            Bits per second a caller's encoder starts at and never exceeds; 128000 when absent. The floor is
+            the congestion controller's, and the ceiling the most a 20 ms Opus packet with its headers
+            carries under the SFU's 256 kbps per-track bound, measured. A channel stored outside these
+            bounds before M33 is clamped where it is read.
         user_limit:
           type: integer
           minimum: 0
@@ -5700,8 +5745,13 @@ components:
           type: boolean
         bitrate:
           type: integer
-          minimum: 8000
-          maximum: 384000
+          minimum: 16000
+          maximum: 224000
+          description: >
+            Bits per second a caller's encoder starts at and never exceeds; 128000 when absent. The floor is
+            the congestion controller's, and the ceiling the most a 20 ms Opus packet with its headers
+            carries under the SFU's 256 kbps per-track bound, measured. A channel stored outside these
+            bounds before M33 is clamped where it is read.
         user_limit:
           type: integer
           minimum: 0
@@ -6439,6 +6489,40 @@ components:
             string is written to request logs (ADR 0029). An empty, oversized or otherwise malformed code
             is the same 404 as an unknown one, not a 400.
 
+    VoiceState:
+      type: object
+      description: >
+        One voice connection: an account in a voice channel from one machine (M33). An account on two
+        machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and
+        its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT`
+        ends the connection on the server.
+      required:
+        [connection_id, guild_id, channel_id, user_id, mute, deaf, suppress, supports_video, joined_at]
+      additionalProperties: false
+      properties:
+        connection_id:
+          $ref: "#/components/schemas/Snowflake"
+        guild_id:
+          $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+        user_id:
+          $ref: "#/components/schemas/Snowflake"
+        mute:
+          type: boolean
+          description: A moderator's server mute (`PATCH` on the member).
+        deaf:
+          type: boolean
+          description: A moderator's server deafen.
+        suppress:
+          type: boolean
+          description: The account lacks `SPEAK` in this channel.
+        supports_video:
+          type: boolean
+          description: What the client said it can do. Terminal clients say false.
+        joined_at:
+          type: string
+          format: date-time
     GuildInvite:
       description: A guild invite as its guild sees it (M20a), the code in full.
       type: object

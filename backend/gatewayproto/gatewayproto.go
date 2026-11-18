@@ -23,7 +23,8 @@ import (
 type Opcode int
 
 // Server to client: Dispatch, Reconnect, InvalidSession, Hello, HeartbeatAck.
-// Client to server: Heartbeat, Identify, Resume, and three reserved for later milestones.
+// Client to server: Heartbeat, Identify, Resume, VoiceStateUpdate (M33), and two reserved for later
+// milestones.
 const (
 	OpDispatch     Opcode = 0
 	OpHeartbeat    Opcode = 1
@@ -34,12 +35,14 @@ const (
 	OpHello        Opcode = 10
 	OpHeartbeatAck Opcode = 11
 
-	// Reserved and refused until the milestone that builds each: presence at M38, voice state in Phase E,
-	// member requests when a client first needs a member list over the gateway. Refused with
-	// CloseUnknownOpcode rather than ignored, because a client that thinks its presence update landed is
-	// worse off than one told it did not.
+	// OpVoiceStateUpdate joins or leaves a voice channel (M33, voice.go).
+	OpVoiceStateUpdate Opcode = 4
+
+	// Reserved and refused until the milestone that builds each: presence at M38, member requests when a
+	// client first needs a member list over the gateway. Refused with CloseUnknownOpcode rather than
+	// ignored, because a client that thinks its presence update landed is worse off than one told it did
+	// not.
 	OpPresenceUpdate      Opcode = 3
-	OpVoiceStateUpdate    Opcode = 4
 	OpRequestGuildMembers Opcode = 8
 )
 

@@ -687,6 +687,7 @@ type Channel struct {
 
 // CreateChannelRequest defines model for CreateChannelRequest.
 type CreateChannelRequest struct {
+	// Bitrate Bits per second a caller's encoder starts at and never exceeds; 128000 when absent. The floor is the congestion controller's, and the ceiling the most a 20 ms Opus packet with its headers carries under the SFU's 256 kbps per-track bound, measured. A channel stored outside these bounds before M33 is clamped where it is read.
 	Bitrate *int   `json:"bitrate,omitempty"`
 	Name    string `json:"name"`
 	Nsfw    *bool  `json:"nsfw,omitempty"`
@@ -1697,6 +1698,7 @@ type TwoFactorChallenge struct {
 
 // UpdateChannelRequest defines model for UpdateChannelRequest.
 type UpdateChannelRequest struct {
+	// Bitrate Bits per second a caller's encoder starts at and never exceeds; 128000 when absent. The floor is the congestion controller's, and the ceiling the most a 20 ms Opus packet with its headers carries under the SFU's 256 kbps per-track bound, measured. A channel stored outside these bounds before M33 is clamped where it is read.
 	Bitrate *int `json:"bitrate,omitempty"`
 
 	// ClearTopic Removes the topic. See `clear_description` on a guild for why this is a flag.
@@ -1773,6 +1775,46 @@ type User struct {
 
 	// Username Unique, case-insensitively.
 	Username string `json:"username"`
+}
+
+// VoiceState One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server.
+type VoiceState struct {
+	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId Snowflake `json:"channel_id"`
+
+	// ConnectionId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	ConnectionId Snowflake `json:"connection_id"`
+
+	// Deaf A moderator's server deafen.
+	Deaf bool `json:"deaf"`
+
+	// GuildId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	GuildId  Snowflake `json:"guild_id"`
+	JoinedAt time.Time `json:"joined_at"`
+
+	// Mute A moderator's server mute (`PATCH` on the member).
+	Mute bool `json:"mute"`
+
+	// SupportsVideo What the client said it can do. Terminal clients say false.
+	SupportsVideo bool `json:"supports_video"`
+
+	// Suppress The account lacks `SPEAK` in this channel.
+	Suppress bool `json:"suppress"`
+
+	// UserId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
+	//
+	//
+	// Examples: 7238829238972837423
+	UserId Snowflake `json:"user_id"`
 }
 
 // OAuthProvider defines model for OAuthProvider.

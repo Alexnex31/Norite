@@ -119,6 +119,8 @@ func (h *Handler) Routes(r chi.Router) {
 		r.With(write).Patch("/", h.updateChannel)
 		r.With(write).Delete("/", h.deleteChannel)
 		r.With(write).Post("/invites", h.createInvite)
+		// Who is in a voice channel (M33): the read a client starts from before VOICE_STATE_UPDATE.
+		r.With(read).Get("/voice-states", h.listVoiceStates)
 
 		// The overwrite pair. Scoped like everything else — M12 shipped fifteen guild routes with no
 		// scope at all and a review found an identify-only API token deleting a guild, so a new route
@@ -321,7 +323,7 @@ type createChannelRequest struct {
 	ParentID  *string `json:"parent_id"`
 	Position  int32   `json:"position"`
 	NSFW      bool    `json:"nsfw"`
-	Bitrate   *int32  `json:"bitrate" validate:"omitempty,min=8000,max=384000"`
+	Bitrate   *int32  `json:"bitrate" validate:"omitempty,min=16000,max=224000"`
 	UserLimit *int32  `json:"user_limit" validate:"omitempty,min=0,max=99"`
 }
 
@@ -370,7 +372,7 @@ type updateChannelRequest struct {
 	ClearTopic bool    `json:"clear_topic"`
 	Position   *int32  `json:"position"`
 	NSFW       *bool   `json:"nsfw"`
-	Bitrate    *int32  `json:"bitrate" validate:"omitempty,min=8000,max=384000"`
+	Bitrate    *int32  `json:"bitrate" validate:"omitempty,min=16000,max=224000"`
 	UserLimit  *int32  `json:"user_limit" validate:"omitempty,min=0,max=99"`
 }
 

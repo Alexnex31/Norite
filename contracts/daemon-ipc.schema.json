@@ -249,7 +249,7 @@
       }
     },
     "ForwardedDispatch": {
-      "description": "A dispatch the daemon received from the gateway and forwards unchanged except for s, which numbers this connection's dispatches from 1. The gateway's READY and RESUMED are the daemon's own business and are never forwarded; a test holds this list to every other dispatch the gateway schema declares.",
+      "description": "A dispatch the daemon received from the gateway and forwards unchanged except for s, which numbers this connection's dispatches from 1. The gateway's READY and RESUMED are the daemon's own business and are never forwarded, nor are VOICE_SERVER_UPDATE and VOICE_JOIN_REFUSED, which answer the daemon's own op 4 and the first of which carries a TURN credential (M33); a test holds this list to every other dispatch the gateway schema declares.",
       "oneOf": [
         {
           "$ref": "gateway-events.schema.json#/$defs/GuildCreateDispatch"
@@ -292,6 +292,12 @@
         },
         {
           "$ref": "gateway-events.schema.json#/$defs/MessageDeleteDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/VoiceStateUpdateDispatch"
+        },
+        {
+          "$ref": "gateway-events.schema.json#/$defs/VoiceStateDeleteDispatch"
         }
       ]
     },

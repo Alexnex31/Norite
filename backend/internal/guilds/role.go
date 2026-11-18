@@ -609,7 +609,14 @@ func (s *Service) queueRoles(ctx context.Context, q *db.Queries, guildID snowfla
 // or what they may do there, and their client refetches rather than being told the diff (M18 plan, finding
 // 7). Computing each connected member's exact before and after would mean resolving everyone twice on every
 // administrative change; this costs each of them one GET, at the rate administrators act.
+//
+// Every permission change re-checks the guild's voice calls too (M33): it is the one place role edits, role
+// assignment, overwrites and an ownership transfer meet, so a call cannot outlive the PermConnectVoice one
+// of them took away.
 func (s *Service) queuePermissions(ctx context.Context, guildID snowflake.ID) error {
+	if err := s.events.QueueVoiceRecheck(ctx, guildID); err != nil {
+		return err
+	}
 	return s.events.Queue(ctx, dispatch.Event{
 		Type: "GUILD_PERMISSIONS_UPDATE", Audience: dispatch.Guild, GuildID: guildID,
 	}, permissionsUpdated{GuildID: guildID})

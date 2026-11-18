@@ -124,6 +124,30 @@ func TestTheFanOutsRoleReadCannotScanTheWholeGuild(t *testing.T) {
 	removed, filters = plans[0].Plan.filtered()
 	require.Zero(t, removed,
 		"the overwrite read's generic plan discards rows through a filter %v: it is walking the guild's channels", filters)
+
+	// M33's voice re-check reads the server mute and deafen of a guild's callers, which is the same shape
+	// as the role read above and fails the same way if it filters the guild.
+	userIDs := make([]int64, len(recipients))
+	for i, r := range recipients {
+		userIDs[i] = int64(r)
+	}
+	flags, err := q.GetMembersVoiceFlags(ctx, db.GetMembersVoiceFlagsParams{UserIds: userIDs, GuildID: int64(big)})
+	require.NoError(t, err)
+	require.Len(t, flags, 100)
+	var flagsStmt string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT name FROM pg_prepared_statements WHERE statement LIKE $1`, "%-- name: GetMembersVoiceFlags :%",
+	).Scan(&flagsStmt), "pgx prepared GetMembersVoiceFlags on this connection")
+	require.NoError(t, conn.QueryRow(ctx,
+		`EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE `+pgx.Identifier{flagsStmt}.Sanitize()+
+			`('{`+strings.Join(ids, ",")+`}'::bigint[], `+fmt.Sprint(int64(big))+`)`,
+	).Scan(&raw))
+	plans = nil
+	require.NoError(t, json.Unmarshal(raw, &plans))
+	require.Contains(t, string(raw), "$2", "the plan examined is the generic one")
+	removed, filters = plans[0].Plan.filtered()
+	require.Zero(t, removed,
+		"the voice flags read's generic plan discards rows through a filter %v: it is scanning the guild", filters)
 }
 
 type fanOutPlanNode struct {

@@ -54,6 +54,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/internal/tags"
+	"github.com/Alexnex31/Norite/backend/internal/voice/coordinator"
 	"github.com/Alexnex31/Norite/backend/migrations"
 )
 
@@ -260,6 +261,47 @@ func run() error {
 		defer func() { _ = rateLimitBackend.Close() }()
 	}
 
+	// Voice binds its ports before anything is served, and before migrating: a port in use fails the start
+	// rather than leaving an instance ready without the calls it was configured for. Before the gateway,
+	// which op 4 hands the coordinator to.
+	voiceStack, err := startVoice(cfg, meta.Version, logger)
+	if err != nil {
+		logger.Error().Err(err).Msg("could not start voice")
+		return fmt.Errorf("could not start voice: %w", err)
+	}
+	defer func() {
+		// After the HTTP server has drained, since nothing in it waits on voice, and before the pool
+		// closes, which the deferred calls above this one do.
+		// Closed rather than left to the process's exit, which would free the ports as well: a client
+		// in a call is told the connection ended instead of finding out when ICE times it out.
+		if voiceStack != nil {
+			if err := voiceStack.Close(); err != nil {
+				logger.Warn().Err(err).Msg("voice did not stop cleanly")
+			}
+			logger.Info().Msg("voice stopped")
+		}
+	}()
+	// A nil interface rather than a nil *Coordinator in it, which the gateway would take for a voice server.
+	var gatewayVoice gateway.Voice
+	var voiceCoordinator *coordinator.Coordinator
+	if voiceStack != nil {
+		v, err := cfg.Voice()
+		if err != nil {
+			return err
+		}
+		voiceCoordinator, err = coordinator.New(coordinator.Options{
+			Pool: pool, SFU: voiceStack.SFU, IDs: ids, Events: publisher, Bus: bus,
+			RateLimitBackend: rateLimitBackend, TURNSecret: voiceStack.Secret, TURNURLs: turnURLs(cfg, v),
+			Logger: logger,
+		})
+		if err != nil {
+			return err
+		}
+		// Before the stack's close, which runs after this: re-checks under way end on an SFU still up.
+		defer voiceCoordinator.Close()
+		gatewayVoice = voiceCoordinator
+	}
+
 	gw, err := gateway.New(gateway.Options{
 		Accounts:         authService,
 		Guilds:           guildService,
@@ -272,6 +314,7 @@ func run() error {
 		// instance is, and requests keep the rest. One lane on the smallest pool, which is how fan-out ran
 		// before it had lanes.
 		FanoutLanes: max(1, int(cfg.DBMaxConns)/4),
+		Voice:       gatewayVoice,
 	})
 	if err != nil {
 		return err
@@ -315,27 +358,6 @@ func run() error {
 		return fmt.Errorf("could not bind %s: %w", cfg.ListenAddr, err)
 	}
 
-	// Voice binds its ports here too, before migrating, for the same reason: a port in use fails the
-	// start rather than leaving an instance ready without the calls it was configured for.
-	voiceStack, err := startVoice(cfg, meta.Version, logger)
-	if err != nil {
-		_ = listener.Close()
-		logger.Error().Err(err).Msg("could not start voice")
-		return fmt.Errorf("could not start voice: %w", err)
-	}
-	defer func() {
-		// After the HTTP server has drained, since nothing in it waits on voice, and before the pool
-		// closes, which the deferred calls above this one do.
-		// Closed rather than left to the process's exit, which would free the ports as well: a client
-		// in a call is told the connection ended instead of finding out when ICE times it out.
-		if voiceStack != nil {
-			if err := voiceStack.Close(); err != nil {
-				logger.Warn().Err(err).Msg("voice did not stop cleanly")
-			}
-			logger.Info().Msg("voice stopped")
-		}
-	}()
-
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info().Str("addr", listener.Addr().String()).Str("env", string(cfg.Env)).Msg("norite backend listening")
@@ -350,6 +372,16 @@ func run() error {
 		logger.Error().Err(err).Msg("migrations failed — shutting down without serving")
 		shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
 		return err
+	}
+
+	// Before readiness, since the gateway refuses upgrades until then: no join can write a row this sweep
+	// would delete.
+	if voiceCoordinator != nil {
+		if err := voiceCoordinator.Sweep(ctx); err != nil {
+			logger.Error().Err(err).Msg("could not clear the previous run's voice states")
+			shutdown(srv, gw, cfg.ShutdownTimeout, &logger)
+			return err
+		}
 	}
 
 	health.MarkReady()

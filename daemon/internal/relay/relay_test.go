@@ -160,6 +160,10 @@ func TestEveryContractPathIsDecided(t *testing.T) {
 		"/guilds/{guild_id}/invites": relayed, "/channels/{channel_id}/invites": relayed,
 		"/invites/preview": relayed, "/invites/redeem": relayed, "/invites/revoke": relayed,
 		"/guilds/{guild_id}/members": relayed, "/guilds/{guild_id}/members/{user_id}": relayed,
+
+		// M33. Who is in a voice channel is what its viewers are told over the gateway; it carries no
+		// credential, and a client reads it before following VOICE_STATE_UPDATE.
+		"/channels/{channel_id}/voice-states": relayed,
 	}
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "openapi.yaml"))
