@@ -108,6 +108,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 		return outcome{ending: endResume, token: token}
 	}
 
+	// Not live until READY or RESUMED says so, and never past this connection's end.
+	defer c.live.Store(nil)
+
 	interval := time.Duration(hello.HeartbeatInterval) * time.Millisecond
 	// On the connection's context, not the daemon's: it ends with this connection rather than outliving it
 	// until its next tick, holding a closed socket (M19 /code-review).
@@ -161,10 +164,22 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 					c.sessionID = ready.SessionID
 				}
 				out.established = true
+				c.live.Store(ws)
 				c.log.Info().Int64("seq", seq.Load()).Msg("connected to the gateway")
 			case "RESUMED":
 				out.established = true
+				c.live.Store(ws)
 				c.log.Info().Int64("seq", seq.Load()).Msg("resumed the gateway session")
+			case gatewayproto.EventVoiceServerUpdate, gatewayproto.EventVoiceJoinRefused:
+				// A reply to this daemon's op 4, which nothing attached is told (Options.Voice).
+				if c.voice != nil {
+					c.voice(eventType, f.D)
+				}
+				continue
+			case gatewayproto.EventVoiceStateUpdate, gatewayproto.EventVoiceStateDelete:
+				if c.voice != nil {
+					c.voice(eventType, f.D)
+				}
 			default:
 				c.log.Debug().Str("type", termsafe.Text(eventType)).Int64("seq", seq.Load()).Msg("gateway event")
 			}
@@ -301,6 +316,24 @@ func (c *Client) heartbeat(ctx context.Context, ws *websocket.Conn, interval tim
 		}
 		timer.Reset(interval)
 	}
+}
+
+// ErrNotConnected is a frame asked for while no connection is established: the instance is unreachable,
+// or the daemon is between connections.
+var ErrNotConnected = errors.New("the daemon is not connected to its instance")
+
+// Connected reports whether a connection is established now.
+func (c *Client) Connected() bool { return c.live.Load() != nil }
+
+// SendVoice sends op 4 on the established connection, from any goroutine: coder/websocket allows writes
+// alongside the heartbeat's. It never waits for a connection, since a join that waited on a reconnect would
+// outlast its asker.
+func (c *Client) SendVoice(ctx context.Context, v gatewayproto.VoiceStateUpdate) error {
+	ws := c.live.Load()
+	if ws == nil {
+		return ErrNotConnected
+	}
+	return c.send(ctx, ws, gatewayproto.OpVoiceStateUpdate, v)
 }
 
 // send writes one client frame.

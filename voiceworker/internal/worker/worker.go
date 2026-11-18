@@ -25,10 +25,13 @@ import (
 
 // Call is one connection to the SFU: internal/session's, or a test's.
 type Call interface {
-	// Offer adds the call's sections and returns the offer, every candidate gathered.
+	// Offer adds the call's sections and returns the offer, which carries no candidate (M33).
 	Offer(ctx context.Context) (string, error)
-	// Accept applies the SFU's answer, which starts ICE.
-	Accept(sdp string) error
+	// Accept applies the SFU's answer, gathering with its servers, which starts ICE, and takes its bitrate
+	// and rights.
+	Accept(answer voiceipc.Answer) error
+	// Rights is what the account may do in the call now (M33): send, hear.
+	Rights(r voiceipc.Rights)
 	// Ready is closed once the call is connected and the SFU has said ready.
 	Ready() <-chan struct{}
 	// Ended delivers why the call ended by itself, once.
@@ -157,7 +160,7 @@ func (r *run) loop(ctx context.Context) int {
 	if !ok {
 		return code
 	}
-	if err := call.Accept(answer.SDP); err != nil {
+	if err := call.Accept(answer); err != nil {
 		return r.end(fmt.Sprintf("the SFU's answer could not be applied: %v", err))
 	}
 	if err := voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting}); err != nil {
@@ -184,6 +187,14 @@ func (r *run) loop(ctx context.Context) int {
 		case reason := <-call.Ended():
 			return r.ended(reason)
 		case f := <-r.frames:
+			if f.Op == voiceipc.OpRights {
+				var rights voiceipc.Rights
+				if err := ipc.Decode(f, &rights); err != nil {
+					return r.violation(f)
+				}
+				call.Rights(rights)
+				continue
+			}
 			if f.Op != voiceipc.OpLeave {
 				return r.violation(f)
 			}
@@ -201,10 +212,10 @@ func (r *run) loop(ctx context.Context) int {
 	}
 }
 
-// gather makes the offer while still hearing the daemon: gathering can take seconds (M28's pass on Windows
-// saw about eight, Pion waiting out a TURN allocation that could not succeed), and a leave or a closed
-// pipe in that time is answered at once, not after it. The daemon kills a worker that has not left
-// within three seconds, and an ordinary leave must not read as a crash.
+// gather makes the offer while still hearing the daemon. Since M33 the offer gathers nothing and is made at
+// once, and gathering runs after the answer, within Connect: M28's pass on Windows saw an offer wait about
+// eight seconds while Pion waited out a TURN allocation that could not succeed. The goroutine stays, so a
+// leave or a closed pipe is answered at once whatever the offer does.
 func (r *run) gather(ctx context.Context, call Call) (string, int, bool) {
 	gatherCtx, cancel := context.WithTimeout(ctx, r.opts.Gather)
 	defer cancel()
@@ -249,7 +260,7 @@ func (r *run) awaitJoin(ctx context.Context) (voiceipc.Join, int, bool) {
 			return voiceipc.Join{}, r.end("left"), false
 		}
 		var j voiceipc.Join
-		if f.Op != voiceipc.OpJoin || ipc.Decode(f, &j) != nil || j.Check() != nil {
+		if f.Op != voiceipc.OpJoin || ipc.Decode(f, &j) != nil {
 			return j, r.violation(f), false
 		}
 		return j, 0, true
@@ -269,7 +280,7 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 				return voiceipc.Answer{}, r.end("left"), false
 			}
 			var a voiceipc.Answer
-			if f.Op != voiceipc.OpAnswer || ipc.Decode(f, &a) != nil || a.SDP == "" {
+			if f.Op != voiceipc.OpAnswer || ipc.Decode(f, &a) != nil || a.Check() != nil {
 				return a, r.violation(f), false
 			}
 			return a, 0, true

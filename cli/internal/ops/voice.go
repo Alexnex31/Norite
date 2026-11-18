@@ -73,6 +73,22 @@ func speakersLine(d ipc.VoiceDevice) string {
 	return withReason("The speakers failed", d.Reason)
 }
 
+// VoiceRights words what the account may not do in its call (M33), for the TUI and the GUI as for the
+// command: nothing when it may send and hear, or when there is no call answered.
+func VoiceRights(r *ipc.VoiceRights) []string {
+	if r == nil {
+		return nil
+	}
+	var out []string
+	if !r.Send {
+		out = append(out, "You are not heard: a moderator muted you, or this channel does not let you speak")
+	}
+	if !r.Hear {
+		out = append(out, "You hear nothing: a moderator deafened you")
+	}
+	return out
+}
+
 func withReason(line, reason string) string {
 	if reason == "" {
 		return line

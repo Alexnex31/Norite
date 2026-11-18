@@ -40,7 +40,8 @@ import (
 
 // The ops. A worker sends HELLO first and once, then OFFER once it has a JOIN, then STATE as its call
 // changes, and from its first STATE, DEVICES as its microphone and speakers change (M32). The daemon sends
-// JOIN once, ANSWER once, and LEAVE when the call should end.
+// JOIN once, ANSWER once, RIGHTS whenever what the account may do in the call changes after the answer
+// (M33), and LEAVE when the call should end.
 const (
 	OpHello   gatewayproto.Opcode = 1
 	OpOffer   gatewayproto.Opcode = 2
@@ -50,6 +51,7 @@ const (
 	OpJoin   gatewayproto.Opcode = 10
 	OpAnswer gatewayproto.Opcode = 11
 	OpLeave  gatewayproto.Opcode = 12
+	OpRights gatewayproto.Opcode = 13
 )
 
 // Bounds. The largest frame either way is the offer or the answer, each under voiceproto.MaxOffer, which
@@ -61,9 +63,18 @@ const (
 
 	// MaxReason bounds the reason a STATE carries, in bytes.
 	MaxReason = 256
-	// MaxICEServers and MaxURLs bound what a JOIN names: TURN over UDP, TCP and TLS in each family is six.
+	// MaxICEServers and MaxURLs bound what an ANSWER names: TURN over UDP, TCP and TLS in each family is
+	// six. MaxURL and MaxCredential bound each string, which come from the instance.
 	MaxICEServers = 4
 	MaxURLs       = 8
+	MaxURL        = 256
+	MaxCredential = 128
+
+	// MinBitrate and MaxBitrate bound the call's bitrate (M33): the congestion controller's floor, and the
+	// most a 20 ms Opus packet with its headers carries under the SFU's 256 kbps track bound. The voice
+	// server names it, so the worker clamps it to these whatever it says; zero is the worker's default.
+	MinBitrate = 16_000
+	MaxBitrate = 224_000
 )
 
 // Hello is the worker's first frame: which version it is. The daemon checks it by the attach socket's rule
@@ -73,10 +84,11 @@ type Hello struct {
 	Version string `json:"version"`
 }
 
-// Join tells the worker to make its call's connection: gather with these servers and offer.
+// Join tells the worker to make its call's connection and offer. The offer carries no candidate: the SFU
+// is ICE-lite and learns the client's addresses from its checks, so the worker gathers only once the
+// answer has named the servers to gather with (M33), and a TURN server that cannot be reached no longer
+// holds the offer back.
 type Join struct {
-	// ICEServers are the TURN servers to gather relayed candidates from, with the account's credential.
-	ICEServers []ICEServer `json:"ice_servers"`
 	// Loopback admits loopback candidates, for an SFU on this machine: M26's harness, and tests.
 	Loopback bool `json:"loopback"`
 	// Processing is which of the DSP's components process the microphone (M30), as the join request
@@ -93,14 +105,30 @@ type ICEServer struct {
 	Credential string   `json:"credential"`
 }
 
-// Offer is the worker's SDP offer, every candidate gathered. At most voiceproto.MaxOffer bytes.
+// Offer is the worker's SDP offer, with no candidate. At most voiceproto.MaxOffer bytes.
 type Offer struct {
 	SDP string `json:"sdp"`
 }
 
-// Answer is the SFU's answer to the offer.
+// Answer is the SFU's answer to the offer, and what the worker gathers and sends with.
 type Answer struct {
 	SDP string `json:"sdp"`
+	// ICEServers are the TURN servers to gather relayed candidates from, with the account's credential.
+	ICEServers []ICEServer `json:"ice_servers"`
+	// Bitrate is the channel's, which the encoder starts at and the congestion controller never exceeds,
+	// clamped by the worker to MinBitrate and MaxBitrate; zero is the worker's default.
+	Bitrate int `json:"bitrate"`
+	// Rights is what the account may do in the call as it starts.
+	Rights Rights `json:"rights"`
+}
+
+// Rights is what the account may do in its call (M33): send its microphone, and hear the call. The
+// instance's server mute and a channel without SPEAK take the first, its server deafen the second. The
+// client applies them and the SFU enforces neither, which the security ledger records. Not sending keeps
+// the microphone's processing running, so the echo canceller stays converged for when sending resumes.
+type Rights struct {
+	Send bool `json:"send"`
+	Hear bool `json:"hear"`
 }
 
 // Leave ends the call. It carries nothing.
@@ -236,17 +264,40 @@ func (s State) Check() error {
 	return nil
 }
 
-// Check refuses a join naming more servers or URLs than any correct one.
-func (j Join) Check() error {
-	if len(j.ICEServers) > MaxICEServers {
-		return fmt.Errorf("%d ICE servers, past %d", len(j.ICEServers), MaxICEServers)
+// Check refuses an answer naming more servers, URLs or bytes than any correct one, or none.
+func (a Answer) Check() error {
+	if a.SDP == "" || len(a.SDP) > voiceproto.MaxOffer {
+		return fmt.Errorf("an answer of %d bytes", len(a.SDP))
 	}
-	for _, s := range j.ICEServers {
+	if len(a.ICEServers) > MaxICEServers {
+		return fmt.Errorf("%d ICE servers, past %d", len(a.ICEServers), MaxICEServers)
+	}
+	for _, s := range a.ICEServers {
 		if len(s.URLs) == 0 || len(s.URLs) > MaxURLs {
 			return fmt.Errorf("an ICE server with %d URLs", len(s.URLs))
 		}
+		for _, u := range s.URLs {
+			if u == "" || len(u) > MaxURL {
+				return fmt.Errorf("an ICE server URL of %d bytes", len(u))
+			}
+		}
+		if len(s.Username) > MaxCredential || len(s.Credential) > MaxCredential {
+			return errors.New("an ICE server credential past its bound")
+		}
+	}
+	if a.Bitrate < 0 {
+		return fmt.Errorf("a bitrate of %d", a.Bitrate)
 	}
 	return nil
+}
+
+// ClampBitrate is the bitrate a call runs at for what the voice server named: within MinBitrate and
+// MaxBitrate, or def for none.
+func ClampBitrate(named, def int) int {
+	if named == 0 {
+		return def
+	}
+	return min(max(named, MinBitrate), MaxBitrate)
 }
 
 // CutReason cuts a reason to MaxReason bytes on a character's boundary. A cut through a character would be

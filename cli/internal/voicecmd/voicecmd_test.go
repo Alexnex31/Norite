@@ -293,6 +293,13 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 			Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceNoSession}},
 			[]string{"The last call ended: neither the microphone nor the speakers can be used.\nNothing can use the " +
 				"microphone or speakers until you log in at this machine.\n"}, nil},
+		// What the instance lets the account do (M33): said when it takes something away, and not otherwise.
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Rights: &ipc.VoiceRights{Send: false, Hear: false}},
+			[]string{"You are not heard: a moderator muted you, or this channel does not let you speak.\n" +
+				"You hear nothing: a moderator deafened you.\n"}, nil},
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Rights: &ipc.VoiceRights{Send: true, Hear: true}}, nil, []string{"not heard", "hear nothing"}},
 	}
 	for _, tc := range cases {
 		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")
@@ -310,7 +317,8 @@ func TestTheTextSaysHowTheCallStands(t *testing.T) {
 func TestTheDevicesAreInTheJSON(t *testing.T) {
 	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
 		Microphone: &ipc.VoiceDevice{State: ipc.VoiceDeviceAsking},
-		Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceFailed, Reason: "it opened and delivers no audio"}}}
+		Speakers:   &ipc.VoiceDevice{State: ipc.VoiceDeviceFailed, Reason: "it opened and delivers no audio"},
+		Rights:     &ipc.VoiceRights{Send: false, Hear: true}}}
 	r := norite(t, d, true, "status")
 	require.NoError(t, r.err)
 	daemontest.MatchesCLISchema(t, r.out, "voice.schema.json", "status")

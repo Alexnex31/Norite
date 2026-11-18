@@ -265,6 +265,10 @@ func (v view) Text(t *output.Text) {
 	for _, line := range ops.VoiceDevices(v.Microphone, v.Speakers, v.goos) {
 		t.Line("%s.", output.Clean(line))
 	}
+	// What the instance lets the account do in the call (M33), which this client applies.
+	for _, line := range ops.VoiceRights(v.Rights) {
+		t.Line("%s.", line)
+	}
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))
 	}

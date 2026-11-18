@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,11 @@ import (
 
 // fakeCall is a Call whose every step the test decides.
 type fakeCall struct {
+	// mu guards what the worker hands the call: the answer, and the rights since.
+	mu     sync.Mutex
+	answer *voiceipc.Answer
+	rights []voiceipc.Rights
+
 	offerErr error
 	ready    chan struct{}
 	ended    chan string
@@ -48,7 +54,17 @@ func (c *fakeCall) Offer(ctx context.Context) (string, error) {
 	}
 	return "v=0\r\noffer\r\n", c.offerErr
 }
-func (c *fakeCall) Accept(string) error        { return nil }
+func (c *fakeCall) Accept(a voiceipc.Answer) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.answer = &a
+	return nil
+}
+func (c *fakeCall) Rights(r voiceipc.Rights) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rights = append(c.rights, r)
+}
 func (c *fakeCall) Ready() <-chan struct{}     { return c.ready }
 func (c *fakeCall) Ended() <-chan string       { return c.ended }
 func (c *fakeCall) EndedBy() *voiceipc.Devices { return c.by }
@@ -158,10 +174,34 @@ func (d *daemon) joined() {
 	d.t.Helper()
 	f := d.next()
 	require.Equal(d.t, voiceipc.OpHello, f.Op)
-	d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+	d.send(voiceipc.OpJoin, voiceipc.Join{})
 	require.Equal(d.t, voiceipc.OpOffer, d.next().Op)
-	d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\nanswer\r\n"})
+	d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\nanswer\r\n", ICEServers: []voiceipc.ICEServer{},
+		Bitrate: 96000, Rights: voiceipc.Rights{Send: true, Hear: true}})
 	require.Equal(d.t, voiceipc.StateConnecting, d.state().State)
+}
+
+// The answer reaches the call whole, servers, bitrate and rights, and rights the daemon sends later reach it
+// in order, before the call is ready and after (M33).
+func TestTheAnswerAndTheRightsReachTheCall(t *testing.T) {
+	call := newFakeCall()
+	d := start(t, call, Options{})
+	d.joined()
+	d.send(voiceipc.OpRights, voiceipc.Rights{Send: false, Hear: true})
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+	d.send(voiceipc.OpRights, voiceipc.Rights{Send: true, Hear: false})
+	require.Eventually(t, func() bool {
+		call.mu.Lock()
+		defer call.mu.Unlock()
+		return len(call.rights) == 2
+	}, 5*time.Second, 5*time.Millisecond)
+	call.mu.Lock()
+	defer call.mu.Unlock()
+	require.NotNil(t, call.answer)
+	require.Equal(t, 96000, call.answer.Bitrate)
+	require.Equal(t, voiceipc.Rights{Send: true, Hear: true}, call.answer.Rights)
+	require.Equal(t, []voiceipc.Rights{{Send: false, Hear: true}, {Send: true, Hear: false}}, call.rights)
 }
 
 func TestACallGoesFromJoinToReadyAndEndsOnLeave(t *testing.T) {
@@ -279,7 +319,7 @@ func TestAFailedGatherEnds(t *testing.T) {
 	call.offerErr = errors.New("no network")
 	d := start(t, call, Options{})
 	require.Equal(t, voiceipc.OpHello, d.next().Op)
-	d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+	d.send(voiceipc.OpJoin, voiceipc.Join{})
 	s := d.state()
 	require.Equal(t, voiceipc.StateEnded, s.State)
 	require.Contains(t, s.Reason, "no network")
@@ -297,7 +337,7 @@ func TestTheWorkerExitsWhenItsDaemonGoes(t *testing.T) {
 		call := newFakeCall()
 		d := start(t, call, Options{})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		d.send(voiceipc.OpJoin, voiceipc.Join{})
 		require.Equal(t, voiceipc.OpOffer, d.next().Op)
 		require.NoError(t, d.toW.Close())
 		require.Equal(t, ExitOK, d.exit())
@@ -334,17 +374,30 @@ func TestAStuckCallDoesNotKeepTheWorker(t *testing.T) {
 // A frame out of order is a bug in a program of the same install: the worker says so and exits non-zero.
 func TestAFrameOutOfOrderIsRefused(t *testing.T) {
 	for name, send := range map[string]func(d *daemon){
-		"an answer before the join": func(d *daemon) { d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "x"}) },
-		"a worker's own op":         func(d *daemon) { d.send(voiceipc.OpHello, voiceipc.Hello{Version: "x"}) },
-		"a join with a field nobody declared": func(d *daemon) {
-			d.send(voiceipc.OpJoin, map[string]any{"ice_servers": []any{}, "loopback": false, "token": "x"})
+		"an answer before the join": func(d *daemon) {
+			d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "x", ICEServers: []voiceipc.ICEServer{}})
 		},
-		"a join naming too many servers": func(d *daemon) {
+		"a worker's own op": func(d *daemon) { d.send(voiceipc.OpHello, voiceipc.Hello{Version: "x"}) },
+		"a join with a field nobody declared": func(d *daemon) {
+			d.send(voiceipc.OpJoin, map[string]any{"loopback": false, "token": "x"})
+		},
+		"a join naming servers, which the answer names since M33": func(d *daemon) {
+			d.send(voiceipc.OpJoin, map[string]any{"ice_servers": []any{}, "loopback": false,
+				"processing": voiceipc.Join{}.Processing})
+		},
+		"an answer naming too many servers": func(d *daemon) {
+			d.send(voiceipc.OpJoin, voiceipc.Join{})
+			require.Equal(t, voiceipc.OpOffer, d.next().Op)
 			many := make([]voiceipc.ICEServer, voiceipc.MaxICEServers+1)
 			for i := range many {
 				many[i] = voiceipc.ICEServer{URLs: []string{"turn:192.0.2.1:3478"}}
 			}
-			d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: many})
+			d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n", ICEServers: many})
+		},
+		"rights before the answer": func(d *daemon) {
+			d.send(voiceipc.OpJoin, voiceipc.Join{})
+			require.Equal(t, voiceipc.OpOffer, d.next().Op)
+			d.send(voiceipc.OpRights, voiceipc.Rights{Send: true, Hear: true})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -367,7 +420,7 @@ func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
 		call.slowGather = true
 		d := start(t, call, Options{Gather: time.Minute})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		d.send(voiceipc.OpJoin, voiceipc.Join{})
 		started := time.Now()
 		d.send(voiceipc.OpLeave, voiceipc.Leave{})
 		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"}, d.state())
@@ -379,7 +432,7 @@ func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
 		call.slowGather = true
 		d := start(t, call, Options{Gather: time.Minute})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		d.send(voiceipc.OpJoin, voiceipc.Join{})
 		started := time.Now()
 		require.NoError(t, d.toW.Close())
 		require.Equal(t, ExitOK, d.exit())

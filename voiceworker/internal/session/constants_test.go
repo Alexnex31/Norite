@@ -54,7 +54,7 @@ func TestTheEncoderStartsWhereTheControllerDoes(t *testing.T) {
 	if o.LossPercent < 1 {
 		t.Errorf("the encoder starts at %d%% loss, which turns libopus's FEC off", o.LossPercent)
 	}
-	if b, l := newController(time.Now()).Target(); b != o.Bitrate || l != o.LossPercent {
+	if b, l := newController(time.Now(), o.Bitrate).Target(); b != o.Bitrate || l != o.LossPercent {
 		t.Errorf("the call's controller starts at %d bps and %d%%, the encoder at %d bps and %d%%", b, l,
 			o.Bitrate, o.LossPercent)
 	}

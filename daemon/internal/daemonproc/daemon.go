@@ -296,8 +296,12 @@ func Run(ctx context.Context, opts Options) error {
 			})
 			local.bind(server)
 			// Voice calls, each a worker of its own (M28). Signed in or not, the requests are answered; a
-			// join needs a sign-in, and until M33 a build for M26's harness.
-			signaler, unavailable := voiceworker.DefaultSignaler()
+			// join needs a sign-in, and a connection to the instance, which op 4 travels on (M33).
+			voiceGateway := &voiceworker.Gateway{Instance: func() string {
+				_, account := src.Status()
+				return account.InstanceURL
+			}}
+			signaler, unavailable := voiceworker.DefaultSignaler(voiceGateway)
 			calls := voiceworker.NewVoice(voiceworker.VoiceOptions{
 				Program: voiceworker.ProgramBeside(executable()), Version: opts.Version,
 				Signaler: signaler, Unavailable: unavailable, Account: signedInAccount(src),
@@ -308,8 +312,10 @@ func Run(ctx context.Context, opts Options) error {
 			local.voice = calls
 			gw := gatewayclient.New(gatewayclient.Options{
 				Credentials: src, Sink: server, Version: opts.Version,
-				Log: part("gateway"), OnVersionRefused: update.Nudge,
+				Log: part("gateway"), OnVersionRefused: update.Nudge, Voice: voiceGateway.Deliver,
 			})
+			// Before anything runs: the voice signaler reads it from the join's goroutine.
+			voiceGateway.Link = gw
 			gateway.Store(gw)
 			// A call ends with the daemon, before the log and the lock are let go; its worker is reaped, and
 			// would go by itself anyway once its pipe closed.

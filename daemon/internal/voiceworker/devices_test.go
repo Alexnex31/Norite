@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,9 +24,9 @@ import (
 // answeringServer gives a route and answers every provision, so a stand-in's call comes up.
 type answeringServer struct{}
 
-func (answeringServer) Route(context.Context, string) (Route, error) { return Route{}, nil }
-func (answeringServer) Join(context.Context, string, string, string) (string, error) {
-	return "v=0\r\nanswer\r\n", nil
+func (answeringServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (answeringServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}}, nil
 }
 
 // The devices a join answers with are the worker's (M32): it waits for the microphone to be past opening,
@@ -224,4 +225,40 @@ func TestAJoinAfterADevicesFailurePublishesNoLeave(t *testing.T) {
 	defer mu.Unlock()
 	require.NotEmpty(t, seen)
 	require.Equal(t, ipc.VoiceJoining, seen[0].State, "%+v", seen[0])
+}
+
+func (answeringServer) Leave(context.Context, string) {}
+
+// changingServer answers with rights the instance later changes, and counts the leaves it is told of.
+type changingServer struct {
+	changes chan voiceipc.Rights
+	leaves  atomic.Int32
+}
+
+func (*changingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (s *changingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: false, Hear: true}, Changes: s.changes}, nil
+}
+func (s *changingServer) Leave(context.Context, string) { s.leaves.Add(1) }
+
+// What the account may do reaches the status with the answer, and each change the instance sends reaches
+// the status and the worker (M33); leaving tells the voice server.
+func TestTheRightsReachTheStatusAndTheWorker(t *testing.T) {
+	fast(t)
+	srv := &changingServer{changes: make(chan voiceipc.Rights, 1)}
+	v := standinVoice(t, "good", srv)
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Equal(t, &ipc.VoiceRights{Send: false, Hear: true}, st.Rights, "the answer's rights")
+
+	srv.changes <- voiceipc.Rights{Send: true, Hear: false}
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.Rights != nil && *st.Rights == ipc.VoiceRights{Send: true, Hear: false} &&
+			st.Microphone != nil && st.Microphone.Reason == "send=true hear=false"
+	}, 5*time.Second, 10*time.Millisecond, "the change reached the status, or the worker, or neither")
+
+	st = v.Leave()
+	require.Nil(t, st.Rights, "a call left has no rights")
+	require.Equal(t, int32(1), srv.leaves.Load(), "the voice server was not told the call was left")
 }

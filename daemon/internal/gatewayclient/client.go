@@ -71,6 +71,11 @@ type Options struct {
 	// versions, whichever side said so. It must not block. Nil is nothing (M24: the updater looks for a
 	// release then, and not a day later).
 	OnVersionRefused func()
+	// Voice is told the four voice dispatches (M33), from the read loop, so it must not block. The two
+	// replies to op 4, VOICE_SERVER_UPDATE and VOICE_JOIN_REFUSED, go to it alone and never to the Sink:
+	// they answer this daemon's own request, and the first carries a TURN credential, which nothing on the
+	// attach socket carries. The two voice states go to both.
+	Voice func(eventType string, data json.RawMessage)
 
 	// The waits between connections. Zero means the defaults; tests shrink them.
 	RetryMin, RetryMax time.Duration
@@ -124,8 +129,11 @@ type Client struct {
 	sink             Sink
 	version          string
 	onVersionRefused func()
-	log              zerolog.Logger
-	http             *http.Client
+	voice            func(string, json.RawMessage)
+	// live is the connection while it is established, for SendVoice; nil between connections.
+	live atomic.Pointer[websocket.Conn]
+	log  zerolog.Logger
+	http *http.Client
 
 	retryMin, retryMax                           time.Duration
 	rateLimitedFloor, protocolFloor, versionHold time.Duration
@@ -144,6 +152,7 @@ func New(opts Options) *Client {
 		sink:             opts.Sink,
 		version:          opts.Version,
 		onVersionRefused: opts.OnVersionRefused,
+		voice:            opts.Voice,
 		log:              opts.Log,
 		retryMin:         orDefault(opts.RetryMin, defaultRetryMin),
 		retryMax:         orDefault(opts.RetryMax, defaultRetryMax),

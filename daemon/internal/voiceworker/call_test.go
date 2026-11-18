@@ -26,15 +26,15 @@ type refusingServer struct {
 	worker atomic.Pointer[Worker]
 }
 
-func (s *refusingServer) Route(context.Context, string) (Route, error) { return Route{}, nil }
+func (s *refusingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
 
-func (s *refusingServer) Join(context.Context, string, string, string) (string, error) {
+func (s *refusingServer) Join(context.Context, string, string, string) (Answer, error) {
 	s.v.mu.Lock()
 	if s.v.current != nil {
 		s.worker.Store(s.v.current.worker)
 	}
 	s.v.mu.Unlock()
-	return "", errors.New("the voice server refused: 409 room full")
+	return Answer{}, errors.New("the voice server refused: 409 room full")
 }
 
 func standinVoice(t *testing.T, mode string, signaler Signaler) *Voice {
@@ -72,14 +72,14 @@ func TestAFailedJoinAnswersOnceItsWorkerIsGone(t *testing.T) {
 // blockingServer holds every route until its context ends.
 type blockingServer struct{ asked atomic.Int32 }
 
-func (s *blockingServer) Route(ctx context.Context, _ string) (Route, error) {
+func (s *blockingServer) Prepare(ctx context.Context, _ string) (Route, error) {
 	s.asked.Add(1)
 	<-ctx.Done()
 	return Route{}, ctx.Err()
 }
 
-func (s *blockingServer) Join(context.Context, string, string, string) (string, error) {
-	return "", errors.New("unreachable")
+func (s *blockingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{}, errors.New("unreachable")
 }
 
 // A join whose asker went away while it waited behind another is not done: it would end that other call
@@ -126,15 +126,15 @@ type recordingServer struct {
 	accounts []string
 }
 
-func (s *recordingServer) Route(_ context.Context, account string) (Route, error) {
+func (s *recordingServer) Prepare(_ context.Context, account string) (Route, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.accounts = append(s.accounts, account)
 	return Route{}, errors.New("the voice server refused: 503")
 }
 
-func (s *recordingServer) Join(context.Context, string, string, string) (string, error) {
-	return "", errors.New("unreachable")
+func (s *recordingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{}, errors.New("unreachable")
 }
 
 func (s *recordingServer) asked() []string {
@@ -255,12 +255,12 @@ func TestTheEndOfASignInLeavesOnlyItsOwnCall(t *testing.T) {
 // routelessServer refuses the route at once, so a join fails before any worker is started.
 type routelessServer struct{}
 
-func (routelessServer) Route(context.Context, string) (Route, error) {
+func (routelessServer) Prepare(context.Context, string) (Route, error) {
 	return Route{}, errors.New("the voice server refused: 503")
 }
 
-func (routelessServer) Join(context.Context, string, string, string) (string, error) {
-	return "", errors.New("unreachable")
+func (routelessServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{}, errors.New("unreachable")
 }
 
 // A failed join is over when it is answered: the status says why, and a retry that comes at once finds no
@@ -295,3 +295,8 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 	require.Equal(t, ipc.VoiceIdle, st.State)
 	require.Contains(t, st.Reason, "503")
 }
+
+func (*refusingServer) Leave(context.Context, string)  {}
+func (*blockingServer) Leave(context.Context, string)  {}
+func (*recordingServer) Leave(context.Context, string) {}
+func (routelessServer) Leave(context.Context, string)  {}

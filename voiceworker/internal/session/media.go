@@ -172,6 +172,8 @@ func (s *Session) startMedia(ctx context.Context) error {
 		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now(),
 		capFirst: make(chan struct{}), playFirst: make(chan struct{})}
 	eo := opus.DefaultEncoderOptions()
+	// The channel's bitrate, as Accept clamped it (M33), which the controller never exceeds.
+	eo.Bitrate = s.bitrate
 	m.bitrate, m.lossPercent = eo.Bitrate, eo.LossPercent
 	if m.enc, err = codec.NewEncoder(ctx, eo); err != nil {
 		m.closeDSP()
@@ -354,6 +356,13 @@ func (m *media) send() {
 			continue
 		}
 		skipped = false
+		// Not allowed to send (M33): a server mute, or no SPEAK. The frame has been through the DSP, which
+		// stays converged, and nothing is encoded; the far end hears the gap as silence, and the next packet
+		// starts a talk-spurt.
+		if m.s.mayNotSend.Load() {
+			talking = false
+			continue
+		}
 		if err := m.adapt(); err != nil {
 			m.s.end(voiceipc.CutReason("the encoder could not be adjusted to the network: " + err.Error()))
 			return
@@ -584,6 +593,11 @@ func (m *media) fill(out []int16) {
 	}
 	for i, v := range m.mix {
 		out[i] = int16(max(math.MinInt16, min(math.MaxInt16, v)))
+	}
+	// Not allowed to hear (M33), a server deafen: the slots are still decoded, so each keeps up with its
+	// sender, and the speakers play silence, which is then the echo canceller's reference.
+	if m.s.mayNotHear.Load() {
+		clear(out)
 	}
 	// Nothing reads the reference with echo cancellation off, or once the call has no chain for good, so
 	// the speakers' callback is spared the copy.

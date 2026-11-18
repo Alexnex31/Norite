@@ -183,8 +183,10 @@ func (h *harness) joinVia(t *testing.T, room, user string, dev audio.Device, p d
 		t.Fatal(err)
 	}
 	j := voiceipc.Join{Loopback: true, Processing: ipc.VoiceJoin(p)}
+	// The servers come with the answer, as op 4's do (M33).
+	servers := []voiceipc.ICEServer{}
 	if len(creds.URLs) > 0 {
-		j.ICEServers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
+		servers = []voiceipc.ICEServer{{URLs: creds.URLs, Username: creds.Username, Credential: creds.Password}}
 	}
 	opts.Version, opts.Device = "dev", dev
 	if opts.Codec == nil {
@@ -216,7 +218,8 @@ func (h *harness) joinVia(t *testing.T, room, user string, dev audio.Device, p d
 	if rewrite != nil {
 		ans.Answer = rewrite(ans.Answer)
 	}
-	if err := s.Accept(ans.Answer); err != nil {
+	if err := s.Accept(voiceipc.Answer{SDP: ans.Answer, ICEServers: servers, Bitrate: opts.bitrate,
+		Rights: voiceipc.Rights{Send: !opts.muted, Hear: true}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -571,5 +574,77 @@ func TestMouthToEarStaysWithinItsBudget(t *testing.T) {
 				t.Errorf("mouth to ear reached %v, past the %v budget", worst, tc.budget)
 			}
 		})
+	}
+}
+
+// loudSince is how many samples past the speakers' first n are louder than a whisper: what a caller heard
+// after a moment, ignoring what came before it.
+func loudSince(dev *audiotest.Device, n int) int {
+	heard, _ := dev.Heard()
+	loud := 0
+	for _, v := range heard[min(n, len(heard)):] {
+		if v > 500 || v < -500 {
+			loud++
+		}
+	}
+	return loud
+}
+
+// What the account may do is the client's to apply (M33): without the right to send, the microphone is
+// processed and nothing is sent, so the far end hears nothing until the right comes back; without the right
+// to hear, the speakers play silence while the call goes on.
+func TestTheRightsAreAppliedByTheClient(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	speaker := &audiotest.Device{Source: audiotest.Tone(440, 8000)}
+	listener := &audiotest.Device{}
+	s := h.join(t, "1", "1", speaker, Options{muted: true})
+	l := h.join(t, "1", "2", listener, Options{})
+
+	time.Sleep(2 * time.Second)
+	if n := loudSince(listener, 0); n > 0 {
+		t.Fatalf("a caller who may not send was heard for %d samples", n)
+	}
+
+	s.Rights(voiceipc.Rights{Send: true, Hear: true})
+	checkHeard(t, "the listener, once the speaker may send", steady(t, listener, 2*time.Second), 440, 0.9)
+
+	l.Rights(voiceipc.Rights{Send: true, Hear: false})
+	time.Sleep(300 * time.Millisecond)
+	heard, _ := listener.Heard()
+	mark := len(heard)
+	time.Sleep(2 * time.Second)
+	if n := loudSince(listener, mark); n > 0 {
+		t.Errorf("a caller who may not hear heard %d samples", n)
+	}
+}
+
+// The channel's bitrate is what the encoder starts at and the controller's ceiling, clamped to what the SFU
+// carries; none named is the worker's default.
+func TestTheChannelsBitrateIsTheEncodersClamped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	for named, want := range map[int]int{0: opus.DefaultEncoderOptions().Bitrate, 96_000: 96_000,
+		8_000: voiceipc.MinBitrate, 510_000: voiceipc.MaxBitrate} {
+		s := h.join(t, "1", fmt.Sprint(named+1), &audiotest.Device{Source: audiotest.Tone(440, 8000)},
+			Options{bitrate: named})
+		var m *media
+		deadline := time.Now().Add(10 * time.Second)
+		for m = mediaOf(s); m == nil && time.Now().Before(deadline); m = mediaOf(s) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if m == nil {
+			t.Fatalf("named %d: the call's media never started", named)
+		}
+		// Read at once: the controller starts at its ceiling and moves only on the feedback, which a call on
+		// loopback gives no reason to lower in its first moments.
+		if got, _ := s.cc.Target(); got != want || m.bitrate != want {
+			t.Errorf("named %d: the controller targets %d and the encoder %d, want %d", named, got, m.bitrate, want)
+		}
+		s.Close()
 	}
 }

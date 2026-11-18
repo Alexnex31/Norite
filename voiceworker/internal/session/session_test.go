@@ -49,7 +49,7 @@ func answered(t *testing.T, join voiceipc.Join, extra []string) *Session {
 		}
 	}
 	require.True(t, placed, "the answer has no ICE password to place candidates after")
-	require.NoError(t, s.Accept(strings.Join(out, "\r\n")))
+	require.NoError(t, s.Accept(voiceipc.Answer{SDP: strings.Join(out, "\r\n"), ICEServers: []voiceipc.ICEServer{}}))
 	return s
 }
 
@@ -79,7 +79,7 @@ func TestAnAnswerCannotSendTheWorkerToItsOwnMachineOrLink(t *testing.T) {
 	for i, ip := range append(append([]string{}, refused...), kept...) {
 		lines = append(lines, remoteCandidate(i+1, ip))
 	}
-	s := answered(t, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}, lines)
+	s := answered(t, voiceipc.Join{}, lines)
 	require.Eventually(t, func() bool { return len(remoteIPs(s)) == len(kept) }, 5*time.Second, 20*time.Millisecond,
 		"%v", remoteIPs(s))
 	got := remoteIPs(s)
@@ -93,7 +93,7 @@ func TestAnAnswerCannotSendTheWorkerToItsOwnMachineOrLink(t *testing.T) {
 
 // A join for a voice server on this machine admits loopback, and nothing else changes.
 func TestAJoinForALocalVoiceServerAdmitsLoopback(t *testing.T) {
-	s := answered(t, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}, Loopback: true},
+	s := answered(t, voiceipc.Join{Loopback: true},
 		[]string{remoteCandidate(1, "127.0.0.1"), remoteCandidate(2, "169.254.169.254")})
 	require.Eventually(t, func() bool { return remoteIPs(s)["127.0.0.1"] > 0 }, 5*time.Second, 20*time.Millisecond)
 	require.NotContains(t, remoteIPs(s), "169.254.169.254")
@@ -105,7 +105,7 @@ func TestAnAnswerIsTakenUpToTheBound(t *testing.T) {
 	for i := range 200 {
 		lines = append(lines, remoteCandidate(i+1, net.IPv4(192, 0, 2, byte(i+1)).String()))
 	}
-	s := answered(t, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}}, lines)
+	s := answered(t, voiceipc.Join{}, lines)
 	require.Eventually(t, func() bool { return len(remoteIPs(s)) > 0 }, 5*time.Second, 20*time.Millisecond)
 	time.Sleep(200 * time.Millisecond)
 	require.LessOrEqual(t, len(remoteIPs(s)), maxRemotes)
