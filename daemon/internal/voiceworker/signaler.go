@@ -11,30 +11,46 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
-// Signaler is how the daemon reaches the voice server for a call: a TURN credential before the offer, then
-// the offer for the answer (ADR 0023, M27's ordering). M33's is op 4 over the gateway; until then the one
-// implementation is M26's harness (Harness), which a daemon reaches only when built with the
-// norite_voiceharness tag.
+// Signaler is how the daemon reaches the voice server for a call (ADR 0023): whether a call can be signaled
+// now, then the worker's offer for the SFU's answer, which since M33 brings the TURN credential with it, and
+// the call's end. The gateway's (Gateway) is op 4; M26's harness (Harness) is reached only by a daemon built
+// with the norite_voiceharness tag.
 type Signaler interface {
-	// Route is what the worker gathers with: the TURN servers with the account's credential.
-	Route(ctx context.Context, account string) (Route, error)
-	// Join provisions the call for the account in channel with the worker's offer, and returns the answer.
-	Join(ctx context.Context, account, channel, offer string) (string, error)
+	// Prepare is asked before the worker is started: whether a call can be signaled for the account now,
+	// and what the worker joins with. A refusal here starts no worker.
+	Prepare(ctx context.Context, account string) (Route, error)
+	// Join provisions the call for the account in channel with the worker's offer.
+	Join(ctx context.Context, account, channel, offer string) (Answer, error)
+	// Leave tells the voice server the call is over, once its worker is gone. Best effort: a voice server
+	// that is not told ends the call when the connection goes quiet.
+	Leave(ctx context.Context, account string)
 }
 
-// Route is what a worker gathers with.
+// Route is what a worker joins with, before any answer.
 type Route struct {
-	ICEServers []voiceipc.ICEServer
 	// Loopback admits loopback candidates, for a voice server on this machine.
 	Loopback bool
+}
+
+// Answer is what a provisioned call connects with.
+type Answer struct {
+	SDP        string
+	ICEServers []voiceipc.ICEServer
+	// Bitrate is the channel's, zero for the worker's default.
+	Bitrate int
+	Rights  voiceipc.Rights
+	// Changes delivers the account's rights each time the voice server says they changed, the latest
+	// only, until the call ends; nil for a voice server that says nothing of them.
+	Changes <-chan voiceipc.Rights
+	// Lost is closed if the instance drops the session the call was signaled on, which ends the call there;
+	// nil for a voice server with no such session.
+	Lost <-chan struct{}
 }
 
 // Harness signals through M26's harness (backend/internal/voice/voicetest/cmd/voice-sfu): POST
@@ -50,57 +66,51 @@ type Harness struct {
 // harnessBodies bounds what the harness answers: a credential, or an answer under voiceproto.MaxOffer.
 const harnessBodies = 64 << 10
 
-// Route asks the harness for a TURN credential.
-func (h Harness) Route(ctx context.Context, account string) (Route, error) {
-	var out struct {
-		Username string   `json:"username"`
-		Password string   `json:"password"`
-		URLs     []string `json:"urls"`
-	}
-	if err := h.post(ctx, "/credentials", map[string]string{"user": account}, &out); err != nil {
-		return Route{}, err
-	}
-	route := Route{Loopback: h.loopback()}
-	if len(out.URLs) > 0 {
-		if len(out.URLs) > voiceipc.MaxURLs {
-			out.URLs = out.URLs[:voiceipc.MaxURLs]
-		}
-		route.ICEServers = []voiceipc.ICEServer{{URLs: out.URLs, Username: out.Username, Credential: out.Password}}
-	}
-	return route, nil
+// Prepare says whether the harness is on this machine; the harness has nothing to be connected to.
+func (h Harness) Prepare(context.Context, string) (Route, error) {
+	return Route{Loopback: h.loopback()}, nil
 }
 
 // loopback is a harness on this machine, whose SFU announces loopback addresses: its URL's host is a
 // loopback address or exactly localhost. A test of the URL's text took http://localhost.example.com for one,
 // which admits the loopback candidates of whatever that host answers.
-func (h Harness) loopback() bool {
-	u, err := url.Parse(h.URL)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	a, err := netip.ParseAddr(host)
-	return err == nil && a.Unmap().IsLoopback()
-}
+func (h Harness) loopback() bool { return localInstance(h.URL) }
 
-// Join provisions the call.
-func (h Harness) Join(ctx context.Context, account, channel, offer string) (string, error) {
+// Join asks the harness for a TURN credential, then provisions the call. The credential comes with the
+// answer, as op 4's does, so the worker is driven the same way whichever signaler it has.
+func (h Harness) Join(ctx context.Context, account, channel, offer string) (Answer, error) {
+	var cred struct {
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+		URLs     []string `json:"urls"`
+	}
+	if err := h.post(ctx, "/credentials", map[string]string{"user": account}, &cred); err != nil {
+		return Answer{}, err
+	}
 	var out struct {
 		Conn   string `json:"conn"`
 		Answer string `json:"answer"`
 	}
 	err := h.post(ctx, "/provision", map[string]string{"room": channel, "user": account, "offer": offer}, &out)
 	if err != nil {
-		return "", err
+		return Answer{}, err
 	}
 	if out.Answer == "" {
-		return "", errors.New("the voice server answered with no answer")
+		return Answer{}, errors.New("the voice server answered with no answer")
 	}
-	return out.Answer, nil
+	a := Answer{SDP: out.Answer, ICEServers: []voiceipc.ICEServer{},
+		Rights: voiceipc.Rights{Send: true, Hear: true}}
+	if len(cred.URLs) > 0 {
+		if len(cred.URLs) > voiceipc.MaxURLs {
+			cred.URLs = cred.URLs[:voiceipc.MaxURLs]
+		}
+		a.ICEServers = []voiceipc.ICEServer{{URLs: cred.URLs, Username: cred.Username, Credential: cred.Password}}
+	}
+	return a, nil
 }
+
+// Leave tells the harness nothing: it has no leave, and the SFU ends the connection when its worker goes.
+func (h Harness) Leave(context.Context, string) {}
 
 func (h Harness) post(ctx context.Context, path string, in, out any) error {
 	body, err := json.Marshal(in)

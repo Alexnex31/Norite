@@ -316,8 +316,28 @@ func TestEveryRefusalHasItsCloseCode(t *testing.T) {
 		{"a reserved op after IDENTIFY", func(c *gatewayClient) {
 			c.identify(f.ownerToken, "dev")
 			c.ready()
-			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{})
+			c.send(gatewayproto.OpPresenceUpdate, map[string]any{})
 		}, gatewayproto.CloseUnknownOpcode},
+		{"a voice state update naming no channel", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice join with no nonce", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
+				"channel_id": "1", "offer": "v=0", "supports_video": false,
+			})
+		}, gatewayproto.CloseDecodeError},
+		{"a leave carrying more than a null channel", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": nil, "nonce": "a"})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice state update before IDENTIFY", func(c *gatewayClient) {
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": nil})
+		}, gatewayproto.CloseNotAuthenticated},
 		{"an op nobody defined", func(c *gatewayClient) {
 			c.identify(f.ownerToken, "dev")
 			c.ready()
@@ -545,7 +565,7 @@ func TestTheGatewaySchemaMirrorsTheRESTShapes(t *testing.T) {
 
 	for _, name := range []string{
 		"User", "Guild", "Channel", "PermissionOverwrite", "Role", "Permissions", "Member", "Message",
-		"AppliedMessageTag", "PublicUser", "Snowflake",
+		"AppliedMessageTag", "PublicUser", "Snowflake", "VoiceState",
 	} {
 		rest, ok := doc.Components.Schemas[name]
 		require.True(t, ok, "openapi.yaml has no %s", name)

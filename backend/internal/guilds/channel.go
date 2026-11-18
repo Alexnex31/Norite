@@ -623,6 +623,10 @@ func (s *Service) DeleteChannel(ctx context.Context, actor auth.Actor, channelID
 		}, channelDeleted{ID: channelID, GuildID: guildID}); err != nil {
 			return err
 		}
+		// A deleted voice channel's calls end, and its room closes (M33).
+		if err := s.events.QueueVoiceRecheck(ctx, guildID); err != nil {
+			return err
+		}
 		return s.queueDetached(ctx, q, guildID, children)
 	})
 }

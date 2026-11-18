@@ -59,6 +59,12 @@ type session struct {
 	bufBytes int
 	conn     *conn
 	expiry   *time.Timer
+
+	// The session's op 4 requests waiting to run, in order, whether a goroutine is running them, and whether
+	// a join is among them or under way (voice.go).
+	voiceOps     []voiceOp
+	voiceRunning bool
+	voiceJoining bool
 }
 
 type buffered struct {
@@ -279,6 +285,12 @@ func (s *session) stop() {
 	s.buf, s.pending = nil, nil
 	if !s.ended {
 		s.srv.idx.remove(s, s.guilds)
+		// A dropped session's call ends with it (M33's D3): a revocation, the resume window running out,
+		// or an IDENTIFY superseding a detached session all come through here, so the end of a sign-in
+		// reaches the call with no path of its own.
+		if s.srv.opts.Voice != nil {
+			s.srv.opts.Voice.Ended(s.userID, s.id)
+		}
 	}
 	s.ended = true
 }

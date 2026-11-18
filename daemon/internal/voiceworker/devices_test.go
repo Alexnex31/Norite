@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,9 +24,9 @@ import (
 // answeringServer gives a route and answers every provision, so a stand-in's call comes up.
 type answeringServer struct{}
 
-func (answeringServer) Route(context.Context, string) (Route, error) { return Route{}, nil }
-func (answeringServer) Join(context.Context, string, string, string) (string, error) {
-	return "v=0\r\nanswer\r\n", nil
+func (answeringServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (answeringServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}}, nil
 }
 
 // The devices a join answers with are the worker's (M32): it waits for the microphone to be past opening,
@@ -194,6 +195,7 @@ func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
 	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 5*time.Second, 10*time.Millisecond)
 	st = v.Status()
 	require.Equal(t, "the voice server closed the call", st.Reason)
+	require.True(t, st.EndedInCall, "a call that was up ended, and the status says it was a call")
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)
 }
@@ -224,4 +226,69 @@ func TestAJoinAfterADevicesFailurePublishesNoLeave(t *testing.T) {
 	defer mu.Unlock()
 	require.NotEmpty(t, seen)
 	require.Equal(t, ipc.VoiceJoining, seen[0].State, "%+v", seen[0])
+}
+
+func (answeringServer) Leave(context.Context, string) {}
+
+// changingServer answers with rights the instance later changes, and counts the leaves it is told of.
+type changingServer struct {
+	changes chan voiceipc.Rights
+	leaves  atomic.Int32
+}
+
+func (*changingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (s *changingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: false, Hear: true}, Changes: s.changes}, nil
+}
+func (s *changingServer) Leave(context.Context, string) { s.leaves.Add(1) }
+
+// What the account may do reaches the status with the answer, and each change the instance sends reaches
+// the status and the worker (M33); leaving tells the voice server.
+func TestTheRightsReachTheStatusAndTheWorker(t *testing.T) {
+	fast(t)
+	srv := &changingServer{changes: make(chan voiceipc.Rights, 1)}
+	v := standinVoice(t, "good", srv)
+	st, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Equal(t, &ipc.VoiceRights{Send: false, Hear: true}, st.Rights, "the answer's rights")
+
+	srv.changes <- voiceipc.Rights{Send: true, Hear: false}
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.Rights != nil && *st.Rights == ipc.VoiceRights{Send: true, Hear: false} &&
+			st.Microphone != nil && st.Microphone.Reason == "send=true hear=false"
+	}, 5*time.Second, 10*time.Millisecond, "the change reached the status, or the worker, or neither")
+
+	st = v.Leave()
+	require.Nil(t, st.Rights, "a call left has no rights")
+	require.Equal(t, int32(1), srv.leaves.Load(), "the voice server was not told the call was left")
+}
+
+// losingServer answers with a Lost the test closes, as the gateway's signaler does when the instance no
+// longer holds the session.
+type losingServer struct {
+	lost   chan struct{}
+	leaves atomic.Int32
+}
+
+func (*losingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+func (s *losingServer) Join(context.Context, string, string, string) (Answer, error) {
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}, Lost: s.lost}, nil
+}
+func (s *losingServer) Leave(context.Context, string) { s.leaves.Add(1) }
+
+// A call whose session the instance no longer holds ends at once, saying so (M33's manual pass).
+func TestACallEndsWithItsLostSession(t *testing.T) {
+	fast(t)
+	srv := &losingServer{lost: make(chan struct{})}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	close(srv.lost)
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.State == ipc.VoiceIdle && st.Reason == SessionLostReason
+	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
+	require.True(t, v.Status().EndedInCall, "a call that was up ended, and the status says it was a call")
+	require.False(t, v.Busy())
 }

@@ -347,13 +347,13 @@ func TestASecondConnectionForOneUserIsItsOwn(t *testing.T) {
 	room, user := ids.MustNext(), ids.MustNext()
 	first := join(t, s, room, user, 1)
 	second := join(t, s, room, user, 1)
-	if err := s.EvictConnection(context.Background(), second.conn); err != nil {
+	if err := s.EvictConnection(context.Background(), second.conn, ""); err != nil {
 		t.Fatal(err)
 	}
 	if s.hasConn(second.conn) || !s.hasConn(first.conn) {
 		t.Fatal("EvictConnection did not close exactly its own connection")
 	}
-	if err := s.EvictConnection(context.Background(), second.conn); err != nil {
+	if err := s.EvictConnection(context.Background(), second.conn, ""); err != nil {
 		t.Fatalf("evicting a connection already gone: %v", err)
 	}
 }
@@ -363,7 +363,7 @@ func TestTheLastLeaveFreesTheRoom(t *testing.T) {
 	room := ids.MustNext()
 	a := join(t, s, room, ids.MustNext(), 1)
 	b := join(t, s, room, ids.MustNext(), 1)
-	_ = s.EvictConnection(context.Background(), a.conn)
+	_ = s.EvictConnection(context.Background(), a.conn, "")
 	if s.roomCount() != 1 {
 		t.Fatal("the room was freed with somebody still in it")
 	}
@@ -473,7 +473,7 @@ func TestAProvisionIssuedBeforeARoomClosedIsRefused(t *testing.T) {
 func TestAConnectionEvictedBeforeItsProvisionIsRefused(t *testing.T) {
 	s := newSFU(t, nil)
 	conn := ids.MustNext()
-	if err := s.EvictConnection(context.Background(), conn); err != nil {
+	if err := s.EvictConnection(context.Background(), conn, ""); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.Provision(context.Background(), ids.MustNext(), ids.MustNext(), conn, ids.MustNext(), offerOf(t, newClient(t, 1)))
@@ -488,7 +488,7 @@ func TestAnEvictionDuringNegotiationIsReportedAsOne(t *testing.T) {
 	conn := ids.MustNext()
 	hook := func(where string, _ []byte) {
 		if where == "negotiating" {
-			_ = s.EvictConnection(context.Background(), conn)
+			_ = s.EvictConnection(context.Background(), conn, "")
 		}
 	}
 	testPanic.Store(&hook)

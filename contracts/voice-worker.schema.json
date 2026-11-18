@@ -34,13 +34,16 @@
       ]
     },
     "DaemonFrame": {
-      "description": "What the daemon sends: Join once after Hello, Answer once after Offer, Leave when the call should end.",
+      "description": "What the daemon sends: Join once after Hello, Answer once after Offer, Rights whenever what the account may do changes after that, Leave when the call should end.",
       "oneOf": [
         {
           "$ref": "#/$defs/Join"
         },
         {
           "$ref": "#/$defs/Answer"
+        },
+        {
+          "$ref": "#/$defs/RightsFrame"
         },
         {
           "$ref": "#/$defs/Leave"
@@ -292,7 +295,7 @@
     },
     "Join": {
       "type": "object",
-      "description": "op 10: make the call's connection, gathering with these servers, and offer.",
+      "description": "op 10: make the call's connection and offer. The offer carries no candidate: the SFU is ICE-lite and learns the client's addresses from its checks, so the worker gathers only once the answer names the servers to gather with (M33).",
       "required": [
         "op",
         "d",
@@ -307,19 +310,11 @@
         "d": {
           "type": "object",
           "required": [
-            "ice_servers",
             "loopback",
             "processing"
           ],
           "additionalProperties": false,
           "properties": {
-            "ice_servers": {
-              "type": "array",
-              "maxItems": 4,
-              "items": {
-                "$ref": "#/$defs/ICEServer"
-              }
-            },
             "loopback": {
               "type": "boolean",
               "description": "Admit loopback candidates, for an SFU on this machine: M26's harness and tests."
@@ -376,21 +371,24 @@
           "maxItems": 8,
           "items": {
             "type": "string",
-            "pattern": "^turns?:"
+            "pattern": "^turns?:",
+            "maxLength": 512
           }
         },
         "username": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         },
         "credential": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 128
         }
       },
       "description": "One TURN server with the account's credential."
     },
     "Answer": {
       "type": "object",
-      "description": "op 11: the SFU's answer to the offer.",
+      "description": "op 11: the SFU's answer to the offer, the TURN servers to gather with, the call's bitrate and what the account may do in it (M33).",
       "required": [
         "op",
         "d",
@@ -405,7 +403,10 @@
         "d": {
           "type": "object",
           "required": [
-            "sdp"
+            "sdp",
+            "ice_servers",
+            "bitrate",
+            "rights"
           ],
           "additionalProperties": false,
           "properties": {
@@ -413,6 +414,21 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 12288
+            },
+            "ice_servers": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "$ref": "#/$defs/ICEServer"
+              }
+            },
+            "bitrate": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "The channel's bitrate, which the encoder starts at and the congestion controller never exceeds; the worker clamps it to 16000–224000, and 0 is its default."
+            },
+            "rights": {
+              "$ref": "#/$defs/Rights"
             }
           }
         },
@@ -443,6 +459,48 @@
           "required": [],
           "additionalProperties": false,
           "properties": {}
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Rights": {
+      "type": "object",
+      "description": "What the account may do in its call: send its microphone, and hear the call. A server mute or a channel without SPEAK takes the first, a server deafen the second. The client applies them; the SFU enforces neither.",
+      "required": [
+        "send",
+        "hear"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "send": {
+          "type": "boolean"
+        },
+        "hear": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RightsFrame": {
+      "type": "object",
+      "description": "op 13: what the account may do in the call changed (M33). Sent after the answer, any number of times.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 13
+        },
+        "d": {
+          "$ref": "#/$defs/Rights"
         },
         "s": {
           "type": "null"

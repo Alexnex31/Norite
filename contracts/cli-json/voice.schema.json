@@ -12,11 +12,13 @@
         "state",
         "channel",
         "reason",
+        "ended_in_call",
         "available",
         "unavailable",
         "processing",
         "microphone",
-        "speakers"
+        "speakers",
+        "rights"
       ],
       "properties": {
         "state": {
@@ -37,9 +39,13 @@
           "maxLength": 256,
           "description": "Why the last call ended, or why the last join failed, for a person; `left` when it was left; empty when nothing has ended yet."
         },
+        "ended_in_call": {
+          "type": "boolean",
+          "description": "Whether `reason` is why a call that was up ended (true), or why a join failed before it was (false). False while there is a call, and before any (M33)."
+        },
         "available": {
           "type": "boolean",
-          "description": "Whether this daemon can join a call at all. A release cannot until the instance's voice signaling exists (M33)."
+          "description": "Whether this daemon can join a call at all: since M33 any daemon signed in, over its connection to the instance."
         },
         "unavailable": {
           "type": "string",
@@ -92,6 +98,30 @@
             },
             {
               "$ref": "#/$defs/device"
+            }
+          ]
+        },
+        "rights": {
+          "description": "What the account may do in the call (M33), as its instance last said; null while no call has been answered. `send` is false under a moderator's server mute or in a channel where the account lacks SPEAK, `hear` false under a server deafen. This client applies them, and the text output says so.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "send",
+                "hear"
+              ],
+              "properties": {
+                "send": {
+                  "type": "boolean"
+                },
+                "hear": {
+                  "type": "boolean"
+                }
+              }
             }
           ]
         }

@@ -71,6 +71,16 @@ type Options struct {
 	// versions, whichever side said so. It must not block. Nil is nothing (M24: the updater looks for a
 	// release then, and not a day later).
 	OnVersionRefused func()
+	// Voice is told the four voice dispatches (M33), from the read loop, so it must not block. The two
+	// replies to op 4, VOICE_SERVER_UPDATE and VOICE_JOIN_REFUSED, go to it alone and never to the Sink:
+	// they answer this daemon's own request, and the first carries a TURN credential, which nothing on the
+	// attach socket carries. The two voice states go to both.
+	Voice func(eventType string, data json.RawMessage)
+	// NewSession is told when a session begins afresh, by READY and never by RESUMED, from the read loop
+	// before the connection is live, so it must not block. Whatever the instance held for the session
+	// before it is gone, a voice call among it (M33: a call belongs to its session): an instance that
+	// restarted, or a connection lost past the resume window.
+	NewSession func()
 
 	// The waits between connections. Zero means the defaults; tests shrink them.
 	RetryMin, RetryMax time.Duration
@@ -124,8 +134,12 @@ type Client struct {
 	sink             Sink
 	version          string
 	onVersionRefused func()
-	log              zerolog.Logger
-	http             *http.Client
+	voice            func(string, json.RawMessage)
+	newSession       func()
+	// live is the connection while it is established, for SendVoice; nil between connections.
+	live atomic.Pointer[websocket.Conn]
+	log  zerolog.Logger
+	http *http.Client
 
 	retryMin, retryMax                           time.Duration
 	rateLimitedFloor, protocolFloor, versionHold time.Duration
@@ -144,6 +158,8 @@ func New(opts Options) *Client {
 		sink:             opts.Sink,
 		version:          opts.Version,
 		onVersionRefused: opts.OnVersionRefused,
+		voice:            opts.Voice,
+		newSession:       opts.NewSession,
 		log:              opts.Log,
 		retryMin:         orDefault(opts.RetryMin, defaultRetryMin),
 		retryMax:         orDefault(opts.RetryMax, defaultRetryMax),

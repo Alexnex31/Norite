@@ -376,6 +376,9 @@ func (c *conn) closeFor(cause error, reason string) {
 	c.timer.Stop()
 	close(c.done)
 	c.sfu.forget(c)
+	if f := c.sfu.onClose.Load(); f != nil {
+		(*f)(c.id)
+	}
 	c.log.Debug().Str("reason", reason).Msg("voice connection closed")
 	if pc != nil {
 		if err := pc.Close(); err != nil && !errors.Is(err, webrtc.ErrConnectionClosed) {

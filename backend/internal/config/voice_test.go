@@ -29,7 +29,7 @@ func loadVoice(t *testing.T, env map[string]string) (VoiceSettings, error) {
 func TestVoiceDefaults(t *testing.T) {
 	v, err := loadVoice(t, nil)
 	require.NoError(t, err)
-	assert.False(t, v.Enabled, "voice stays off until joining a call exists")
+	assert.True(t, v.Enabled, "voice is on since M33, when joining a call exists")
 	assert.Equal(t, ":3479", v.MediaListen)
 	assert.Equal(t, ":3478", v.TURNListen)
 	assert.Empty(t, v.TURNTLSListen, "TLS is offered only with a certificate")

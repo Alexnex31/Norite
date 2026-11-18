@@ -182,3 +182,39 @@ func (p *Publisher) QueueRevocation(ctx context.Context, r Revocation) error {
 	})
 	return nil
 }
+
+// VoiceTopic carries voice re-checks (M33): a committed change that may have taken somebody's right to be in
+// a voice call away, or changed what they may do in it. Every process's voice coordinator re-resolves the
+// calls it holds in the guild, ends those that lost PermConnectVoice, and tells the channel what changed.
+//
+// Its own topic rather than a reading of the gateway's events, for two reasons the M33 plan gives (D4): a
+// busy guild publishes messages and member updates at a rate no re-check should follow, and an event renamed
+// for its clients must not silently stop an eviction. So it is published only from the few mutations that
+// can take a voice right away, by name, and nothing about messages, typing or presence publishes it.
+const VoiceTopic = "voice.recheck"
+
+// VoiceRecheck names the guild whose calls are re-checked.
+type VoiceRecheck struct {
+	GuildID snowflake.ID `json:"guild_id"`
+}
+
+// QueueVoiceRecheck publishes a re-check of guildID's calls once ctx's transaction commits, like Queue: a
+// change that rolled back takes nothing away, and a re-check ahead of the commit would read the rows as they
+// were.
+func (p *Publisher) QueueVoiceRecheck(ctx context.Context, guildID snowflake.ID) error {
+	if p == nil || p.bus == nil {
+		return nil
+	}
+	msg, err := json.Marshal(VoiceRecheck{GuildID: guildID})
+	if err != nil {
+		return fmt.Errorf("dispatch: encoding a voice re-check: %w", err)
+	}
+	database.AfterCommit(ctx, func(ctx context.Context) {
+		// Logged, not returned, for Queue's reason. The bus is at most once, so a lost re-check leaves a
+		// caller who lost the right in the call until the guild's next one (security ledger, M33).
+		if err := p.bus.Publish(ctx, VoiceTopic, msg); err != nil {
+			p.logger.Error().Err(err).Msg("could not publish a voice re-check")
+		}
+	})
+	return nil
+}

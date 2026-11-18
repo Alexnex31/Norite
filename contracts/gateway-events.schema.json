@@ -37,7 +37,7 @@
       ]
     },
     "ClientFrame": {
-      "description": "What a client sends. Ops 3 (presence, M38), 4 (voice state, Phase E) and 8 (member requests) are reserved: sending one closes the connection with 4001, rather than being ignored.",
+      "description": "What a client sends. Ops 3 (presence, M38) and 8 (member requests) are reserved: sending one closes the connection with 4001, rather than being ignored.",
       "oneOf": [
         {
           "$ref": "#/$defs/Heartbeat"
@@ -47,6 +47,9 @@
         },
         {
           "$ref": "#/$defs/Resume"
+        },
+        {
+          "$ref": "#/$defs/VoiceStateUpdate"
         }
       ]
     },
@@ -223,6 +226,18 @@
         },
         {
           "$ref": "#/$defs/MessageDeleteDispatch"
+        },
+        {
+          "$ref": "#/$defs/VoiceServerUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/VoiceJoinRefusedDispatch"
+        },
+        {
+          "$ref": "#/$defs/VoiceStateUpdateDispatch"
+        },
+        {
+          "$ref": "#/$defs/VoiceStateDeleteDispatch"
         }
       ]
     },
@@ -1509,6 +1524,409 @@
         },
         "t": {
           "const": "RESUMED"
+        }
+      }
+    },
+    "VoiceStateUpdate": {
+      "type": "object",
+      "description": "op 4 (M33): join a voice channel with the voice-worker's SDP offer, or leave the call this session holds with channel_id null. One call per session: a join replaces the session's call, and the call of any older session of the same device. The reply to a join is VOICE_SERVER_UPDATE or VOICE_JOIN_REFUSED, to this session alone; a leave has none. A refused join never closes the connection.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 4
+        },
+        "d": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Join.",
+              "required": [
+                "nonce",
+                "channel_id",
+                "offer",
+                "supports_video"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "nonce": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,32}$",
+                  "description": "The client's name for this request, echoed in its reply."
+                },
+                "channel_id": {
+                  "$ref": "#/$defs/Snowflake"
+                },
+                "offer": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 12288,
+                  "description": "The SDP offer, which need carry no candidate: the SFU is ICE-lite and learns the client's addresses from its checks. Under M26's 12 KiB bound."
+                },
+                "supports_video": {
+                  "type": "boolean",
+                  "description": "Whether the client can take video (M105). Terminal clients send false."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Leave.",
+              "required": [
+                "channel_id"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "channel_id": {
+                  "type": "null"
+                }
+              }
+            }
+          ]
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "VoiceServer": {
+      "type": "object",
+      "description": "VOICE_SERVER_UPDATE: the SFU has answered the offer. The worker gathers with ice_servers only now (TURN's credential for the account, ten minutes), then applies the answer.",
+      "required": [
+        "nonce",
+        "guild_id",
+        "channel_id",
+        "connection_id",
+        "answer",
+        "ice_servers",
+        "bitrate",
+        "mute",
+        "deaf",
+        "suppress"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "description": "The client's name for this request, echoed in its reply."
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "connection_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The SFU's SDP answer."
+        },
+        "ice_servers": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/ICEServer"
+          },
+          "description": "TURN, when the instance names a host clients reach it at; empty otherwise."
+        },
+        "bitrate": {
+          "type": "integer",
+          "minimum": 16000,
+          "maximum": 224000,
+          "description": "The channel's, which the caller's encoder starts at and never exceeds."
+        },
+        "mute": {
+          "type": "boolean"
+        },
+        "deaf": {
+          "type": "boolean"
+        },
+        "suppress": {
+          "type": "boolean",
+          "description": "The account lacks SPEAK here. The three are the client's to apply, as VoiceState says."
+        }
+      }
+    },
+    "ICEServer": {
+      "type": "object",
+      "required": [
+        "urls",
+        "username",
+        "credential"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "urls": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "credential": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "VoiceJoinRefused": {
+      "type": "object",
+      "description": "VOICE_JOIN_REFUSED: the join named by nonce was refused, and nothing was provisioned. The session's earlier call, if any, is unchanged unless the refusal came after it was replaced.",
+      "required": [
+        "nonce",
+        "channel_id",
+        "code"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "description": "The client's name for this request, echoed in its reply."
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "code": {
+          "description": "Why, from a fixed vocabulary; never prose.",
+          "oneOf": [
+            {
+              "const": "not_found",
+              "description": "No such channel, or one the account cannot see."
+            },
+            {
+              "const": "not_voice",
+              "description": "The channel is not a voice channel."
+            },
+            {
+              "const": "forbidden",
+              "description": "The account may see the channel and may not connect to it."
+            },
+            {
+              "const": "full",
+              "description": "The channel's user_limit, or a bound of the SFU's."
+            },
+            {
+              "const": "bad_offer",
+              "description": "The SFU refused the offer's shape."
+            },
+            {
+              "const": "busy",
+              "description": "This session already has a join under way."
+            },
+            {
+              "const": "rate_limited",
+              "description": "The account has joined too often in the last minute."
+            },
+            {
+              "const": "voice_disabled",
+              "description": "The instance runs no voice server."
+            },
+            {
+              "const": "unavailable",
+              "description": "The voice server could not take the call now; try again."
+            }
+          ]
+        }
+      }
+    },
+    "VoiceServerUpdateDispatch": {
+      "type": "object",
+      "description": "To the session whose op 4 it answers, and to nobody else.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/VoiceServer"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "VOICE_SERVER_UPDATE"
+        }
+      }
+    },
+    "VoiceJoinRefusedDispatch": {
+      "type": "object",
+      "description": "To the session whose op 4 it refuses, and to nobody else.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/VoiceJoinRefused"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "VOICE_JOIN_REFUSED"
+        }
+      }
+    },
+    "VoiceStateUpdateDispatch": {
+      "type": "object",
+      "description": "To members who can see the channel: a connection joined it, or its rights changed.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/VoiceState"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "VOICE_STATE_UPDATE"
+        }
+      }
+    },
+    "VoiceStateDeleted": {
+      "type": "object",
+      "description": "VOICE_STATE_DELETE: a connection left the channel.",
+      "required": [
+        "connection_id",
+        "guild_id",
+        "channel_id",
+        "user_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "connection_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "user_id": {
+          "$ref": "#/$defs/Snowflake"
+        }
+      }
+    },
+    "VoiceStateDeleteDispatch": {
+      "type": "object",
+      "description": "To members who can see the channel: a connection left it. Not sent when the channel itself is deleted, whose CHANNEL_DELETE says as much.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 0
+        },
+        "d": {
+          "$ref": "#/$defs/VoiceStateDeleted"
+        },
+        "s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "t": {
+          "const": "VOICE_STATE_DELETE"
+        }
+      }
+    },
+    "VoiceState": {
+      "type": "object",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/VoiceState; a test holds the two equal. One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server.",
+      "required": [
+        "connection_id",
+        "guild_id",
+        "channel_id",
+        "user_id",
+        "mute",
+        "deaf",
+        "suppress",
+        "supports_video",
+        "joined_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "connection_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "guild_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "channel_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "user_id": {
+          "$ref": "#/$defs/Snowflake"
+        },
+        "mute": {
+          "type": "boolean",
+          "description": "A moderator's server mute (`PATCH` on the member)."
+        },
+        "deaf": {
+          "type": "boolean",
+          "description": "A moderator's server deafen."
+        },
+        "suppress": {
+          "type": "boolean",
+          "description": "The account lacks `SPEAK` in this channel."
+        },
+        "supports_video": {
+          "type": "boolean",
+          "description": "What the client said it can do. Terminal clients say false."
+        },
+        "joined_at": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     }

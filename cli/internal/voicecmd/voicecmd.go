@@ -250,8 +250,13 @@ func (v view) Text(t *output.Text) {
 		t.Line("Joining voice channel %s.", channel)
 	default:
 		t.Line("Not in a voice call.")
-		if v.Reason != "" && v.Reason != "left" {
+		// A join that failed is not a call that ended, which the status says apart since M33.
+		switch {
+		case v.Reason == "" || v.Reason == "left":
+		case v.EndedInCall:
 			t.Line("The last call ended: %s.", output.Clean(v.Reason))
+		default:
+			t.Line("The last join failed: %s.", output.Clean(v.Reason))
 		}
 	}
 	if p := v.Processing; p != nil && v.State != ipc.VoiceIdle {
@@ -264,6 +269,10 @@ func (v view) Text(t *output.Text) {
 	// client's, and the worker's reason in them is cleaned.
 	for _, line := range ops.VoiceDevices(v.Microphone, v.Speakers, v.goos) {
 		t.Line("%s.", output.Clean(line))
+	}
+	// What the instance lets the account do in the call (M33), which this client applies.
+	for _, line := range ops.VoiceRights(v.Rights) {
+		t.Line("%s.", line)
 	}
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))

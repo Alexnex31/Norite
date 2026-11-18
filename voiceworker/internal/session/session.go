@@ -33,6 +33,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/sdp/v3"
+	"github.com/pion/transport/v5/stdnet"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
@@ -74,6 +75,10 @@ type Options struct {
 	// fixedBitrate leaves the encoder at its starting bitrate and loss whatever the feedback says: a test's
 	// call without M31's controller, to measure what the controller buys.
 	fixedBitrate bool
+	// bitrate is what a test's harness names in the answer, as an instance names its channel's; zero is the
+	// worker's default, as the harness's answer is. muted answers without the right to send.
+	bitrate int
+	muted   bool
 }
 
 // Session is one call's connection.
@@ -96,8 +101,16 @@ type Session struct {
 	sender *webrtc.RTPSender
 	level  atomic.Uint32 // the audio level's extension id, once negotiated; zero before
 	twcc   atomic.Uint32 // the transport-wide sequence number's, likewise
-	// cc sets the encoder's bitrate and loss from the SFU's transport-wide feedback (M31).
-	cc *congestion.Controller
+	// cc sets the encoder's bitrate and loss from the SFU's transport-wide feedback (M31), never above
+	// bitrate, the channel's (M33), which the encoder starts at. Both are set by Accept, before the media
+	// starts.
+	cc      *congestion.Controller
+	bitrate int
+	// offer is the offer made and not yet set, which Accept sets once the answer names the servers.
+	offer webrtc.SessionDescription
+	// mayNotSend and mayNotHear are the account's rights in the call, negated so the zero value is a call
+	// that sends and hears (Rights).
+	mayNotSend, mayNotHear atomic.Bool
 
 	codecDone chan struct{}
 	codec     opus.Codec
@@ -172,14 +185,20 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	se.SetIncludeLoopbackCandidate(join.Loopback)
 	se.SetRemoteIPFilter((&remotes{loopback: join.Loopback}).admit)
-
-	servers := make([]webrtc.ICEServer, 0, len(join.ICEServers))
-	for _, s := range join.ICEServers {
-		servers = append(servers, webrtc.ICEServer{URLs: s.URLs, Username: s.Username, Credential: s.Credential})
+	// What the agent dials, the instance's TURN servers among it, is judged where it is dialed (dialnet.go).
+	host, err := stdnet.NewNet()
+	if err != nil {
+		return nil, err
 	}
+	se.SetNet(guardedNet{Net: host, loopback: join.Loopback})
+	// Every SRTP stream's buffer is counted against what the call accounts for (streams.go).
+	st := &streams{}
+	se.BufferFactory = st.buffer
+
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(engine), webrtc.WithInterceptorRegistry(reg),
 		webrtc.WithSettingEngine(se))
-	cfg := webrtc.Configuration{ICEServers: servers}
+	// No ICE server yet: the answer names them, and Accept sets them before anything gathers.
+	cfg := webrtc.Configuration{}
 	if opts.RelayOnly {
 		cfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
 	}
@@ -190,7 +209,8 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	s := &Session{opts: opts, pc: pc, processing: dsp.Settings(join.Processing),
 		ready: make(chan struct{}), ended: make(chan string, 1),
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
-		cc: newController(time.Now())}
+		bitrate: opus.DefaultEncoderOptions().Bitrate,
+		cc:      newController(time.Now(), opus.DefaultEncoderOptions().Bitrate)}
 	if opts.Device != nil {
 		s.devs = newDevices(func(why string, by voiceipc.Devices) { s.endFor(why, &by) })
 		if a, ok := opts.Device.(audio.Authorizer); ok {
@@ -219,6 +239,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		close(s.codecDone)
 		close(s.dspDone)
 	}
+	st.over = func() { s.end("the voice server sent on more streams than the call has slots") }
 	pc.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) { s.trackArrived(remote{tr, rcv}) })
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
@@ -375,7 +396,7 @@ func (s *Session) endFor(reason string, by *voiceipc.Devices) {
 	})
 }
 
-// Offer adds the call's sections and returns the offer, every candidate gathered.
+// Offer adds the call's sections and returns the offer, which carries no candidate.
 func (s *Session) Offer(ctx context.Context) (string, error) {
 	track, err := webrtc.NewTrackLocalStaticRTP(opusCapability, "audio", "norite-voice")
 	if err != nil {
@@ -412,30 +433,25 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	dc.OnMessage(func(m webrtc.DataChannelMessage) { s.message(m.Data) })
 	dc.OnClose(func() { s.end("the voice server closed the call") })
 
+	// Created and not yet set: setting it starts gathering, which waits for the answer's servers (M33). The
+	// offer carries no candidate, since the SFU is ICE-lite and learns the client's addresses from its
+	// checks; S1 measured a join with TURN over UDP blackholed at 10 ms this way against 8 s gathering
+	// first.
 	offer, err := s.pc.CreateOffer(nil)
 	if err != nil {
 		return "", err
 	}
-	gathered := webrtc.GatheringCompletePromise(s.pc)
-	if err := s.pc.SetLocalDescription(offer); err != nil {
-		return "", err
+	if len(offer.SDP) > voiceproto.MaxOffer {
+		return "", fmt.Errorf("the offer is %d bytes, past the SFU's %d", len(offer.SDP), voiceproto.MaxOffer)
 	}
-	select {
-	case <-gathered:
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-	sdp := offered(s.pc.LocalDescription().SDP, voiceproto.MaxCandidates)
-	if len(sdp) > voiceproto.MaxOffer {
-		return "", fmt.Errorf("the offer is %d bytes, past the SFU's %d", len(sdp), voiceproto.MaxOffer)
-	}
-	return sdp, nil
+	s.offer = offer
+	return offer.SDP, ctx.Err()
 }
 
-// newController is the call's: its ceiling is the encoder's starting bitrate, so the first frame's adapt
-// moves nothing until the feedback says to.
-func newController(now time.Time) *congestion.Controller {
-	return congestion.New(opus.DefaultEncoderOptions().Bitrate, now)
+// newController is the call's: its ceiling is the encoder's starting bitrate, the channel's since M33, so the
+// first frame's adapt moves nothing until the feedback says to.
+func newController(now time.Time, bitrate int) *congestion.Controller {
+	return congestion.New(bitrate, now)
 }
 
 // rtcpReader is what readRTCP reads, a sender's RTCP: an RTPSender, or a test's.
@@ -499,22 +515,55 @@ func (s *Session) message(b []byte) {
 			}
 		})
 	case voiceproto.OpRefused:
+		// The SFU's last word. Once the call is up it is why the instance ended the call, a kick or a lost
+		// right (M33), which is said as it is; before, it is why the call was refused.
 		var m voiceproto.Refused
-		if voiceproto.Decode(b, &m) != nil {
-			s.end("the voice server refused the call")
+		if voiceproto.Decode(b, &m) != nil || m.Reason == "" {
+			s.end("the voice server ended the call")
 			return
 		}
-		s.end(voiceipc.CutReason("the voice server refused the call: " + m.Reason))
+		select {
+		case <-s.ready:
+			s.end(voiceipc.CutReason(m.Reason))
+		default:
+			s.end(voiceipc.CutReason("the voice server refused the call: " + m.Reason))
+		}
 	}
 }
 
-// Accept applies the SFU's answer, which starts ICE.
-func (s *Session) Accept(sdp string) error {
-	if err := s.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp}); err != nil {
+// Accept gathers with the answer's servers and applies the answer, which starts ICE: each candidate is paired
+// as it is gathered, and a TURN server that cannot be reached holds back nothing else. The bitrate and the
+// rights are taken before the media starts, which is once the call is ready.
+func (s *Session) Accept(a voiceipc.Answer) error {
+	s.bitrate = voiceipc.ClampBitrate(a.Bitrate, opus.DefaultEncoderOptions().Bitrate)
+	s.cc = newController(time.Now(), s.bitrate)
+	s.Rights(a.Rights)
+	cfg := s.pc.GetConfiguration()
+	cfg.ICEServers = make([]webrtc.ICEServer, 0, len(a.ICEServers))
+	for _, srv := range a.ICEServers {
+		cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{URLs: srv.URLs, Username: srv.Username,
+			Credential: srv.Credential})
+	}
+	if err := s.pc.SetConfiguration(cfg); err != nil {
+		return fmt.Errorf("the voice server's TURN servers: %w", err)
+	}
+	if err := s.pc.SetLocalDescription(s.offer); err != nil {
+		return err
+	}
+	if err := s.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: a.SDP}); err != nil {
 		return err
 	}
 	s.resolveLevel()
 	return nil
+}
+
+// Rights is what the account may do in the call (M33). Not sending keeps the microphone's processing
+// running, so the echo canceller is converged when sending resumes; not hearing plays silence, which is
+// then the echo canceller's reference, so nothing stale is canceled (M34's entry). The SFU enforces
+// neither, and a client that ignored them would be heard: the security ledger says so.
+func (s *Session) Rights(r voiceipc.Rights) {
+	s.mayNotSend.Store(!r.Send)
+	s.mayNotHear.Store(!r.Hear)
 }
 
 // Ready is closed once the SFU has said ready, which it does only once connected.

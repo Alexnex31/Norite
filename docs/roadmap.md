@@ -2387,6 +2387,107 @@ of this section.
   (the terminal clients always send `false`) even though nothing consumes it until M105. Done
   when: joining a voice channel via the real gateway path (not a test harness) triggers real SFU allocation
   end to end, and a kick mid-call drops the connection.
+
+  **As built** (planned by reading the entry against the code and from a spike on loopback, S1, and built
+  as planned except where a bullet says otherwise):
+  - **The TURN credential comes with the answer, not before the offer** (S1). The SFU is ICE-lite and
+    learns the client's addresses from its checks, so the worker's offer carries no candidate. Once
+    `VOICE_SERVER_UPDATE` names the TURN servers, the worker sets them, then its local description, then the
+    answer, and gathers. With TURN over UDP blackholed a join took 10 ms on loopback, against 8.02 s in the
+    old order, so M28's 8 s wait goes without trickle ICE. ADR 0023 is amended. The credential is minted on
+    a connection whose sign-in the gateway checks on every heartbeat.
+  - **`PionMediaCoordinator` is `backend/internal/voice/coordinator`.** It:
+    - authorizes with `guildauth.Voice` (view, `PermConnectVoice`, membership, and `PermSpeakVoice` for
+      the rights);
+    - counts `user_limit` in accounts, under advisory lock slot 5 per channel;
+    - registers the join before it provisions, so an eviction's cutoff refuses a provision it outran;
+    - then provisions, writes the row and publishes `VOICE_STATE_UPDATE` after the commit.
+
+    Joins are rated ten a minute per account, charged after the checks that cost nothing, with one in
+    flight per session (`busy`).
+  - **Two replies, to the joining session alone:** `VOICE_SERVER_UPDATE` and `VOICE_JOIN_REFUSED`, the
+    second with a code from a fixed vocabulary. Both are sequenced, so a resume replays them, and neither
+    crosses the bus. The daemon routes both to its signaler before the `Sink`, so no attach client sees the
+    credential.
+  - **A call belongs to its gateway session.** A join replaces the session's call and any call the same
+    device left on an older session, which is the half of M36's question taken here. Dropping the session,
+    by a revocation or the resume window, ends the call. So the end of a sign-in reaches the call with no
+    path of its own, where the entry had `revokeEverything` evict.
+  - **Re-checks travel on a topic of their own** (`dispatch.VoiceTopic`), never on the client events,
+    which a busy guild sends far more of: the author's condition, so as not to overload the SFU. They are
+    published by `queuePermissions`, `RemoveMember`, `UpdateMember` when mute or deafen change,
+    `DeleteChannel` and a guild's deletion. Each guild's are coalesced, one running and one waiting. A
+    lost one is accepted in the ledger.
+  - **Who is in a voice channel is `voice_states`** (migration 26), one row per connection, since ADR 0023
+    lets an account hold two. `VOICE_STATE_UPDATE` and `VOICE_STATE_DELETE` reach the channel's viewers,
+    and `GET /channels/{id}/voice-states` is what a client connecting later reads. `self_mute` and
+    `self_deaf` are M34's.
+  - **Speak and the server mute and deafen are applied by the client** (the ledger). Not sending keeps
+    the DSP running, and not hearing plays silence:
+    - they reach the worker in the answer and then as `OpRights` (`voiceipc.Rights`);
+    - they reach the CLI as the status's `rights`.
+
+    A kick, a lost `PermConnectVoice` and a deleted channel evict on the server.
+  - **128 kbps by default, 16 to 224 kbps.** Measured on speech, 224 kbps is 239 kbit/s on the wire at its
+    worst second, under the SFU's 256 kbps track bound. The worker clamps whatever the instance names.
+  - **`[voice] enabled` is on by default.** The alpha guide names the ports.
+  - **The worker bounds its instance's voice server:**
+    - it dials TURN and STUN through `session.guardedNet`, which refuses after resolving what `reachable`
+      refuses for a candidate;
+    - its SRTP streams are counted against its slots (`session/streams.go`), past which the call ends.
+  - **One `/code-review` ran, at xhigh, once the pass's fixes were in**, at the author's request and with
+    no round after it. All fifteen findings were fixed, each guard removed and a named test watched fail:
+    - **A call the instance held that nobody did:**
+      - a join given up after its op 4 went (a leave, the bound) is now left on the instance;
+      - a call the SFU drops by itself (ICE, a provision never connected, a peer gone) ends at once:
+        the SFU tells the coordinator (`voice.Closes`), and a dead caller goes within seconds rather
+        than the resume window;
+      - a session ended while its join ran ends the call the join then made;
+      - the device's newest join wins over an older one still under way.
+    - **Rights a join could miss:**
+      - a SPEAK removed as the join was provisioned (the join asks for another re-check once it is
+        established);
+      - a mute whose update reached the daemon before its reply.
+    - **The daemon's order:** the old call's leave could reach the instance after the next join, and
+      a join now waits for it.
+    - **Contained and bounded:**
+      - an eviction's goodbye on the coordinator's goroutine, which a panic would have taken the server
+        down from;
+      - a TURN URL from a host name past about 235 bytes, now held to 512.
+    - **Smaller:**
+      - a full channel no longer spends the join budget;
+      - a re-check reads the guild's rows once, not once per channel;
+      - `replace` ends calls at once;
+      - the loopback check and the voice state's wire shape (`voice/voicestate`) exist once.
+    - **Kept by the author:** the thirty-second resume window, which the review called a voice symptom
+      treated in shared code, as the most a session may wait to be resumed.
+  - **The manual pass ran in one unprivileged VM** (memory allowed one guest), with two OS accounts, each
+    with its own daemon and virtual devices, against a real `norite-server`. QEMU's user networking hands
+    the host a guest's packets from loopback, which the SFU refuses, so every call went through TURN.
+    - **What worked:**
+      - joins in 2.2 s, each caller heard by the other;
+      - a server mute, a deafen and a lost SPEAK applied by the client;
+      - a lost CONNECT and a kick ending the call within a second;
+      - a restarted daemon's rejoin replacing its predecessor;
+      - TURN over UDP dropped, joining over TCP in 2.2 s;
+      - a channel set to 48 kbps encoding at 48.
+    - **Its four findings were fixed the same day,** each fix proved by removal and walked again in the VM:
+      - an SFU bound to loopback announced nothing, so `norite-server` now warns;
+      - a client that died stayed listed for the two-minute resume window, which is now thirty seconds;
+      - after the instance restarted, a daemon kept a dead call for 32 s, and now ends it when its
+        connection begins a fresh session (1 s);
+      - every end read "the voice server closed the call". `EvictConnection` now takes a reason, which
+        the SFU sends before closing, and the status's `ended_in_call` tells a failed join from an ended
+        call.
+    - **Not walked:**
+      - the direct path, which the tests cover;
+      - Windows, macOS and a real network;
+      - `VOICE_STATE_UPDATE` as an attach client sees it.
+    - **Left:**
+      - A relayed join takes about 2 s in either order (S1, and 2.2 s in the pass): Pion's pacing of a
+        relayed pair's checks or the permission's creation, not measured further.
+      - A channel's bitrate or `user_limit` changed mid-call reaches its callers at their next join, since
+        neither publishes a re-check.
 - **M34 — Voice control surface (command tree and daemon)**: join/leave/mute/deafen as verbs on the command
   tree, the daemon holding call state, and active-speaker plus per-participant local-mute and report exposed
   over the IPC protocol — everything a client needs to drive and display a call, with no client drawing it
@@ -2417,6 +2518,12 @@ of this section.
   per hop, and the SFU forwards every slot at its sender's bitrate. Subscription is where a receiver on a
   weak link asks for fewer slots (ADR 0023), so it is built here or given an entry of its own
   (architecture.md §17).
+
+  **From M33:** the worker already stops sending while keeping the DSP running, and plays silence, for a
+  moderator's server mute, a channel without `SPEAK` and a server deafen (`voiceipc.Rights`, `OpRights`),
+  which reach the call as `VoiceStatus.rights` and are worded by `ops.VoiceRights`. Self-mute and
+  self-deafen are the same two switches set by the person, and `voice_states` gains `self_mute` and
+  `self_deaf` with them, which op 4 then carries (a MINOR change to the frame).
 
   **From M30:**
   - **Mute keeps the DSP running and stops only the sending**, or AEC3 loses its convergence and the first
@@ -2472,15 +2579,20 @@ of this section.
   end with its reason. **M28 found a rejoin can be refused**: the SFU counts a killed worker's connection
   until ICE gives up on it, and holds two per user in a room (`ConnsPerUser`), so two crashes in quick
   succession leave a third join refused for some seconds. This milestone decides whether M33's provision
-  replaces an account's oldest connection in the room or the rejoin waits. Done when: killing the daemon
-  process mid-call results in automatic rejoin within a few seconds of restart.
+  replaces an account's oldest connection in the room or the rejoin waits. **M33 took that half**: a call
+  belongs to its gateway session, a join from a device replaces the call any older session of the same
+  device left, and the daemon tells the instance (op 4 with no channel) whenever its call ends, a worker's
+  crash included, which evicts the connection at once. So a restarted daemon's rejoin is not refused by
+  its previous run's call. What is left here is the breadcrumb and the respawn. Done when: killing the
+  daemon process mid-call results in automatic rejoin within a few seconds of restart.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
   `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,
   voice UI is hidden entirely (not grayed out) in CLI/TUI/GUI when disabled. Done when: an instance with
   voice disabled shows no voice-related UI anywhere and never starts the SFU/TURN processes. **The toggle
   exists since M27**: `[voice] enabled`, which starts or never starts both, with a test that a disabled
   instance binds none of their ports. What is left here is the wizard's question, the UI and the
-  degradation.
+  degradation. **From M33:** the toggle is on by default, and a join on an instance with it off is refused
+  `voice_disabled`; a client that hides voice needs to know before it joins, which nothing says yet.
 - **M37a — Snap package**: `norite` and `norite-server` in the Snap Store, the one channel
   [ADR 0035](adr/0035-package-managers.md) held back. Both names were registered when that ADR landed,
   so nobody else takes them. Placed after Phase E because the client snap carries the voice-worker, and
@@ -3163,6 +3275,11 @@ of this section.
   note that only reporter-attached content is visible — the honest statement of ADR 0013's break-glass
   posture.
 
+  **From M33:** a guild ban and a timeout take a voice right away, so each publishes a voice re-check
+  (`dispatch.QueueVoiceRecheck`) in its transaction, as `RemoveMember` and `queuePermissions` do: the
+  re-check is published only from the mutations that can take a right, by name. An instance ban (M72)
+  needs nothing, since its revocation drops the sessions and their calls.
+
   **`PermModerateMembers` is not a nicer `muted` role, and M13 is where that stopped being a matter of
   taste.** A timeout is enforced by a bit on the member rather than by a role, and the reason is
   structural: a positional hierarchy cannot protect a restriction that is placed low, and a restricting
@@ -3628,7 +3745,9 @@ when a constraint the terminal imposed is lifted.
   the codec-agnostic track model from M26. M26 keys admission by connection, so this is a second
   connection id for the same user, and its offer passes M26's validation once video's section bounds are
   raised. Done when: a GUI client can open a video track alongside its existing audio session with no daemon
-  changes required.
+  changes required. **From M33:** a join replaces the call any older session of the same device left
+  (`coordinator.replace`), and a GUI's video connection is a second connection of the same device, so it
+  must be exempt from that, keyed on `supports_video` or a connection of its own kind.
 - **M106 — Screen/camera capture and selection UI**: GUI-side capture and source-selection interface. Done
   when: a user can choose and share a specific window/screen or camera source.
 - **M107 — SFU video track forwarding activation**: verify the already-track-kind-agnostic SFU from M26
@@ -3713,6 +3832,11 @@ does not appear to disagree with them.
 
   Done when: `helm install` against an empty cluster brings the API up behind an Ingress and
   `/api/v1/healthz` answers 200 from outside the cluster.
+
+  **From M33:** the voice coordinator deletes every `voice_states` row as its process starts, since a
+  single process held every call. With several API replicas that is one replica deleting the others'
+  calls, so the rows gain the replica that holds them and each sweeps its own, and a re-check is each
+  replica's for the calls it holds, which it already is.
 - **M113 — CloudNativePG plus backups**: the Postgres operator in-cluster, with backup and
   point-in-time recovery on **CSI volume snapshots** rather than an object store.
 

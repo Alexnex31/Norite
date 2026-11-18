@@ -112,9 +112,14 @@ func TestEveryGatewayDispatchButTheDaemonsOwnIsForwarded(t *testing.T) {
 		return out
 	}
 
+	// READY and RESUMED are the daemon's own business, and so since M33 are the two replies to op 4: they
+	// answer the daemon's request, and VOICE_SERVER_UPDATE carries a TURN credential, which nothing on the
+	// socket carries (M33's D10).
+	own := map[string]bool{"ReadyDispatch": true, "ResumedDispatch": true,
+		"VoiceServerUpdateDispatch": true, "VoiceJoinRefusedDispatch": true}
 	var want []string
 	for _, name := range refs("gateway-events.schema.json", "Dispatch") {
-		if name != "ReadyDispatch" && name != "ResumedDispatch" {
+		if !own[name] {
 			want = append(want, name)
 		}
 	}

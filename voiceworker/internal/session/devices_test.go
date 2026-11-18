@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
@@ -216,4 +217,28 @@ func (d *slowOpen) Capture(context.Context, func([]int16)) (io.Closer, error) {
 	defer d.mu.Unlock()
 	d.captured = time.Now()
 	return nopCloser{}, nil
+}
+
+// The SFU's last word is why the call ended once it is up, said as it is: the instance's reason for a kick
+// or a lost right (M33's manual pass, where every end read "the voice server closed the call"). Before
+// the call is up it is a refusal.
+func TestTheVoiceServersLastWordIsTheEnd(t *testing.T) {
+	said := func(reason string) []byte {
+		b, err := voiceproto.Encode(voiceproto.Refused{Op: voiceproto.OpRefused, Reason: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	up := &Session{ended: make(chan string, 1), ready: make(chan struct{})}
+	close(up.ready)
+	up.message(said("you are no longer a member of this guild"))
+	if why := <-up.ended; why != "you are no longer a member of this guild" {
+		t.Errorf("a call that was up ended with %q", why)
+	}
+	joining := &Session{ended: make(chan string, 1), ready: make(chan struct{})}
+	joining.message(said("room full"))
+	if why := <-joining.ended; why != "the voice server refused the call: room full" {
+		t.Errorf("a call refused before it was up ended with %q", why)
+	}
 }

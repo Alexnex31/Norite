@@ -139,7 +139,7 @@ func standin(mode string) int {
 	case "unknownop":
 		send(99, struct{}{})
 	case "daemonop":
-		send(voiceipc.OpJoin, voiceipc.Join{ICEServers: []voiceipc.ICEServer{}})
+		send(voiceipc.OpJoin, voiceipc.Join{})
 	case "badstate":
 		send(voiceipc.OpState, voiceipc.State{State: "dancing"})
 	case "baddevices":
@@ -276,6 +276,16 @@ func standin(mode string) int {
 			if mode == "crashincall" {
 				os.Exit(2)
 			}
+		case voiceipc.OpRights:
+			// Says the rights it was sent as its microphone's reason, which the daemon keeps in the status:
+			// the test's way of seeing what reached the worker (M33).
+			var r voiceipc.Rights
+			if ipc.Decode(f, &r) != nil {
+				return 9
+			}
+			send(voiceipc.OpDevices, voiceipc.Devices{
+				Microphone: voiceipc.Device{State: voiceipc.DeviceOpen, Reason: fmt.Sprintf("send=%t hear=%t", r.Send, r.Hear)},
+				Speakers:   voiceipc.Device{State: voiceipc.DeviceOpen}})
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue

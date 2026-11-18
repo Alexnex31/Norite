@@ -71,10 +71,12 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoDevice}}}, true},
 		{"devices", OpDevices, Devices{Microphone: Device{State: DeviceRefused},
 			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason)}}, true},
-		{"join", OpJoin, Join{ICEServers: []ICEServer{{URLs: []string{"turn:192.0.2.1:3478?transport=tcp",
-			"turns:voice.example:5349"}, Username: "1700000000:42", Credential: "c2VjcmV0"}}, Loopback: true}, false},
-		{"join with no servers", OpJoin, Join{ICEServers: []ICEServer{}}, false},
-		{"answer", OpAnswer, Answer{SDP: "v=0\r\n"}, false},
+		{"join", OpJoin, Join{Loopback: true}, false},
+		{"answer", OpAnswer, Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{
+			"turn:192.0.2.1:3478?transport=tcp", "turns:voice.example:5349"}, Username: "1700000000:42",
+			Credential: "c2VjcmV0"}}, Bitrate: 128000, Rights: Rights{Send: true, Hear: true}}, false},
+		{"answer with no servers", OpAnswer, Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{}}, false},
+		{"rights", OpRights, Rights{Send: false, Hear: true}, false},
 		{"leave", OpLeave, Leave{}, false},
 	}
 	for _, c := range cases {
@@ -128,14 +130,28 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 	}
 
 	daemon := compile(t, "DaemonFrame")
-	many := Join{ICEServers: make([]ICEServer, MaxICEServers+1)}
+	many := Answer{SDP: "v=0\r\n", ICEServers: make([]ICEServer, MaxICEServers+1)}
 	for i := range many.ICEServers {
 		many.ICEServers[i] = ICEServer{URLs: []string{"turn:192.0.2.1:3478"}}
 	}
-	require.Error(t, many.Check())
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpJoin, many)))
-	require.NoError(t, err)
-	require.Error(t, daemon.Validate(doc))
+	long := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{"turn:" + strings.Repeat("a", MaxURL)}}}}
+	secret := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{"turn:a"},
+		Credential: strings.Repeat("c", MaxCredential+1)}}}
+	for name, a := range map[string]Answer{"too many servers": many, "a URL past its bound": long,
+		"a credential past its bound": secret, "no answer": {ICEServers: []ICEServer{}}} {
+		require.Error(t, a.Check(), name)
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpAnswer, a)))
+		require.NoError(t, err)
+		require.Error(t, daemon.Validate(doc), name)
+	}
+}
+
+// What the voice server names for a bitrate is clamped to what the SFU carries, and zero is the default.
+func TestTheBitrateIsClamped(t *testing.T) {
+	require.Equal(t, 64000, ClampBitrate(0, 64000))
+	require.Equal(t, MinBitrate, ClampBitrate(8000, 64000))
+	require.Equal(t, MaxBitrate, ClampBitrate(510_000, 64000))
+	require.Equal(t, 96000, ClampBitrate(96000, 64000))
 }
 
 // A frame past the bound is refused before its payload is read, and a payload naming a field the type
@@ -188,7 +204,8 @@ func TestTheOpsAreTheContracts(t *testing.T) {
 		}
 	}
 	want := map[int]string{int(OpHello): "Hello", int(OpOffer): "Offer", int(OpState): "State",
-		int(OpDevices): "Devices", int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave"}
+		int(OpDevices): "Devices", int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave",
+		int(OpRights): "RightsFrame"}
 	require.Equal(t, want, got)
 }
 
@@ -230,4 +247,36 @@ func TestACutReasonStaysWithinTheBound(t *testing.T) {
 		require.NoError(t, ipc.Decode(f, &s))
 		require.NoError(t, s.Check())
 	}
+}
+
+// The worker clamps to the bounds the gateway's contract states for VOICE_SERVER_UPDATE's bitrate, which
+// the backend holds to the channel routes and the coordinator (TestTheBitrateBoundsAgreeAcrossTheContracts):
+// one set of bounds, read in three modules that cannot import one another.
+func TestTheClampIsTheGatewaysBounds(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "gateway-events.schema.json"))
+	require.NoError(t, err)
+	var gw struct {
+		Defs map[string]struct {
+			Properties map[string]map[string]any `json:"properties"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &gw))
+	b := gw.Defs["VoiceServer"].Properties["bitrate"]
+	require.NotNil(t, b, "the gateway's contract names no VoiceServer bitrate")
+	require.EqualValues(t, MinBitrate, b["minimum"])
+	require.EqualValues(t, MaxBitrate, b["maximum"])
+}
+
+// The longest TURN URL an instance builds, from a host name of DNS's 253 bytes, is within the bound: one
+// past it failed every join on that instance (M33's /code-review).
+func TestTheLongestHostNamesTURNURLIsAdmitted(t *testing.T) {
+	host := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." +
+		strings.Repeat("d", 61)
+	require.Len(t, host, 253)
+	a := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{
+		"turns:" + host + ":65535?transport=tcp", "turn:" + host + ":65535?transport=udp"}}}}
+	require.NoError(t, a.Check())
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpAnswer, a)))
+	require.NoError(t, err)
+	require.NoError(t, compile(t, "DaemonFrame").Validate(doc), "the contract refuses what the check admits")
 }

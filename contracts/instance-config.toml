@@ -188,9 +188,11 @@ domain = "chat.example.com"
 email = "admin@example.com"
 
 [voice]
-# Start the SFU, which carries calls' audio, and the TURN server beside it. Default false until joining a
-# call exists (M33): until then nothing can use either, and they bind ports a firewall would have to open
-# for nothing. Every setting below is checked at startup whether or not this is on.
+# Start the SFU, which carries calls' audio, and the TURN server beside it. Default true: calls need both.
+# False binds nothing and turns calls off. Every setting below is checked at startup whether or not this
+# is on. Clients are told TURN is at [http].public_base_url's host name, at turn_listen's port (and
+# turn_tls_listen's): without public_base_url no relay is offered, and a network refusing UDP to the SFU
+# cannot join.
 enabled = true
 
 # The SFU's one UDP port, which every call's media arrives on. Open it to the world. Default ":3479", every

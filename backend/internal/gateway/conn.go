@@ -197,8 +197,15 @@ func (c *conn) handle(ctx context.Context, f gatewayproto.Frame) bool {
 		c.closeWith(gatewayproto.CloseNotAuthenticated, "identify first")
 		return false
 	}
-	// Presence (M38), voice state (Phase E) and member requests are reserved, and every other number is
-	// unknown. Refused rather than ignored: a client believing its presence update landed is worse off than
+	if f.Op == gatewayproto.OpVoiceStateUpdate {
+		v, err := gatewayproto.DecodeVoiceStateUpdate(f.D, strictDecode)
+		if err != nil {
+			c.closeWith(gatewayproto.CloseDecodeError, "not a voice state update")
+			return false
+		}
+		return c.voice(v)
+	}
+	// Presence (M38) and member requests are reserved, and every other number is unknown. Refused rather than ignored: a client believing its presence update landed is worse off than
 	// one told it did not.
 	c.closeWith(gatewayproto.CloseUnknownOpcode, fmt.Sprintf("op %d is not supported", f.Op))
 	return false

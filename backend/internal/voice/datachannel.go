@@ -289,26 +289,37 @@ func (c *conn) sendLocked(v any) {
 	}
 }
 
-// refuse tells the client why, then closes the connection. Closing at once would tear down the association
-// with the reason still queued, so it waits, briefly, for the reason to leave.
-func (c *conn) refuse(reason string) {
-	defer c.contain("a refusal")
+// refuse tells the client why, then closes the connection.
+func (c *conn) refuse(reason string) { c.closeSaying(nil, reason) }
+
+// closeSaying sends the client its last message, why, then closes the connection, recording cause as
+// closeFor does. Closing at once would tear down the association with the reason still queued, so it
+// waits, briefly, for the reason to leave; a connection with no data channel yet is told nothing and closed
+// at once.
+//
+// It contains its own panics: an eviction calls it on the coordinator's goroutine, not one of this
+// package's, and Pion's data channel is the stranger's association (M33's /code-review).
+func (c *conn) closeSaying(cause error, reason string) {
+	defer c.contain("a goodbye")
 	// A reason can quote what the client sent; it is cut so the refusal stays within the contract's size.
 	reason = truncate(reason, maxReason)
 	// Once: a peer sending one bad message after another gets one refusal and one close.
 	c.mu.Lock()
-	refused := c.refused
+	said := c.refused
 	c.refused = true
-	c.mu.Unlock()
-	if refused {
-		return
-	}
-	c.send(voiceproto.Refused{Op: voiceproto.OpRefused, Reason: reason})
-	c.mu.Lock()
 	dc := c.dc
 	c.mu.Unlock()
+	if said {
+		return
+	}
+	if dc == nil {
+		c.closeFor(cause, "closed: "+reason)
+		return
+	}
+	panicHook("goodbye", nil)
+	c.send(voiceproto.Refused{Op: voiceproto.OpRefused, Reason: reason})
 	for range 50 {
-		if dc == nil || dc.BufferedAmount() == 0 {
+		if dc.BufferedAmount() == 0 {
 			break
 		}
 		select {
@@ -323,7 +334,7 @@ func (c *conn) refuse(reason string) {
 	case <-c.done:
 	case <-time.After(100 * time.Millisecond):
 	}
-	c.close("refused: " + reason)
+	c.closeFor(cause, "closed: "+reason)
 }
 
 // maxReason is the longest refusal reason sent, well inside voiceproto.MaxMessage with JSON's escaping.

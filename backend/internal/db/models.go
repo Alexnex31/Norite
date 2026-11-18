@@ -300,3 +300,17 @@ type UserTotp struct {
 	LastUsedStep    *int64
 	CreatedAt       pgtype.Timestamptz
 }
+
+type VoiceState struct {
+	ConnectionID  int64
+	GuildID       int64
+	ChannelID     int64
+	UserID        int64
+	SessionID     string
+	DeviceID      string
+	Mute          bool
+	Deaf          bool
+	Suppress      bool
+	SupportsVideo bool
+	CreatedAt     pgtype.Timestamptz
+}

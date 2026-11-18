@@ -158,13 +158,15 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	// The settings a client sent, as the call's state reports them (M30).
 	st, err := v.Join(ctx, "1001", ipc.VoiceJoin{EchoCancellation: true, AutoGain: true})
 	require.NoError(t, err)
+	// The harness says nothing of rights, so the account may send and hear, as it says in the answer.
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "1001", Available: true,
-		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true}}, st)
+		Processing: &ipc.VoiceJoin{EchoCancellation: true, AutoGain: true},
+		Rights:     &ipc.VoiceRights{Send: true, Hear: true}}, st)
 	require.True(t, h.logged("provisioned"), "the SFU provisioned the worker's connection")
 	require.True(t, v.Busy())
 
 	st = v.Leave()
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, st)
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", EndedInCall: true, Available: true}, st)
 	require.False(t, v.Busy())
 	require.Equal(t, []string{ipc.VoiceJoining, ipc.VoiceInCall, ipc.VoiceIdle}, seen.states())
 

@@ -130,8 +130,11 @@ type VoiceStatus struct {
 	Channel string `json:"channel"`
 	// Reason says why the last call ended, or why a join was refused, for a person; "" when nothing has.
 	Reason string `json:"reason"`
+	// EndedInCall is whether Reason is why a call that was up ended, rather than why a join failed before it
+	// was (M33): a client words the two apart. False while there is a call, and before any.
+	EndedInCall bool `json:"ended_in_call"`
 	// Available is whether this daemon can join a call at all, and Unavailable says why not when it
-	// cannot. Before M33 only a build for M26's harness can.
+	// cannot. Before M33 only a build for M26's harness could.
 	Available   bool   `json:"available"`
 	Unavailable string `json:"unavailable"`
 	// Processing is the call's audio processing as its join asked (M30), while there is a call; nil when
@@ -142,6 +145,16 @@ type VoiceStatus struct {
 	// ended, and go after any other end, a leave and the next join.
 	Microphone *VoiceDevice `json:"microphone"`
 	Speakers   *VoiceDevice `json:"speakers"`
+	// Rights is what the account may do in the call (M33), as the instance last said: send its microphone,
+	// and hear the call. A moderator's server mute or a channel without SPEAK takes the first, a server
+	// deafen the second, and this client applies them. Nil while there is no call answered.
+	Rights *VoiceRights `json:"rights"`
+}
+
+// VoiceRights is what the account may do in its call.
+type VoiceRights struct {
+	Send bool `json:"send"`
+	Hear bool `json:"hear"`
 }
 
 // VoiceDevice is one of a call's devices: a VoiceDevice* state, and the worker's reason, cleaned, or "".

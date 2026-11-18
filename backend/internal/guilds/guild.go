@@ -479,6 +479,10 @@ func (s *Service) Delete(ctx context.Context, actor auth.Actor, guildID snowflak
 			return httpx.ErrNotFound
 		}
 
+		// Every call in the guild ends, and its rooms close (M33).
+		if err := s.events.QueueVoiceRecheck(ctx, guildID); err != nil {
+			return err
+		}
 		// FormerMembers, because by fan-out time there are no membership rows left to check a recipient
 		// against. What it discloses is the id of a guild each recipient's READY already listed.
 		return s.events.Queue(ctx, dispatch.Event{

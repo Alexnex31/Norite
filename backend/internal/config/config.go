@@ -193,9 +193,9 @@ type Config struct {
 	ACMEDomain string `validate:"required_if=ACMEEnabled true,omitempty,hostname"`
 	ACMEEmail  string `validate:"required_if=ACMEEnabled true,omitempty,email"`
 
-	// VoiceEnabled starts the SFU and the TURN server with the instance. Default false: until op 4 exists
-	// (M33) nothing can join a call, and an instance that binds media ports nobody can use is a firewall
-	// question asked for nothing. The settings below are validated whether or not it is on.
+	// VoiceEnabled starts the SFU and the TURN server with the instance. Default true since M33, when op 4
+	// began provisioning calls on them; false until then, when they bound ports nothing could use. Off is
+	// M37's opt-out. The settings below are validated whether or not it is on.
 	VoiceEnabled bool
 
 	// VoiceMediaListen is the SFU's one UDP socket, which every call's media arrives on.
@@ -546,7 +546,7 @@ func Load(configPath string) (Config, error) {
 	collect(err)
 	cfg.ACMEEnabled = acmeEnabled
 
-	voiceEnabled, err := getEnvBool("VOICE_ENABLED", fileBool(file.Voice.Enabled, false))
+	voiceEnabled, err := getEnvBool("VOICE_ENABLED", fileBool(file.Voice.Enabled, true))
 	collect(err)
 	cfg.VoiceEnabled = voiceEnabled
 	cfg.VoiceMediaListen = getEnvString("VOICE_MEDIA_LISTEN", fileString(file.Voice.MediaListen, ":3479"))

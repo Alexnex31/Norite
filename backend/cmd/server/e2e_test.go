@@ -181,6 +181,9 @@ func startServer(t *testing.T, binary, addr, dsn string, env ...string) *running
 		// Short enough that a hung test fails in reasonable time, long enough not to trip over a slow
 		// container in CI.
 		"NORITE_MIGRATE_LOCK_TIMEOUT=90s",
+		// Off unless a test turns it on, since voice is on by default from M33 and binds fixed ports two
+		// servers in one run would share. A later value in env wins: os/exec keeps the last of a key.
+		"NORITE_VOICE_ENABLED=false",
 	)
 	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdout = logs

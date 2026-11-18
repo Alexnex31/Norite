@@ -12,12 +12,11 @@ import "os"
 // none of this file, as it does norite_testrelease.
 const harnessVariable = "NORITE_VOICE_HARNESS"
 
-// DefaultSignaler is M26's harness at the URL NORITE_VOICE_HARNESS names, for the manual pass and nothing
-// else, until M33 writes op 4's.
-func DefaultSignaler() (Signaler, string) {
-	url := os.Getenv(harnessVariable)
-	if url == "" {
-		return nil, "this daemon was built for the voice harness, and " + harnessVariable + " names none"
+// DefaultSignaler is M26's harness at the URL NORITE_VOICE_HARNESS names, for a manual pass with no
+// instance, and the gateway's when it names none.
+func DefaultSignaler(gateway *Gateway) (Signaler, string) {
+	if url := os.Getenv(harnessVariable); url != "" {
+		return Harness{URL: url}, ""
 	}
-	return Harness{URL: url}, ""
+	return gateway, ""
 }

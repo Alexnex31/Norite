@@ -25,12 +25,12 @@ import (
 // starting a worker.
 type refusingSignaler struct{}
 
-func (refusingSignaler) Route(context.Context, string) (voiceworker.Route, error) {
+func (refusingSignaler) Prepare(context.Context, string) (voiceworker.Route, error) {
 	return voiceworker.Route{}, errRefusing
 }
 
-func (refusingSignaler) Join(context.Context, string, string, string) (string, error) {
-	return "", errRefusing
+func (refusingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+	return voiceworker.Answer{}, errRefusing
 }
 
 var errRefusing = &voiceworker.Refusal{Msg: "the voice server refused: 409 room full"}
@@ -103,13 +103,13 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 // countingSignaler refuses every call and counts the routes asked of it: a join that got that far.
 type countingSignaler struct{ routes atomic.Int32 }
 
-func (c *countingSignaler) Route(context.Context, string) (voiceworker.Route, error) {
+func (c *countingSignaler) Prepare(context.Context, string) (voiceworker.Route, error) {
 	c.routes.Add(1)
 	return voiceworker.Route{}, errRefusing
 }
 
-func (*countingSignaler) Join(context.Context, string, string, string) (string, error) {
-	return "", errRefusing
+func (*countingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+	return voiceworker.Answer{}, errRefusing
 }
 
 // The join's body is the client's settings (M30): no body is every switch on, and anything else names all
@@ -226,13 +226,13 @@ func TestNoCredentialStoreStillAnswersAboutVoice(t *testing.T) {
 // holdingSignaler holds the route until its context ends, so a join stays under way.
 type holdingSignaler struct{}
 
-func (holdingSignaler) Route(ctx context.Context, _ string) (voiceworker.Route, error) {
+func (holdingSignaler) Prepare(ctx context.Context, _ string) (voiceworker.Route, error) {
 	<-ctx.Done()
 	return voiceworker.Route{}, ctx.Err()
 }
 
-func (holdingSignaler) Join(context.Context, string, string, string) (string, error) {
-	return "", errRefusing
+func (holdingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+	return voiceworker.Answer{}, errRefusing
 }
 
 // A sign-in that ends takes its call with it (M19's rule), from the session itself: here no gateway
@@ -282,3 +282,7 @@ func TestASignInNotReadYetIsPending(t *testing.T) {
 	_, err = signedInAccount(src)()
 	require.ErrorIs(t, err, voiceworker.ErrSignInPending)
 }
+
+func (refusingSignaler) Leave(context.Context, string)  {}
+func (*countingSignaler) Leave(context.Context, string) {}
+func (holdingSignaler) Leave(context.Context, string)   {}

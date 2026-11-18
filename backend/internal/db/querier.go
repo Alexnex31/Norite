@@ -233,6 +233,9 @@ type Querier interface {
 	// them (rule 2), which is what decides whether `tag.delete` is written. Served by the primary key's
 	// leading tag_id.
 	CountMessageTagApplicationsByOthers(ctx context.Context, arg CountMessageTagApplicationsByOthersParams) (int64, error)
+	// How many accounts other than user_id are in a channel, for user_limit: an account on two connections is
+	// one person, and one already there takes no new place.
+	CountVoiceChannelUsers(ctx context.Context, arg CountVoiceChannelUsersParams) (int64, error)
 	// Scoped API token queries.
 	//
 	// These are the long-lived, narrow-privilege credentials bots and local automation use, as opposed to the
@@ -351,6 +354,9 @@ type Querier interface {
 	// instance with no relay. The OAuth path has its own insert (CreateOAuthUser) because it creates an
 	// account with no password at all.
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// At start, on a single process: every call it held ended with the process that held it, and no SFU
+	// survives a restart. Phase P's flagship, with several replicas, sweeps per replica instead.
+	DeleteAllVoiceStates(ctx context.Context) error
 	DeleteChannel(ctx context.Context, arg DeleteChannelParams) (int64, error)
 	// Called by auth.RunSweeper. Abandoned authorizations are the common case, and the endpoint that creates
 	// them is unauthenticated, so nothing but the rate limiter bounds how fast this table grows.
@@ -451,6 +457,9 @@ type Querier interface {
 	// nicety — it is the invariant guild creation establishes in its transaction.
 	DeleteRole(ctx context.Context, arg DeleteRoleParams) (int64, error)
 	DeleteTOTPForUser(ctx context.Context, userID int64) (int64, error)
+	// A connection's end. Returning the row, so the caller can tell the channel it was in, and no row when
+	// something else ended it first: a cascade, a replacement, or another end racing this one.
+	DeleteVoiceState(ctx context.Context, connectionID int64) (VoiceState, error)
 	// The other half of the approval page, and the reason it is worth a column rather than letting the code
 	// expire: a person who realizes they were sent a code by someone else can end the authorization now, and
 	// the waiting client stops immediately instead of polling for another twenty minutes.
@@ -611,6 +620,13 @@ type Querier interface {
 	// ListGuildMemberAuthority scopes the actor's side the same way, and the two halves of one comparison
 	// reading different rule sets is exactly what this query's comment above exists to prevent.
 	GetMemberHighestRolePosition(ctx context.Context, arg GetMemberHighestRolePositionParams) (int32, error)
+	// The server mute and deafen a moderator set, for the accounts given; an account that is not a member is
+	// absent.
+	//
+	// Driven from the account list, one probe of guild_members' primary key each, for ListMemberRolesForUsers'
+	// reason: `guild_id = $1 AND user_id = ANY($2)` has a cached generic plan that scans the whole guild's
+	// members to keep a few (M13a).
+	GetMembersVoiceFlags(ctx context.Context, arg GetMembersVoiceFlagsParams) ([]GetMembersVoiceFlagsRow, error)
 	GetMessage(ctx context.Context, id int64) (Message, error)
 	// The message a report is being filed against, deleted rows included.
 	//
@@ -712,6 +728,7 @@ type Querier interface {
 	GetTOTPForUser(ctx context.Context, userID int64) (UserTotp, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id int64) (User, error)
+	GetVoiceState(ctx context.Context, connectionID int64) (VoiceState, error)
 	// The opt-in message audit (Milestone M16b).
 	//
 	// These three live in messages.sql rather than guilds.sql because `messages` is the only package that
@@ -731,6 +748,8 @@ type Querier interface {
 	// feeds roles.Resolve, and a recording policy is not one of ADR 0008's layers. See 000023.
 	//
 	GuildRecordsMessages(ctx context.Context, id int64) (bool, error)
+	// A connection the SFU has answered, as the channel is told about it.
+	InsertVoiceState(ctx context.Context, arg InsertVoiceStateParams) (VoiceState, error)
 	// Requesting a new reset spends every older one for that account, so the most recent link is the only one
 	// that works. Without this, every request an anxious user makes leaves another live token behind, and the
 	// window a leaked one is redeemable in becomes the union of all of them.
@@ -1154,6 +1173,14 @@ type Querier interface {
 	// tag must not appear on a message you can read, or "private" describes only who may apply it.
 	//
 	ListTagsForMessages(ctx context.Context, arg ListTagsForMessagesParams) ([]ListTagsForMessagesRow, error)
+	// A channel's participants, oldest first. Bounded by the SFU's participants per room, which is what a
+	// row stands for.
+	ListVoiceStatesInChannel(ctx context.Context, channelID int64) ([]VoiceState, error)
+	// The guild's connections, for the voice re-check. Bounded by its voice channels times the SFU's
+	// participants per room.
+	ListVoiceStatesInGuild(ctx context.Context, guildID int64) ([]VoiceState, error)
+	// The connections an account holds from one device, which a join from that device replaces.
+	ListVoiceStatesOfDevice(ctx context.Context, arg ListVoiceStatesOfDeviceParams) ([]VoiceState, error)
 	// Serializes everything that changes how many guilds one account owns or is in, three callers since M20a:
 	// Create, for the creating account, which counts both its owned and its joined guilds; TransferOwnership,
 	// for the recipient, which counts owned; and RedeemInvite, for the joiner, which counts joined. Each counts
@@ -1232,6 +1259,12 @@ type Querier interface {
 	// inserted concurrently waits for this transaction rather than slipping in after the count below and
 	// being cascaded away unrecorded.
 	LockMessageTag(ctx context.Context, id int64) error
+	// Serializes the joins of one channel for the calling transaction, so two joins cannot both read one
+	// place left under user_limit and both take it.
+	//
+	// Slot 5 of the advisory namespace ("NOR" plus a slot, as slots 3 and 4 are), keyed per channel. Two
+	// channels whose low 31 bits collide serialize unnecessarily and stay correct.
+	LockVoiceChannel(ctx context.Context, channelID int64) error
 	// Records that the address is confirmed.
 	//
 	// The WHERE guards against a race with an address change: the account's current email must still be the
@@ -1570,6 +1603,8 @@ type Querier interface {
 	// manage whom — is M13's, so this milestone stores the column, orders by it, and does not let a single-row
 	// update reshuffle it.
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error)
+	// The rights the re-check found, when they changed.
+	UpdateVoiceStateRights(ctx context.Context, arg UpdateVoiceStateRightsParams) (VoiceState, error)
 	// Write an overwrite, creating or replacing.
 	//
 	// PUT rather than POST/PATCH on the wire, so the same statement has to serve both — ON CONFLICT on the

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -38,8 +39,10 @@ type Control interface {
 	// provision issued at or before it that arrives afterwards.
 	Evict(ctx context.Context, room, user, cutoff snowflake.ID) error
 	// EvictConnection closes one connection, and refuses that connection's provision if it arrives
-	// afterwards. A connection already gone is not an error.
-	EvictConnection(ctx context.Context, conn snowflake.ID) error
+	// afterwards. A connection already gone is not an error. A reason, when there is one, is sent to the
+	// client first, in words a person can act on (M33): the call ended by a kick, a lost right or a deleted
+	// channel says so rather than that the server closed it.
+	EvictConnection(ctx context.Context, conn snowflake.ID, reason string) error
 	// SetExclusion sets the users whose tracks are never forwarded to receiver, over the client's own
 	// subscription; a pin does not override it. Empty until M70 decides what fills it.
 	SetExclusion(ctx context.Context, room, receiver snowflake.ID, excluded []snowflake.ID) error
@@ -109,6 +112,8 @@ type SFU struct {
 	// closedRooms and evictedConns are CloseRoom's and EvictConnection's memory, kept as cutoffs are.
 	closedRooms  map[snowflake.ID]cutoff
 	evictedConns map[snowflake.ID]time.Time
+	// onClose is told each connection's id once it is closed (Closes).
+	onClose atomic.Pointer[func(snowflake.ID)]
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -382,14 +387,33 @@ func (s *SFU) Evict(_ context.Context, roomID, user, cut snowflake.ID) error {
 	return nil
 }
 
+// Closes is what an SFU offers besides Control: being told when a connection closes, whoever closed it
+// (M33's /code-review). The coordinator subscribes when its SFU offers it, so a call ends as soon as its
+// connection does: ICE giving up, a provision never connected, a peer past a bound or gone. It is outside
+// Control because M116 carries Control as calls over mTLS, and this as a stream back.
+type Closes interface {
+	// OnClose names what is told each connection's id once it is closed. It is called on the SFU's
+	// goroutines, outside its locks, so it must not block. A later call replaces an earlier one.
+	OnClose(f func(conn snowflake.ID))
+}
+
+var _ Closes = (*SFU)(nil)
+
+// OnClose implements Closes.
+func (s *SFU) OnClose(f func(conn snowflake.ID)) { s.onClose.Store(&f) }
+
 // EvictConnection implements Control.
-func (s *SFU) EvictConnection(_ context.Context, connID snowflake.ID) error {
+func (s *SFU) EvictConnection(_ context.Context, connID snowflake.ID, reason string) error {
 	s.mu.Lock()
 	c := s.conns[connID]
 	s.evictedConns[connID] = s.now().Add(s.lim.ProvisionTimeout)
 	s.mu.Unlock()
-	if c != nil {
+	switch {
+	case c == nil:
+	case reason == "":
 		c.closeFor(ErrEvicted, "evicted")
+	default:
+		c.closeSaying(ErrEvicted, reason)
 	}
 	return nil
 }

@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
-[![Milestone](https://img.shields.io/badge/milestone-M32%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M33%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -42,10 +42,12 @@ software.
 Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invite.
 
 > [!NOTE]
-> **It is still early, and text only.** Voice calls, DMs, presence and the GUI are not built yet: the server
-> half of a call exists since `M26`, its relay since `M27`, the call's audio on your machine since `M29`, and
-> its noise suppression and echo cancellation since `M30`, a bitrate that follows your connection since `M31`, and word of what your microphone and speakers are doing since `M32`, but no client can join one until `M33`. The client shows one channel at a time, in plain text, and no third party has reviewed the code. The full scope is
-> multi-year work — [Status](#status) says exactly what exists.
+> **It is still early.** DMs, presence and the GUI are not built yet, and voice calls are new: since `M33`,
+> `norite voice join` joins one, over the server (`M26`), its relay (`M27`), the call's audio on your machine
+> (`M29`), its noise suppression and echo cancellation (`M30`), a bitrate that follows your connection (`M31`)
+> and word of what your microphone and speakers are doing (`M32`). Muting yourself arrives with `M34`, and a
+> screen for the call later still. The client shows one channel at a time, in plain text, and no third party
+> has reviewed the code. The full scope is multi-year work — [Status](#status) says exactly what exists.
 
 ---
 
@@ -73,16 +75,18 @@ message's edit history, a guild's opt-in message recording, message tagging, the
 daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
 the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
 stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun, and its first eight milestones are done too:
+`M24`, which completes Phase D. Phase E, voice, has begun, and its first nine milestones are done too:
 `M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
 held; `M26`, the server that carries a call's audio between its participants; `M27`, the relay that
 lets a participant whose network refuses UDP reach it; `M28`, the separate program on your machine that
 holds a call, which the daemon starts and stops; `M29`, the call's audio in that program, from your
 microphone to the others' speakers on Linux, Windows and macOS; `M30`, which cancels the echo of your
 speakers, suppresses the noise around you and evens out your level; `M31`, which lowers the bitrate
-your voice is sent at when your connection cannot carry it, and raises it again when it can; and `M32`,
-which says when your microphone or speakers cannot be used, and which setting gives them back. The instance can start the server and the relay, off by
-default, and none of it is used until `M33` lets a client join a call.**
+your voice is sent at when your connection cannot carry it, and raises it again when it can; `M32`,
+which says when your microphone or speakers cannot be used, and which setting gives them back; and `M33`,
+with which a client joins a call over its connection to the instance, which starts the server and the
+relay by default, and tells the people who can see a voice channel who is in it, though no client draws
+that yet.**
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -127,6 +131,7 @@ default, and none of it is used until `M33` lets a client join a call.**
 | `M30` | A call's sound cleaned up before it leaves your machine — what your speakers play is canceled out of your microphone, so the others do not hear themselves back; the noise around you is suppressed while your voice is kept; and a quiet voice is raised. All three run in WebAssembly beside the codec, for about 5% of a core, and each can be turned off in `config.toml`. Joining a real call still arrives with `M33` |
 | `M31` | A call that keeps up with your connection — the voice program reads, from what the call's server reports back, how long your audio waited on the way out, and lowers the bitrate it sends at when a queue builds or packets are lost, down to 16 kbps, then raises it again once the connection carries it; on a connection limited to 64 kbit/s, your audio waited 28 ms on average rather than 380, and none of it was dropped. Light loss is met with more recovery data instead of a lower bitrate. Joining a real call still arrives with `M33` |
 | `M32` | Your microphone and speakers, said plainly — the voice program reports whether each is on, waiting on your OS's question, refused, absent, or unusable because you are not logged in at the machine, and `norite voice` says so, naming the setting that gives the microphone back on Windows and macOS; on Linux, where nothing refuses and a stream with nobody logged in quietly plays to nowhere, the voice program asks where its stream went and asks the login manager why. One of the two failing leaves you listening or speaking; both failing as you join end the call and say why. Joining a real call still arrives with `M33` |
+| `M33` | Joining a call for real — `norite voice join` asks the instance over the connection the daemon already holds, and the instance checks you may connect to that channel, makes room for you on its voice server and answers with what your voice program needs, the relay's credential among it, so a network that refuses UDP no longer delays the join. The instance tells the people who can see the channel who is in it, though no client draws that yet. A moderator's mute or deafen, or a channel where you may not speak, is applied by your client and said in `norite voice status`; a kick or a lost right to connect ends the call, saying why. Calls run at 128 kbps unless the channel says otherwise, and an instance runs voice by default |
 
 </details>
 

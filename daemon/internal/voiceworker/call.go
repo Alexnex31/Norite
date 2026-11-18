@@ -38,10 +38,13 @@ type VoiceOptions struct {
 
 // Bounds on a join, past which it is abandoned. Variables for the tests.
 var (
-	// routeWithin bounds asking for a credential, and answerWithin the provision.
-	routeWithin  = 15 * time.Second
-	answerWithin = 15 * time.Second
-	// offerWithin bounds the worker's gather, and readyWithin the time from its answer to ready.
+	// routeWithin bounds the signaler's first step, answerWithin the provision, and signalLeaveWithin telling
+	// the voice server the call is over.
+	routeWithin       = 15 * time.Second
+	answerWithin      = 15 * time.Second
+	signalLeaveWithin = 5 * time.Second
+	// offerWithin bounds the worker's offer, and readyWithin the time from its answer to ready, which
+	// since M33 holds the gathering too.
 	offerWithin = 15 * time.Second
 	readyWithin = 25 * time.Second
 	// micWithin bounds how long a join waits, once the call is up, for the microphone to be past opening
@@ -57,6 +60,10 @@ type Voice struct {
 
 	// joinMu serializes joins. Leave never takes it, so a leave can end a join under way.
 	joinMu sync.Mutex
+	// last is the latest join's call, under joinMu. A join waits for it to finish, since its run tells the
+	// voice server the call is over after it has answered, and that leave, reaching the instance after the
+	// next join, would end it (M33's /code-review).
+	last *call
 	// pubMu orders what Changed is told: each publish sends the status as it is then, so concurrent
 	// changes converge on the last.
 	pubMu sync.Mutex
@@ -160,9 +167,13 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 		return v.Status(), &Refusal{Msg: "the join was given up before its turn came"}
 	}
 	v.leaveCurrent()
+	if v.last != nil {
+		<-v.last.finished
+	}
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{})}
+	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
 	if v.closed {
@@ -182,11 +193,12 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 	v.current = c
 	asked := processing
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceJoining, channel, "", &asked
-	v.status.Microphone, v.status.Speakers = nil, nil
+	v.status.EndedInCall = false
+	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	v.mu.Unlock()
 	v.publish()
 
-	go v.endsWith(c, signIn.Ended)
+	go v.endsWith(c, signIn.Ended, "the sign-in ended")
 	go v.run(callCtx, c, signIn.Account, result)
 	select {
 	case err := <-result:
@@ -234,7 +246,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	}
 
 	routeCtx, cancelRoute := context.WithTimeout(ctx, routeWithin)
-	route, err := v.opts.Signaler.Route(routeCtx, account)
+	route, err := v.opts.Signaler.Prepare(routeCtx, account)
 	cancelRoute()
 	if err != nil {
 		fail(true, nil, "%v", err)
@@ -260,7 +272,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}()
 
-	join := voiceipc.Join{ICEServers: orEmpty(route.ICEServers), Loopback: route.Loopback, Processing: c.processing}
+	join := voiceipc.Join{Loopback: route.Loopback, Processing: c.processing}
 	if err := w.Send(voiceipc.OpJoin, join); err != nil {
 		<-w.Done()
 		fail(true, w.Exit().Devices, "%s", w.Exit().Reason)
@@ -277,6 +289,16 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		return
 	}
 
+	// From the moment the join may have been sent, however the call ends, the voice server is told, just
+	// before the worker is reaped (the deferred reaping above runs after this). A join given up while the
+	// instance still works on it, by a leave, the bound or an answer this daemon refuses, is otherwise
+	// established there and kept for the session's life (M33's /code-review). Its row and the channel's
+	// view of the call go at once rather than when the session ends.
+	defer func() {
+		leaveCtx, cancelLeave := context.WithTimeout(context.Background(), signalLeaveWithin)
+		defer cancelLeave()
+		v.opts.Signaler.Leave(leaveCtx, account)
+	}()
 	answerCtx, cancelAnswer := context.WithTimeout(ctx, answerWithin)
 	answer, err := v.opts.Signaler.Join(answerCtx, account, c.channel, offer.Offer.SDP)
 	cancelAnswer()
@@ -284,7 +306,12 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		fail(true, nil, "%v", err)
 		return
 	}
-	if err := w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: answer}); err != nil {
+	v.rights(c, answer.Rights)
+	if answer.Lost != nil {
+		go v.endsWith(c, answer.Lost, SessionLostReason)
+	}
+	if err := w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: answer.SDP, ICEServers: orEmpty(answer.ICEServers),
+		Bitrate: answer.Bitrate, Rights: answer.Rights}); err != nil {
 		<-w.Done()
 		fail(true, w.Exit().Devices, "%s", w.Exit().Reason)
 		return
@@ -320,13 +347,23 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	v.publish()
 
 	// The call is up. What the worker says from here is drained, so it never waits on the daemon, until it
-	// ends; its end, crash or not, is the call's.
-	for ev := range w.Events() {
-		switch {
-		case ev.Offer != nil:
-			w.Kill("the voice worker broke the protocol: it offered again in a call")
-		case ev.Devices != nil:
-			v.devices(c, *ev.Devices)
+	// ends; its end, crash or not, is the call's. What the instance says the account may do goes to it.
+	changes := answer.Changes
+	for events := w.Events(); events != nil; {
+		select {
+		case ev, ok := <-events:
+			switch {
+			case !ok:
+				events = nil
+			case ev.Offer != nil:
+				w.Kill("the voice worker broke the protocol: it offered again in a call")
+			case ev.Devices != nil:
+				v.devices(c, *ev.Devices)
+			}
+		case r := <-changes:
+			v.rights(c, r)
+			// A worker gone already ends the call by its events; nothing more to do here.
+			_ = w.Send(voiceipc.OpRights, r)
 		}
 	}
 	<-w.Done()
@@ -430,6 +467,18 @@ func (v *Voice) devices(c *call, d voiceipc.Devices) {
 	v.publish()
 }
 
+// rights makes what the account may do in c the status's, if c is still the call.
+func (v *Voice) rights(c *call, r voiceipc.Rights) {
+	v.mu.Lock()
+	if v.current != c {
+		v.mu.Unlock()
+		return
+	}
+	v.status.Rights = &ipc.VoiceRights{Send: r.Send, Hear: r.Hear}
+	v.mu.Unlock()
+	v.publish()
+}
+
 // statusDevices is d as the status carries it, the worker's reasons cleaned and cut as any of its reasons
 // is.
 func statusDevices(d voiceipc.Devices) (mic, spk *ipc.VoiceDevice) {
@@ -449,8 +498,9 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 		return
 	}
 	v.current = nil
+	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
-	v.status.Microphone, v.status.Speakers = nil, nil
+	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	if by != nil {
 		v.status.Microphone, v.status.Speakers = statusDevices(*by)
 	}
@@ -458,11 +508,12 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 	v.publish()
 }
 
-// endsWith ends c when its sign-in ends, unless c has finished first.
-func (v *Voice) endsWith(c *call, ended <-chan struct{}) {
+// endsWith ends c for why when ended closes, its sign-in's end or its session's, unless c has finished
+// first.
+func (v *Voice) endsWith(c *call, ended <-chan struct{}, why string) {
 	select {
 	case <-ended:
-		v.leave(c, "the sign-in ended")
+		v.leave(c, why)
 	case <-c.finished:
 	}
 }
@@ -505,8 +556,9 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 		return v.Status()
 	}
 	v.current = nil
+	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", why, nil
-	v.status.Microphone, v.status.Speakers = nil, nil
+	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	w := c.worker
 	v.mu.Unlock()
 	v.publish()
