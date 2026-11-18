@@ -2435,7 +2435,32 @@ of this section.
     - it dials TURN and STUN through `session.guardedNet`, which refuses after resolving what `reachable`
       refuses for a candidate;
     - its SRTP streams are counted against its slots (`session/streams.go`), past which the call ends.
-  - **No `/code-review` ran**, at the author's decision. Every guard was removed and a named test failed.
+  - **One `/code-review` ran, at xhigh, once the pass's fixes were in**, at the author's request and with
+    no round after it. All fifteen findings were fixed, each guard removed and a named test watched fail:
+    - **A call the instance held that nobody did:**
+      - a join given up after its op 4 went (a leave, the bound) is now left on the instance;
+      - a call the SFU drops by itself (ICE, a provision never connected, a peer gone) ends at once:
+        the SFU tells the coordinator (`voice.Closes`), and a dead caller goes within seconds rather
+        than the resume window;
+      - a session ended while its join ran ends the call the join then made;
+      - the device's newest join wins over an older one still under way.
+    - **Rights a join could miss:**
+      - a SPEAK removed as the join was provisioned (the join asks for another re-check once it is
+        established);
+      - a mute whose update reached the daemon before its reply.
+    - **The daemon's order:** the old call's leave could reach the instance after the next join, and
+      a join now waits for it.
+    - **Contained and bounded:**
+      - an eviction's goodbye on the coordinator's goroutine, which a panic would have taken the server
+        down from;
+      - a TURN URL from a host name past about 235 bytes, now held to 512.
+    - **Smaller:**
+      - a full channel no longer spends the join budget;
+      - a re-check reads the guild's rows once, not once per channel;
+      - `replace` ends calls at once;
+      - the loopback check and the voice state's wire shape (`voice/voicestate`) exist once.
+    - **Kept by the author:** the thirty-second resume window, which the review called a voice symptom
+      treated in shared code, as the most a session may wait to be resumed.
   - **The manual pass ran in one unprivileged VM** (memory allowed one guest), with two OS accounts, each
     with its own daemon and virtual devices, against a real `norite-server`. QEMU's user networking hands
     the host a guest's packets from loopback, which the SFU refuses, so every call went through TURN.

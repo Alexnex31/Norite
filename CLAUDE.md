@@ -531,12 +531,16 @@ agent never creates a `v*` tag or bumps a version.**
   TURN credential comes with the answer, so the worker's offer carries no candidate and gathers afterwards
   (spike S1: 10 ms with TURN over UDP blackholed, against 8 s). A call belongs to its gateway session, a lost
   right ends it through a re-check topic of its own, and mute, deafen and Speak are the client's to apply.
-  `[voice]` is on by default, at 128 kbps. No `/code-review` ran, at the author's decision. Its manual pass,
-  two accounts in one VM through TURN, found four things, all fixed:
+  `[voice]` is on by default, at 128 kbps. Its manual pass, two accounts in one VM through TURN, found four
+  things, all fixed:
   - an SFU on loopback that announced nothing;
   - a dead caller listed for the two-minute resume window, now thirty seconds;
   - a daemon keeping a call its restarted instance had dropped;
   - every end reading "the voice server closed the call".
+
+  One `/code-review` followed, at the author's request, with no round after it. All fifteen findings were
+  fixed, chiefly calls the instance kept that nobody held: the SFU now tells the coordinator when it drops
+  a connection.
 
 ## What keeps coming back
 
@@ -619,7 +623,8 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **Assign a `time.AfterFunc` result under the lock its callback takes** (M27).
 - **A resource tied to a session lives as long as the session's resume window** (M33). A dead caller stayed
   listed for two minutes while the SFU had dropped it in seconds. When something ends with a session, ask
-  what a crash leaves visible, and for how long.
+  what a crash leaves visible, and for how long, and have whatever sees the end first tell whatever keeps
+  the record: the SFU tells the coordinator (M33's `/code-review`).
 - **Say why on the channel that closes** (M33). A reason sent on another channel races the close it
   explains, and the close wins: the SFU sends it on the data channel before closing.
 - **`os/exec` gives a child the parent's whole environment by default** (M28).
@@ -2437,10 +2442,23 @@ And on voice signaling, from M33:
   - rates joins ten a minute per account, charged after the free checks, with one in flight per session.
 
   The guild comes off the channel row, never from the client.
-- **A call belongs to its gateway session**, and dropping the session ends it, so a new way to end a
-  sign-in needs no voice code. The resume window is thirty seconds (`TestTheResumeWindowIsHalfAMinuteAtMost`).
-  On the daemon's side, a fresh session (READY, never RESUMED) ends its call and fails a join still waiting
-  (`Options.NewSession`, `Gateway.SessionLost`).
+- **A call ends with its connection, and with its session**. The SFU tells the coordinator whenever it
+  closes a connection (`voice.Closes`, which the coordinator subscribes to when its SFU offers it), so a
+  dead caller goes within seconds. Dropping the session ends the call too, so a new way to end a sign-in
+  needs no voice code, and a session that ended while its join ran ends the call the join then made. The
+  resume window is thirty seconds, the most the author allows (`TestTheResumeWindowIsHalfAMinuteAtMost`).
+  On the daemon's side:
+  - a fresh session (READY, never RESUMED) ends its call and fails a join still waiting
+    (`Options.NewSession`, `Gateway.SessionLost`);
+  - a join is left on the instance as soon as its op 4 may have gone, whether or not it was answered;
+  - a join waits for the previous call's leave (`Voice.last`).
+- **The device's newest join wins**, by its connection id, which is minted as the join starts. A join
+  cancels the device's older joins under way and ends its older calls; one that finds a newer join or call
+  of the device ends nothing and is refused.
+- **The account's own `VOICE_STATE_UPDATE` can precede the reply it follows**, which goes straight to the
+  session while the update goes through the bus. So the signaler keeps them while a join waits
+  (`Gateway.early`), and they win over the reply's rights. A join a re-check saw before its row existed
+  asks for another once established.
 - **A re-check is published only by a mutation that can take a voice right away**, with
   `dispatch.QueueVoiceRecheck` in its transaction, never on the client events: the author's condition, so
   that a busy guild cannot overload the SFU. Today these are `queuePermissions`, `RemoveMember`,
@@ -2473,7 +2491,8 @@ And on voice signaling, from M33:
 - **Testing:**
   - **Backend:** `voice_gateway_test.go`'s `newVoiceFixture` plays the daemon with a raw gateway client and
     the worker with `voicetest`'s Pion client, against real Postgres. `droppedSaying` asserts the reason an
-    end gave, whole.
+    end gave, whole. The coordinator stages a race with `beforeReplace` and `beforeProvision`, the two
+    moments of a join another can land between.
   - **Daemon:** `gateway_test.go`'s `fakeLink` plays the gateway connection.
   - **Manual pass:** QEMU's user networking hands the host a guest's packets from loopback, which the SFU
     refuses. So a pass in such a guest goes through TURN: the SFU on the docker bridge's address, announced
