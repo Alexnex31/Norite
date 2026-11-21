@@ -13,19 +13,29 @@ import (
 )
 
 // fakeStreams opens streams that call back every few milliseconds until stopped, or until the test pulls
-// their device, and refuses to open while it says there is none.
+// their device, and refuses to open while it says there is none. Each opens on def, the default device, and
+// says it moved once def is another.
 type fakeStreams struct {
 	mu        sync.Mutex
 	none      bool
+	def       string
 	opened    int
 	open      []*fakeStream
 	callbacks atomic.Int64
 }
 
 type fakeStream struct {
+	f            *fakeStreams
+	on           string
 	stop, pulled chan struct{}
 	done         chan struct{}
 	closes       atomic.Int32
+}
+
+func (s *fakeStream) Moved() bool {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	return s.f.def != s.on
 }
 
 func (s *fakeStream) Close() error {
@@ -43,7 +53,7 @@ func (f *fakeStreams) openWith(heard func()) (io.Closer, error) {
 		return nil, errors.New("no device")
 	}
 	f.opened++
-	s := &fakeStream{stop: make(chan struct{}), pulled: make(chan struct{}), done: make(chan struct{})}
+	s := &fakeStream{f: f, on: f.def, stop: make(chan struct{}), pulled: make(chan struct{}), done: make(chan struct{})}
 	f.open = append(f.open, s)
 	go func() {
 		defer close(s.done)
@@ -117,6 +127,33 @@ func TestAStreamThatStopsIsOpenedAgain(t *testing.T) {
 	}
 	before := f.callbacks.Load()
 	eventually(t, "the stream opened again never called back", func() bool { return f.callbacks.Load() > before+5 })
+}
+
+// A stream still calling back is opened again once another device is the default, on that device, and
+// once only (M34's manual pass).
+func TestAStreamFollowsANewDefault(t *testing.T) {
+	quickFollowing(t)
+	f := &fakeStreams{def: "speakers"}
+	c, err := follow(f.openWith)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	first := f.latest()
+	f.mu.Lock()
+	f.def = "headset"
+	f.mu.Unlock()
+	eventually(t, "the stream stayed on the device that stopped being the default", func() bool { return f.count() == 2 })
+	if first.closes.Load() != 1 {
+		t.Errorf("the stream on the old default was closed %d times", first.closes.Load())
+	}
+	if on := f.latest().on; on != "headset" {
+		t.Errorf("opened again on %q", on)
+	}
+	time.Sleep(5 * followAfter)
+	if n := f.count(); n != 2 {
+		t.Errorf("a stream on the default was opened again: %d opens", n)
+	}
 }
 
 // With no device to open, the stream is tried again until there is one, and the first open's failure is the

@@ -17,6 +17,10 @@ import (
 // now, and again every followEvery until one opens. PulseAudio moves a stream itself (M32), and Linux does
 // not follow.
 //
+// A stream still calling back is opened again too once another device has become the default (M34's manual
+// pass): a headset plugged back in mid-call becomes Windows' default and the call stayed on the speakers. A
+// stream says so through mover, which each OS answers its own way, and follow opens it again at once.
+//
 // Here, in a file every OS compiles, for the reason outcome.go gives: CI runs Linux alone.
 
 // followAfter is how long a stream may go without calling back before it is opened again: half the
@@ -27,6 +31,18 @@ var (
 	followAfter = time.Second
 	followEvery = 250 * time.Millisecond
 )
+
+// mover is a stream that can say another device has become the default since it opened. Moved is asked
+// every followEvery, outside the follower's lock, which the stream's callback takes; it answers false when
+// it cannot tell, and the silence rule is left to follow a device that went away.
+type mover interface {
+	Moved() bool
+}
+
+func moved(c io.Closer) bool {
+	m, ok := c.(mover)
+	return ok && m.Moved()
+}
 
 // follow opens a stream with open, and opens it again whenever it stops calling back. open is handed heard,
 // which the stream's callback calls each time it runs. What follow returns closes whichever stream is open,
@@ -71,16 +87,18 @@ func (f *follower) watch() {
 			return
 		case <-tick.C:
 		}
+		// The watch is the one writer of current while it runs, so old is still current once Moved has
+		// answered.
 		f.mu.Lock()
-		stale := f.current == nil || time.Since(f.last) >= followAfter
 		old := f.current
-		if stale {
-			f.current = nil
-		}
+		stale := old == nil || time.Since(f.last) >= followAfter
 		f.mu.Unlock()
-		if !stale {
+		if !stale && !moved(old) {
 			continue
 		}
+		f.mu.Lock()
+		f.current = nil
+		f.mu.Unlock()
 		// Closed outside the lock, which the stream's callback takes, and which Close takes too.
 		if old != nil {
 			_ = old.Close()
