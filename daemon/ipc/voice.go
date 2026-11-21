@@ -64,15 +64,23 @@ func PathVoiceLocalUnmute(user string) string { return pathVoiceLocalUnmute + us
 func PathVoiceStreams(n int) string { return pathVoiceStreams + strconv.Itoa(n) }
 
 // VoiceLocalMuteUser reads the user out of a PathVoiceLocalMute or PathVoiceLocalUnmute path, reports
-// whether it is one, and whether the path mutes.
+// whether it is one (IsUserID), and whether the path mutes.
 func VoiceLocalMuteUser(path string) (user string, mute, ok bool) {
 	if u, cut := strings.CutPrefix(path, pathVoiceLocalMute); cut {
-		return u, true, digitsID(u)
+		return u, true, IsUserID(u)
 	}
 	if u, cut := strings.CutPrefix(path, pathVoiceLocalUnmute); cut {
-		return u, false, digitsID(u)
+		return u, false, IsUserID(u)
 	}
 	return "", false, false
+}
+
+// IsUserID is whether s is a user's id as the instance writes one: a snowflake other than zero, in decimal
+// with no leading zero. A local mute is kept and compared as that text, so 007 would never be user 7, and 0
+// would take a place no user can fill (M34's manual pass).
+func IsUserID(s string) bool {
+	n, err := strconv.ParseUint(s, 10, 64)
+	return err == nil && n != 0 && strconv.FormatUint(n, 10) == s
 }
 
 // VoiceStreams reads the number out of a PathVoiceStreams path, and reports whether it is 0 to MaxStreams.
@@ -82,14 +90,6 @@ func VoiceStreams(path string) (int, bool) {
 		return 0, false
 	}
 	return int(n[0] - '0'), true
-}
-
-func digitsID(s string) bool {
-	if s == "" || len(s) > 20 {
-		return false
-	}
-	_, err := strconv.ParseUint(s, 10, 64)
-	return err == nil
 }
 
 // PathVoiceJoin is POST: join a voice channel, ending any call already joined. It answers a VoiceStatus

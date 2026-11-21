@@ -408,7 +408,7 @@ func TestAJoinSendsTheStreamsTheFileSays(t *testing.T) {
 // What these commands are given wrong is a usage error, said before anything is attached to or written.
 func TestThePersonsCommandsRefuseWhatIsNotTheirs(t *testing.T) {
 	for _, args := range [][]string{
-		{"local-mute"}, {"local-mute", "bob"}, {"local-unmute", "7", "8"}, {"mute", "7"},
+		{"local-mute"}, {"local-mute", "bob"}, {"local-mute", "0"}, {"local-unmute", "000"}, {"local-unmute", "7", "8"}, {"mute", "7"},
 		{"streams"}, {"streams", "4"}, {"streams", "0"}, {"streams", "two"},
 		{"processing"}, {"processing", "--auto-gain", "maybe"},
 	} {
@@ -438,7 +438,7 @@ func TestTheStatusSaysTheCallsControl(t *testing.T) {
 	two := 2
 	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
 		Self: ipc.VoiceSelf{Mute: true}, LocalMutes: []string{"7", "8"}, MaxStreams: &two,
-		Speaking: []string{"9"}, Processing: new(ipc.VoiceAllOn()),
+		Speaking: []string{"9"}, Processing: &ipc.VoiceJoin{NoiseSuppression: true},
 		DSP: &ipc.VoiceDSP{State: ipc.VoiceDSPRunning, NoiseSuppression: true}}}
 	r := norite(t, d, false, "status")
 	require.NoError(t, r.err)
@@ -448,6 +448,14 @@ func TestTheStatusSaysTheCallsControl(t *testing.T) {
 		"You muted yourself: nobody hears you.\n"+
 		"Muted for you alone: 7, 8.\n"+
 		"You hear at most 2 people at once.\n", r.out)
+
+	// A change asked for that has not taken yet says both, what runs and what was asked.
+	d.status.Processing = new(ipc.VoiceAllOn())
+	r = norite(t, d, false, "status")
+	require.NoError(t, r.err)
+	assert.Contains(t, r.out, "Processing the microphone with echo cancellation off, noise suppression on, "+
+		"automatic gain off.\nAsked for echo cancellation on, noise suppression on, automatic gain on, which "+
+		"has not taken yet.\nSpeaking now: 9.\n")
 
 	d.status.DSP = &ipc.VoiceDSP{State: ipc.VoiceDSPFailed, Reason: "it trapped \x1b[31m"}
 	d.status.Speaking, d.status.Self = nil, ipc.VoiceSelf{Mute: true, Deaf: true}

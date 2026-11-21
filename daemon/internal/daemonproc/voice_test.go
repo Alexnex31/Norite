@@ -108,6 +108,8 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 		{"a path that is none of them", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/shout", ipc.RelayBadRequest, ""},
 		{"a local mute naming no id", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/local-mute/bob", ipc.RelayBadRequest, "user id"},
 		{"a local mute naming nobody", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/local-unmute/", ipc.RelayBadRequest, "user id"},
+		{"a local mute of user zero", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("0"), ipc.RelayBadRequest, "user id"},
+		{"a local mute with a leading zero", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("07"), ipc.RelayBadRequest, "user id"},
 		{"more streams than slots", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/4", ipc.RelayBadRequest, "1 to 3"},
 		{"streams that are no number", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/-1", ipc.RelayBadRequest, "1 to 3"},
 		{"a processing naming nothing", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceProcessing, ipc.RelayBadRequest, "must name"},

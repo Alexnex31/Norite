@@ -53,6 +53,9 @@ var (
 	// (M32): long enough for a device's first frame, or macOS's question to be on the screen, and never the
 	// person's answer to it.
 	micWithin = 3 * time.Second
+	// processingWithin bounds how long a change of processing waits for the worker to say it runs (M34's
+	// manual pass): the chain is rebuilt in a moment, and past this the answer says what runs still.
+	processingWithin = 2 * time.Second
 )
 
 // Voice is the daemon's voice calls: one at a time, since a person is in one call. A join while in a call
@@ -140,6 +143,9 @@ type call struct {
 	sentRights     voiceipc.Rights
 	sentSub        voiceipc.Subscribe
 	sentProcessing ipc.VoiceJoin
+	// dspChanged is closed, and replaced, each time the worker says what its processing does, under
+	// Voice.mu: what a change of processing waits on.
+	dspChanged chan struct{}
 	// sendMu orders what push sends, so that the last push sends the latest state.
 	sendMu sync.Mutex
 }
@@ -277,6 +283,10 @@ func (v *Voice) Streams(n int) (ipc.VoiceStatus, error) {
 
 // Processing changes how the call's microphone is processed (M34's D5). Without a call it changes nothing:
 // the next join brings its own, from the client's config.toml, which the client writes.
+//
+// It answers once the worker says the processing asked for runs, or failed, or after processingWithin, so
+// that the answer says what the microphone goes through: answered at once, it described the processing
+// before the change, and read as the change not having taken (M34's manual pass).
 func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 	v.mu.Lock()
 	c := v.current
@@ -286,11 +296,42 @@ func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 		v.status.Processing = &asked
 	}
 	v.mu.Unlock()
-	if c != nil {
-		v.publish()
-		v.push(c)
+	if c == nil {
+		return v.Status()
 	}
-	return v.Status()
+	v.publish()
+	v.push(c)
+	timeout := time.NewTimer(processingWithin)
+	defer timeout.Stop()
+	for {
+		v.mu.Lock()
+		if v.current != c || runs(v.status.DSP, p) {
+			v.mu.Unlock()
+			return v.Status()
+		}
+		changed := c.dspChanged
+		v.mu.Unlock()
+		select {
+		case <-changed:
+		case <-c.finished:
+			return v.Status()
+		case <-timeout.C:
+			return v.Status()
+		}
+	}
+}
+
+// runs is whether what the worker says of its processing answers a change to p: p running, or no
+// processing at all, which no change brings back.
+func runs(d *ipc.VoiceDSP, p ipc.VoiceJoin) bool {
+	switch {
+	case d == nil:
+		return false
+	case d.State == ipc.VoiceDSPFailed:
+		return true
+	}
+	return d.State == ipc.VoiceDSPRunning && d.EchoCancellation == p.EchoCancellation &&
+		d.NoiseSuppression == p.NoiseSuppression && d.AutoGain == p.AutoGain
 }
 
 // Busy is a call joined or joining: no moment for the updater to restart the daemon (M24).
@@ -351,7 +392,7 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{}),
-		account: signIn.Account, sentProcessing: processing}
+		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{})}
 	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
@@ -693,6 +734,8 @@ func (v *Voice) control(c *call, ev Event) {
 		v.status.DSP = &ipc.VoiceDSP{State: ev.DSP.State, Reason: reason(ev.DSP.Reason),
 			EchoCancellation: ev.DSP.EchoCancellation, NoiseSuppression: ev.DSP.NoiseSuppression,
 			AutoGain: ev.DSP.AutoGain}
+		close(c.dspChanged)
+		c.dspChanged = make(chan struct{})
 	default:
 		v.mu.Unlock()
 		return

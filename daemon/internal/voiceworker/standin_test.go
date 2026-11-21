@@ -294,7 +294,10 @@ func standin(mode string) int {
 				time.Sleep(200 * time.Millisecond)
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed, Reason: "r", AutoGain: true})
 			}
-			if mode == "speaks" { // who speaks, and the processing as the join asked it, once up (M34)
+			if mode == "dspfails" { // a processing that failed, which stays off for the rest of the call
+				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed, Reason: "the chain trapped"})
+			}
+			if mode == "speaks" || mode == "dspsilent" { // who speaks, and the processing as the join asked it, once up (M34)
 				send(voiceipc.OpSpeaking, voiceipc.Speaking{Users: []string{"7"}})
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: true,
 					NoiseSuppression: true, AutoGain: true})
@@ -323,11 +326,17 @@ func standin(mode string) int {
 			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed,
 				Reason: fmt.Sprintf("drop=%s cap=%s", strings.Join(sub.Drop, ","), cap)})
 		case voiceipc.OpProcessing:
-			// The processing it was asked for, as running (M34).
+			// The processing it was asked for, as running, after a moment's rebuilding as the worker's is
+			// (M34); never, as a worker whose report is lost, with dspsilent, or one whose processing failed and
+			// stays off, with dspfails.
 			var p voiceipc.Processing
 			if ipc.Decode(f, &p) != nil {
 				return 9
 			}
+			if mode == "dspsilent" || mode == "dspfails" {
+				continue
+			}
+			time.Sleep(300 * time.Millisecond)
 			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: p.Processing.EchoCancellation,
 				NoiseSuppression: p.Processing.NoiseSuppression, AutoGain: p.Processing.AutoGain})
 		case voiceipc.OpLeave:

@@ -427,7 +427,8 @@ func run(connect Connector, arg int, prepare func(*cli.Command) error, ask asker
 			return clierr.Usage("norite voice %s takes 1, 2, 3 or all", cmd.Name)
 		case arg != argNone && arg != argStreams && cmd.Args().Len() != 1:
 			return clierr.Usage("norite voice %s takes one %s", cmd.Name, what)
-		case arg != argNone && arg != argStreams && !ops.IsID(first):
+		case arg != argNone && arg != argStreams && !ops.IsID(first),
+			arg == argUser && !ipc.IsUserID(first):
 			return clierr.Usage("%q is not a %s", output.Clean(first), what)
 		}
 		if prepare != nil {
@@ -490,6 +491,13 @@ func (v view) Text(t *output.Text) {
 	case d != nil && d.State == ipc.VoiceDSPRunning:
 		t.Line("Processing the microphone with echo cancellation %s, noise suppression %s, automatic gain %s.",
 			onOff(d.EchoCancellation), onOff(d.NoiseSuppression), onOff(d.AutoGain))
+		// A change the worker has not said it runs yet, which `processing` waits a moment for (M34's manual
+		// pass): what runs is said above, and what was asked here, so neither reads as the other.
+		if p := v.Processing; p != nil && (p.EchoCancellation != d.EchoCancellation ||
+			p.NoiseSuppression != d.NoiseSuppression || p.AutoGain != d.AutoGain) {
+			t.Line("Asked for echo cancellation %s, noise suppression %s, automatic gain %s, which has not taken yet.",
+				onOff(p.EchoCancellation), onOff(p.NoiseSuppression), onOff(p.AutoGain))
+		}
 	case d != nil && d.State == ipc.VoiceDSPFailed:
 		t.Line("The microphone goes unprocessed: %s.", output.Clean(d.Reason))
 	case v.Processing != nil:

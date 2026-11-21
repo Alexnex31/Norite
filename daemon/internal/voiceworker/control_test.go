@@ -153,17 +153,75 @@ func TestWhoSpeaksAndTheProcessingReachTheStatus(t *testing.T) {
 		return len(st.Speaking) == 1 && st.Speaking[0] == "7" && st.DSP != nil && st.DSP.State == ipc.VoiceDSPRunning
 	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
 
-	only := ipc.VoiceJoin{NoiseSuppression: true}
-	st := v.Processing(only)
-	require.Equal(t, &only, st.Processing, "what was asked")
-	require.Eventually(t, func() bool {
-		d := v.Status().DSP
-		return d != nil && *d == ipc.VoiceDSP{State: ipc.VoiceDSPRunning, NoiseSuppression: true}
-	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status().DSP)
+	// The answer says what runs once the worker has rebuilt its processing, which the stand-in takes a
+	// moment to, as the worker does: answered at once, it said the processing from before (M34's manual
+	// pass).
+	// Each step changes one stage, so that each is what the answer waits on, and the answer comes when the
+	// worker says so, well before processingWithin.
+	for _, asked := range []ipc.VoiceJoin{
+		{NoiseSuppression: true, AutoGain: true},
+		{AutoGain: true},
+		{},
+	} {
+		start := time.Now()
+		st := v.Processing(asked)
+		require.Less(t, time.Since(start), processingWithin, "%+v", asked)
+		require.Equal(t, &asked, st.Processing, "what was asked")
+		require.Equal(t, &ipc.VoiceDSP{State: ipc.VoiceDSPRunning, EchoCancellation: asked.EchoCancellation,
+			NoiseSuppression: asked.NoiseSuppression, AutoGain: asked.AutoGain}, st.DSP, "what runs")
+	}
 
-	st = v.Leave()
+	st := v.Leave()
 	require.Empty(t, st.Speaking)
 	require.Nil(t, st.DSP)
+}
+
+// A change of processing the worker never reports is answered after processingWithin, saying what still
+// runs; one made without a call is answered at once (M34).
+func TestAChangeOfProcessingIsAnsweredWithinItsBound(t *testing.T) {
+	fast(t)
+	defer func(d time.Duration) { processingWithin = d }(processingWithin)
+	processingWithin = 300 * time.Millisecond
+	v := standinVoice(t, "dspsilent", &selfServer{})
+	start := time.Now()
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, LocalMutes: []string{},
+		Speaking: []string{}}, v.Processing(ipc.VoiceJoin{}), "without a call")
+	require.Less(t, time.Since(start), processingWithin)
+
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		d := v.Status().DSP
+		return d != nil && d.State == ipc.VoiceDSPRunning
+	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
+	start = time.Now()
+	answered := make(chan ipc.VoiceStatus, 1)
+	go func() { answered <- v.Processing(ipc.VoiceJoin{AutoGain: true}) }()
+	var st ipc.VoiceStatus
+	select {
+	case st = <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a change the worker never reports was never answered")
+	}
+	require.GreaterOrEqual(t, time.Since(start), processingWithin)
+	require.Equal(t, &ipc.VoiceDSP{State: ipc.VoiceDSPRunning, EchoCancellation: true, NoiseSuppression: true,
+		AutoGain: true}, st.DSP, "what still runs")
+}
+
+// A processing that failed answers a change at once: no change brings it back (M34).
+func TestAFailedProcessingAnswersAChangeAtOnce(t *testing.T) {
+	fast(t)
+	v := standinVoice(t, "dspfails", &selfServer{})
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		d := v.Status().DSP
+		return d != nil && d.State == ipc.VoiceDSPFailed
+	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
+	start := time.Now()
+	st := v.Processing(ipc.VoiceJoin{})
+	require.Less(t, time.Since(start), processingWithin/2)
+	require.Equal(t, ipc.VoiceDSPFailed, st.DSP.State)
 }
 
 // What the person set goes with the sign-in it was set under: another sign-in starts from nothing (M34's
