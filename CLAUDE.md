@@ -405,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M33 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M34 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -415,9 +415,9 @@ versions of these entries.
 lowercased, and `git tag` states it. Never write `(tag pending)`.
 
 **`M<N>a` means "inserted after `M<N>`"**, so a milestone can go at its dependency position without
-renumbering every reference. Letters run `a`, `b`, `c` in insertion order. Fourteen exist: `M11a`, `M13a`,
-`M16a`, `M16b`, `M20a`, `M37a`, `M56a`, `M62a`, `M67a`, `M72a`, `M72b`, `M76a`, `M78a`, `M93a`. A list that
-names its own members drifts on the next insertion, so check it:
+renumbering every reference. Letters run `a`, `b`, `c` in insertion order. Fifteen exist: `M11a`, `M13a`,
+`M16a`, `M16b`, `M20a`, `M36a`, `M37a`, `M56a`, `M62a`, `M67a`, `M72a`, `M72b`, `M76a`, `M78a`, `M93a`.
+A list that names its own members drifts on the next insertion, so check it:
 `grep -cE '^- \*\*M[0-9]+[a-z] — ' docs/roadmap.md`. **A suffixed milestone can be retired and its
 number is never reused**: `M17a` was folded into M20.
 
@@ -541,6 +541,14 @@ agent never creates a `v*` tag or bumps a version.**
   One `/code-review` followed, at the author's request, with no round after it. All fifteen findings were
   fixed, chiefly calls the instance kept that nobody held: the SFU now tells the coordinator when it drops
   a connection.
+- **M34 — Voice control surface**: done. Self mute and deafen over op 4's new update shape, local mute as
+  the SFU's `drop`, a stream cap, the active speaker and what the DSP runs in the status, the DSP's verbs
+  mid-call, a user reported from a voice channel, the delivered rate in the controller, and following the
+  default device on Windows and macOS. Its manual pass ran on Linux and Windows 11 in VMs; macOS is the
+  author's Mac, not yet walked. It found three things, all fixed:
+  - `processing` answered before the change ran;
+  - a headset plugged back in was not followed;
+  - a local mute took user `0`.
 
 ## What keeps coming back
 
@@ -568,6 +576,9 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **A guard held twice needs three runs to prove**: each alone, then both (M16b, M17).
 - **A test can pass for a reason other than its name**: a deadline that closes the connection anyway, actors
   that overlap, a host that serves no archive (M17, M24, M27), a benchmark whose every call failed (M29).
+- **A test faster than the bound it tests sees only the coalescing** (M34). Updates sent quicker than their
+  250 ms spacing folded into one before the spacing ran, and a test of the spacing passed with it removed.
+  Pace the input to the bound, and drain what comes out as it comes.
 - **A test's silence is not a device's** (M29). Digital silence hid the comfort noise that real quiet
   makes DTX send, and every talk-spurt played 440 ms late. Feed a test the signal the device delivers.
 - **A test of what is sent is not a test of what is heard** (M30). A sender too slow for real time encoded
@@ -580,8 +591,9 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   a reference byte for byte, on every architecture a release ships.
 - **A stand-in must fail the way the real thing does**: a proxy that forwards the FIN, sequence numbers that
   jump, a seed whose ids cluster or whose distributions share a modulus (M16, M19, M26), a room whose
-  delay never moves (M30). A schema-checked fake cannot see wording or a screen, and a test that feeds a
-  parser raw output has not tested what the runner hands it (M19, M20a, M24).
+  delay never moves (M30), a worker that took a frame before its answer, which the real one refuses (M34).
+  A schema-checked fake cannot see wording or a screen, and a test that feeds a parser raw output has not
+  tested what the runner hands it (M19, M20a, M24).
 - **Test the configuration the defaults produce** and the one the documentation tells an operator to write, on
   a machine with more than one interface (M27, M28). Run `-race` and vet every new test file for every OS it
   claims to run on (M27, M28).
@@ -635,7 +647,9 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   audience (M18), and plans under the generic plan pgx prepares, on skewed data (M13a,
   `TestMemberRoleReadsCannotScanTheWholeGuild`).
 - **A message describes the outcome**: write it after the last step that can fail, from what happened, and
-  read every sentence a person will see against the real program (M19, M22, M28).
+  read every sentence a person will see against the real program (M19, M22, M28). An answer sent once a
+  change is asked for, before the program it asks has made it, describes the state before (M34's
+  `processing`).
 - **Anything written for a platform nobody ran says so**, in the entry, the guide, the commit and the code
   (M23).
 
@@ -644,7 +658,8 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   M24). `/code-review`, `/security-sweep` and `/optimization-review` ask different questions, and each found
   what the others walked past (M15, M19).
 - **The manual pass finds what reads wrong**: wording and screens, which no review and no schema-checked fake
-  sees (M19, M20a, M22).
+  sees (M19, M20a, M22). It also finds what a person does next: M34's follower handled the headset pulled
+  out, and the pass plugged it back in.
 - **A manual pass that needs an init system, a reboot, a login session or another OS runs in an unprivileged
   VM**, or on a machine the author names, and only after asking. Never a privileged container: one ended the
   author's desktop session at M23. Check the hash of what a pass runs (M26), and where a virtual device is
@@ -2498,6 +2513,43 @@ And on voice signaling, from M33:
     refuses. So a pass in such a guest goes through TURN: the SFU on the docker bridge's address, announced
     as `10.0.2.2`, and TURN on loopback. Two OS accounts in one guest, each with its own daemon and null
     sinks, are two callers on one guest's memory.
+
+And on the voice control surface, from M34:
+
+- **What the person sets is the daemon's, per sign-in, in memory** (`voiceworker.prefs`): the self mute and
+  deafen, the local mutes and the stream cap. It is set with or without a call, sent with each join, and
+  forgotten when the sign-in ends; a different sign-in starts from nothing. Never on disk until M36 decides
+  what a rejoin carries.
+- **`push` sends the worker and the voice server only what changed**, ordered by `call.sendMu`, and nothing
+  before the worker has its answer (`call.answered`), which carries the instance's raw rights. The worker
+  applies the instance's rights less the person's switches (`effective`). A new switch is a field there
+  and a line in `push`.
+- **Op 4's update is spaced 250 ms per session** (`updateEvery`), and one waiting is replaced by a newer one
+  only when it is the last request queued, so it never folds across a join or a leave. Anything new a
+  session can make the instance fan out gets the same treatment.
+- **A local mute is the SFU's `drop` and a skip in the mix**, of every sender any slot map has named
+  (`control.seen`, bounded), since packets of a sender already buffered play after the SFU takes it off the
+  map. It is never a report, which is `norite report user`, a separate act (architecture.md §6).
+- **A user id the daemon keeps is canonical and nonzero** (`ipc.IsUserID`): compared as text, `007` is not
+  user 7. The CLI refuses the rest as a usage error before attaching.
+- **What the worker runs is the worker's to say** (`OpDSP`, `VoiceStatus.dsp`); `processing` is what was
+  asked. A change of processing answers once the worker reports it running or failed, or after
+  `processingWithin`, and the text says what was asked when it has not taken.
+- **The worker forwards who speaks at most every `speakingEvery`** (200 ms), the newest list, since the
+  pipe cuts it off past 50 frames a second.
+- **A reported user is routed by a voice channel** (`reports.channel_id`): the filer sees it, the target is
+  a member of its guild, or 404. One open report per reporter per target per guild.
+- **A stream follows the default device two ways** (`audio/follow.go`): one silent for `followAfter` is
+  opened again, and one whose OS names another default (`mover`) is opened at once. Each OS answers
+  `Moved` on its own terms, outside the follower's lock, and false when it cannot tell. Linux does
+  neither, since PulseAudio moves its streams.
+- **Testing:** `standin_test.go` echoes `SUBSCRIBE` as a failed DSP whose reason names the drop and the
+  cap, and `PROCESSING` as running after 300 ms. `dspsilent` and `dspfails` play a worker that never
+  reports, and one whose processing failed. The stand-in refuses `RIGHTS`, `SUBSCRIBE` and `PROCESSING`
+  before `ANSWER`, as the worker does. A manual pass measures at the far end:
+  - two speakers are told apart by correlating loudness envelopes, each speaking a different passage;
+  - white noise shows noise suppression;
+  - QEMU's `usb-audio` on its `wav` backend is a headset to unplug, which Windows cannot refuse.
 
 And on the first run, from the `easier-setup` branch:
 
