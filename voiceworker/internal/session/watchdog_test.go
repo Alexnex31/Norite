@@ -911,3 +911,46 @@ type tunable struct{ opus.Encoder }
 
 func (tunable) SetBitrate(int) error { return nil }
 func (tunable) SetLoss(int) error    { return nil }
+
+// countingModule makes marking chains and counts them.
+type countingModule struct {
+	dsp.Module
+	made *int
+}
+
+func (m countingModule) NewChain(context.Context, dsp.Settings) (dsp.Chain, error) {
+	*m.made++
+	return marking{}, nil
+}
+
+// Changes of processing faster than frames are taken up a few a second, the newest each time: each makes a
+// chain and reports it, and a chain made at every frame put the worker past the daemon's bound on its frames
+// (M34's /code-review). Counted, not timed.
+func TestChangesOfProcessingAreSpaced(t *testing.T) {
+	made := 0
+	s := &Session{opts: Options{Log: io.Discard}, ctl: newControl(dsp.AllOn())}
+	m := &media{s: s, module: countingModule{made: &made}, chain: marking{}, settings: dsp.AllOn()}
+	reports := 0
+	settings := []dsp.Settings{{NoiseSuppression: true}, dsp.AllOn()}
+	for stamp := range uint64(100) {
+		want := settings[stamp%2]
+		s.ctl.want.Store(&want)
+		m.reconfigure(stamp)
+		select {
+		case <-s.ctl.dspOut:
+			reports++
+		default:
+		}
+	}
+	if want := 100 / reconfigureFrames; made > want || reports > want {
+		t.Errorf("two seconds of changes at every frame made %d chains and %d reports, past %d", made, reports, want)
+	}
+	last := dsp.Settings{AutoGain: true}
+	s.ctl.want.Store(&last)
+	for stamp := uint64(100); stamp < 100+reconfigureFrames; stamp++ {
+		m.reconfigure(stamp)
+	}
+	if m.settings != last {
+		t.Errorf("the newest change was not taken up: %+v", m.settings)
+	}
+}

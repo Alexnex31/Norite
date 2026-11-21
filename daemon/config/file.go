@@ -288,6 +288,27 @@ func SetFor(client, section Section, name, input string) (string, error) {
 	return path, named(path, err)
 }
 
+// Setting is one key and the value SetAllFor gives it.
+type Setting struct{ Key, Value string }
+
+// SetAllFor sets every one of settings in section of the file client reads right now, in one write: all of
+// them or, when any is refused, none (M34's /code-review). Setting them one SetFor each left the first in
+// the file when a later one failed, and the command that asked reported the failure alone.
+func SetAllFor(client, section Section, settings ...Setting) (string, error) {
+	edits := make([]edit, 0, len(settings))
+	for _, s := range settings {
+		segments, literal, err := resolve(section, s.Key, s.Value, true)
+		if err != nil {
+			return "", err
+		}
+		edits = append(edits, edit{segments, literal})
+	}
+	path, err := UpdateFor(client, func(_ string, _ bool, current []byte) ([]byte, error) {
+		return setAll(current, edits)
+	})
+	return path, named(path, err)
+}
+
 // UnsetFor removes one key from the file client reads right now.
 func UnsetFor(client, section Section, name string) (string, error) {
 	segments, _, err := resolve(section, name, "", false)

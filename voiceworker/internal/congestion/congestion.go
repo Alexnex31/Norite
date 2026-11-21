@@ -317,8 +317,11 @@ func (c *Controller) spread() float64 {
 	return float64(arrived) / float64(departed)
 }
 
-// full is whether the link delivers slower than it is sent to.
-func (c *Controller) full() bool { return c.spread() > spreadRatio }
+// full is whether the link delivers slower than it is sent to, fullAt the same of a spread already read:
+// what adjust decides on, so a test asking full asks what the controller does.
+func (c *Controller) full() bool { return c.fullAt(c.spread()) }
+
+func (*Controller) fullAt(ratio float64) bool { return ratio > spreadRatio }
 
 // feedback is what one transport-wide feedback said about the queue on this controller's packets.
 type feedback struct {
@@ -399,7 +402,7 @@ func (c *Controller) adjust(f feedback, now time.Time) {
 	standing := f.timed > 0 && f.queue > low
 	drained := f.timed > 0 && f.queue < low
 	ratio := c.spread()
-	full, room := ratio > spreadRatio, ratio <= spreading
+	full, room := c.fullAt(ratio), ratio <= spreading
 	switch {
 	case queued && canDecrease:
 		c.decrease(backoff, now)

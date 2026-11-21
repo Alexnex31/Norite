@@ -19,7 +19,11 @@ import (
 //
 // A stream still calling back is opened again too once another device has become the default (M34's manual
 // pass): a headset plugged back in mid-call becomes Windows' default and the call stayed on the speakers. A
-// stream says so through mover, which each OS answers its own way, and follow opens it again at once.
+// stream says so through mover, which each OS answers its own way, and follow opens the new default at once.
+// The stream that works is closed only once the new one is open (M34's /code-review): a new default that
+// refuses to open, busy or switched off, left the call with no device at all. A stream does nothing with its
+// samples until it is the one in use, which it becomes once the old one is closed, so two never feed the
+// call at once.
 //
 // Here, in a file every OS compiles, for the reason outcome.go gives: CI runs Linux alone.
 
@@ -44,13 +48,15 @@ func moved(c io.Closer) bool {
 	return ok && m.Moved()
 }
 
-// follow opens a stream with open, and opens it again whenever it stops calling back. open is handed heard,
-// which the stream's callback calls each time it runs. What follow returns closes whichever stream is open,
-// and stops the following; an open that fails the first time is follow's error, as an open would be.
-func follow(open func(heard func()) (io.Closer, error)) (io.Closer, error) {
-	f := &follower{open: open, stop: make(chan struct{}), done: make(chan struct{})}
+// follow opens a stream with open, and opens it again whenever it stops calling back or another device is
+// the default. open is handed heard, which the stream's callback calls each time it runs, and whose answer
+// is whether the stream is the one in use: a callback whose stream is not leaves the samples alone, playing
+// silence. What follow returns closes whichever stream is open, and stops the following; an open that fails
+// the first time is follow's error, as an open would be.
+func follow(open func(heard func() bool) (io.Closer, error)) (io.Closer, error) {
+	f := &follower{open: open, stop: make(chan struct{}), done: make(chan struct{}), active: 1, gen: 1}
 	f.last = time.Now()
-	c, err := open(f.heard)
+	c, err := open(f.heardFor(1))
 	if err != nil {
 		return nil, err
 	}
@@ -60,21 +66,32 @@ func follow(open func(heard func()) (io.Closer, error)) (io.Closer, error) {
 }
 
 type follower struct {
-	open func(heard func()) (io.Closer, error)
+	open func(heard func() bool) (io.Closer, error)
 	stop chan struct{}
 	done chan struct{}
 	once sync.Once
 
 	mu      sync.Mutex
-	last    time.Time // the last callback, or when the stream was opened
+	last    time.Time // the last callback of the stream in use, or when it was opened
 	current io.Closer // nil while none could be opened
-	reopens int       // for a test
+	// active is the generation of the stream in use, gen the last one opened, and refused when a new
+	// default last failed to open, which is tried again followAfter later.
+	active, gen uint64
+	refused     time.Time
+	reopens     int // for a test
 }
 
-func (f *follower) heard() {
-	f.mu.Lock()
-	f.last = time.Now()
-	f.mu.Unlock()
+// heardFor is the heard of the stream opened as generation gen.
+func (f *follower) heardFor(gen uint64) func() bool {
+	return func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.active != gen {
+			return false
+		}
+		f.last = time.Now()
+		return true
+	}
 }
 
 func (f *follower) watch() {
@@ -92,28 +109,65 @@ func (f *follower) watch() {
 		f.mu.Lock()
 		old := f.current
 		stale := old == nil || time.Since(f.last) >= followAfter
+		retry := time.Since(f.refused) >= followAfter
 		f.mu.Unlock()
-		if !stale && !moved(old) {
-			continue
+		switch {
+		case stale:
+			f.reopen(old)
+		case retry && moved(old):
+			f.move(old)
 		}
-		f.mu.Lock()
-		f.current = nil
-		f.mu.Unlock()
-		// Closed outside the lock, which the stream's callback takes, and which Close takes too.
-		if old != nil {
-			_ = old.Close()
-		}
-		// One opened as the follower is closed is kept as current, and Close, which waits for this loop to
-		// return, closes it.
-		c, err := f.open(f.heard)
-		f.mu.Lock()
-		f.last = time.Now()
-		if err == nil {
-			f.current = c
-			f.reopens++
-		}
-		f.mu.Unlock()
 	}
+}
+
+// reopen replaces a stream that stopped calling back, or opens one where none could be: closed first, since
+// its device is gone. Closed outside the lock, which the stream's callback takes, and which Close takes too.
+// One opened as the follower is closed is kept as current, and Close, which waits for this loop to return,
+// closes it.
+func (f *follower) reopen(old io.Closer) {
+	f.mu.Lock()
+	f.current = nil
+	f.gen++
+	gen := f.gen
+	f.active = gen
+	f.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	c, err := f.open(f.heardFor(gen))
+	f.mu.Lock()
+	f.last = time.Now()
+	if err == nil {
+		f.current = c
+		f.reopens++
+	}
+	f.mu.Unlock()
+}
+
+// move opens the new default beside a stream that still works, and closes the old one only once the new one
+// is open: a default that cannot be opened leaves the call where it was, tried again followAfter later. The
+// new stream is in use once the old one is closed, Close waiting for its callbacks, so the two never run at
+// once on the call's samples.
+func (f *follower) move(old io.Closer) {
+	f.mu.Lock()
+	f.gen++
+	gen := f.gen
+	f.mu.Unlock()
+	c, err := f.open(f.heardFor(gen))
+	if err != nil {
+		f.mu.Lock()
+		f.refused = time.Now()
+		f.mu.Unlock()
+		return
+	}
+	f.mu.Lock()
+	f.current = c
+	f.mu.Unlock()
+	_ = old.Close()
+	f.mu.Lock()
+	f.active, f.last = gen, time.Now()
+	f.reopens++
+	f.mu.Unlock()
 }
 
 // Close stops the following, and closes the stream it has open, once the watch has returned: it never

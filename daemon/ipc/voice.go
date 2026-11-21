@@ -77,10 +77,12 @@ func VoiceLocalMuteUser(path string) (user string, mute, ok bool) {
 
 // IsUserID is whether s is a user's id as the instance writes one: a snowflake other than zero, in decimal
 // with no leading zero. A local mute is kept and compared as that text, so 007 would never be user 7, and 0
-// would take a place no user can fill (M34's manual pass).
+// would take a place no user can fill (M34's manual pass). A snowflake is a signed 64-bit number, which is
+// what the voice server parses: past it, the server refused the whole subscribe and closed every call the
+// mute was sent with (M34's /code-review).
 func IsUserID(s string) bool {
-	n, err := strconv.ParseUint(s, 10, 64)
-	return err == nil && n != 0 && strconv.FormatUint(n, 10) == s
+	n, err := strconv.ParseInt(s, 10, 64)
+	return err == nil && n > 0 && strconv.FormatInt(n, 10) == s
 }
 
 // VoiceStreams reads the number out of a PathVoiceStreams path, and reports whether it is 0 to MaxStreams.

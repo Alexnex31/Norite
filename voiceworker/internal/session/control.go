@@ -9,8 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/webrtc/v4"
-
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
@@ -33,11 +31,17 @@ const (
 	maxSources = 4 * voiceproto.MaxSubscribeList
 )
 
+// textSender is the data channel as a subscribe is sent on it: *webrtc.DataChannel.
+type textSender interface{ SendText(string) error }
+
 type control struct {
 	mu sync.Mutex
-	// dc is the data channel, which a subscribe is sent on. One sent before it opens is lost, so the SFU's
-	// ready sends the subscription again.
-	dc *webrtc.DataChannel
+	// dc is the data channel, which a subscribe is sent on, and ready the SFU's ready having been read on it.
+	// Nothing is sent before ready: Pion calls a channel open as soon as it is dialed and greets on a
+	// goroutine of its own afterwards, so a subscribe could precede the hello, and the SFU closes a call whose
+	// first message is not hello (M34's /code-review). What is set before is sent at ready.
+	dc    textSender
+	ready bool
 	// sources is who fills each slot by source id, the CSRC on their packets, and drop whom the person
 	// muted for themselves. muted is the source ids of the dropped, which the mix reads without the lock.
 	//
@@ -89,6 +93,7 @@ func (c *control) onReady() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.ready = true
 	if len(c.drop) > 0 || c.cap != nil {
 		c.sendSubscribeLocked()
 	}
@@ -186,7 +191,7 @@ func (c *control) remuteLocked() {
 // sendSubscribeLocked asks the SFU for the subscription. A send that fails is a channel closing, which ends
 // the call by itself.
 func (c *control) sendSubscribeLocked() {
-	if c.dc == nil {
+	if c.dc == nil || !c.ready {
 		return
 	}
 	m := voiceproto.Subscribe{Op: voiceproto.OpSubscribe, Pin: []string{}, Drop: make([]string, 0, len(c.drop)),

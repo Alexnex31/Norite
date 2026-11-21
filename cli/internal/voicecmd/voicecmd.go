@@ -46,13 +46,13 @@ type Read struct {
 	Streams int
 }
 
-// Write sets a voice key in config.toml's [shared], as the terminal client reads it. FileWrite is the real
-// one.
-type Write func(key, value string) error
+// Write sets voice keys in config.toml's [shared], as the terminal client reads it, all of them in one write
+// or none. FileWrite is the real one.
+type Write func(settings ...config.Setting) error
 
-// FileWrite sets key in the file the terminal client reads, which the command tree shares (ADR 0026).
-func FileWrite(key, value string) error {
-	if _, err := config.SetFor(config.TUI, config.Shared, key, value); err != nil {
+// FileWrite sets the keys in the file the terminal client reads, which the command tree shares (ADR 0026).
+func FileWrite(settings ...config.Setting) error {
+	if _, err := config.SetAllFor(config.TUI, config.Shared, settings...); err != nil {
 		return fmt.Errorf("config.toml could not be written: %s", termsafe.Text(err.Error()))
 	}
 	return nil
@@ -257,9 +257,9 @@ func idAsked(path func(string) string) asker {
 
 // streamsWith writes voice.max_streams before anything is attached to, then tells a daemon that answered
 // PathVoice, so the call there is follows at once.
-func streamsWith(write Write) (func(*cli.Command) error, asker) {
+func streamsWith(write Write) (preparer, asker) {
 	var n int
-	prepare := func(cmd *cli.Command) error {
+	prepare := func(cmd *cli.Command) (string, error) {
 		arg := cmd.Args().First()
 		value := arg
 		if arg == config.StreamsAll {
@@ -267,7 +267,7 @@ func streamsWith(write Write) (func(*cli.Command) error, asker) {
 		} else {
 			n, _ = strconv.Atoi(arg)
 		}
-		return write(config.KeyVoiceMaxStreams, value)
+		return "shared." + config.KeyVoiceMaxStreams, write(config.Setting{Key: config.KeyVoiceMaxStreams, Value: value})
 	}
 	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
 		st, err := status(ctx, cmd, c)
@@ -280,12 +280,12 @@ func streamsWith(write Write) (func(*cli.Command) error, asker) {
 
 // processingWith reads the switches config.toml has, applies the flags, writes what changed and then,
 // when there is a call, sends the call the whole of it (D5): the next join reads the file.
-func processingWith(settings Settings, write Write) (func(*cli.Command) error, asker) {
+func processingWith(settings Settings, write Write) (preparer, asker) {
 	var body ipc.VoiceJoin
-	prepare := func(cmd *cli.Command) error {
+	prepare := func(cmd *cli.Command) (string, error) {
 		read, _, err := settings()
 		if err != nil {
-			return err
+			return "", err
 		}
 		body = read.Processing
 		flags := []struct {
@@ -304,22 +304,23 @@ func processingWith(settings Settings, write Write) (func(*cli.Command) error, a
 			named++
 			v := cmd.String(f.name)
 			if v != config.On && v != config.Off {
-				return clierr.Usage("--%s is on or off", f.name)
+				return "", clierr.Usage("--%s is on or off", f.name)
 			}
 			*f.field = v == config.On
 		}
 		if named == 0 {
-			return clierr.Usage("norite voice processing names --echo-cancellation, --noise-suppression or " +
+			return "", clierr.Usage("norite voice processing names --echo-cancellation, --noise-suppression or " +
 				"--auto-gain, each on or off")
 		}
+		var settings []config.Setting
+		var keys []string
 		for _, f := range flags {
 			if cmd.IsSet(f.name) {
-				if err := write(f.key, cmd.String(f.name)); err != nil {
-					return err
-				}
+				settings = append(settings, config.Setting{Key: f.key, Value: cmd.String(f.name)})
+				keys = append(keys, "shared."+f.key)
 			}
 		}
-		return nil
+		return strings.Join(keys, ", "), write(settings...)
 	}
 	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
 		st, err := status(ctx, cmd, c)
@@ -342,19 +343,19 @@ func status(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voi
 //
 // The settings are read first, before the daemon is attached to: a config that does not load is a local
 // problem, said as one whether or not a daemon is running, and sends nothing.
-func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
+func joinWith(settings Settings) (prepare preparer, ask asker) {
 	var body ipc.VoiceJoin
 	var streams int
-	prepare = func(cmd *cli.Command) error {
+	prepare = func(cmd *cli.Command) (string, error) {
 		read, warnings, err := settings()
 		if err != nil {
-			return err
+			return "", err
 		}
 		for _, w := range warnings {
 			_, _ = fmt.Fprintln(cmd.Root().ErrWriter, w)
 		}
 		body, streams = read.Processing, read.Streams
-		return nil
+		return "", nil
 	}
 	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
 		st, err := status(ctx, cmd, c)
@@ -413,10 +414,18 @@ const (
 	argStreams
 )
 
+// preparer is a command's own local work before it attaches: its checks, and for `streams` and `processing`
+// writing config.toml, when saved names the keys it wrote.
+type preparer func(*cli.Command) (saved string, err error)
+
 // run wraps one command: its argument checked before anything is attached to, so a mistyped id is a usage
 // error on a machine with no daemon running too, then prepare, the command's own local checks when it has
 // some, then the request, then its answer printed.
-func run(connect Connector, arg int, prepare func(*cli.Command) error, ask asker) cli.ActionFunc {
+//
+// A failure after prepare saved keys says they are saved, keeping the failure's exit code: the file holds
+// for the next join whether or not the daemon could be told, and an error alone read as nothing having
+// changed (M34's /code-review).
+func run(connect Connector, arg int, prepare preparer, ask asker) cli.ActionFunc {
 	what := map[int]string{argChannel: "channel id", argUser: "user id"}[arg]
 	return func(ctx context.Context, cmd *cli.Command) error {
 		first := cmd.Args().First()
@@ -431,22 +440,30 @@ func run(connect Connector, arg int, prepare func(*cli.Command) error, ask asker
 			arg == argUser && !ipc.IsUserID(first):
 			return clierr.Usage("%q is not a %s", output.Clean(first), what)
 		}
+		saved := ""
 		if prepare != nil {
-			if err := prepare(cmd); err != nil {
+			var err error
+			if saved, err = prepare(cmd); err != nil {
 				return err
 			}
 		}
+		told := func(err error) error {
+			if err == nil || saved == "" {
+				return err
+			}
+			return fmt.Errorf("%s: saved in config.toml for the next join, but the daemon was not told: %w", saved, err)
+		}
 		if connect == nil {
-			return errors.New("this build has no way to reach the daemon")
+			return told(errors.New("this build has no way to reach the daemon"))
 		}
 		c, detach, err := connect(ctx)
 		if err != nil {
-			return err
+			return told(err)
 		}
 		defer detach()
 		st, err := ask(ctx, cmd, c)
 		if err != nil {
-			return err
+			return told(err)
 		}
 		// Every list is [] rather than null in what is printed (contracts/cli-json), whichever daemon sent it.
 		if st.LocalMutes == nil {

@@ -228,8 +228,8 @@ func TestAJoinAfterADevicesFailurePublishesNoLeave(t *testing.T) {
 	require.Equal(t, ipc.VoiceJoining, seen[0].State, "%+v", seen[0])
 }
 
-func (answeringServer) Update(context.Context, string, string, ipc.VoiceSelf) {}
-func (answeringServer) Leave(context.Context, string)                         {}
+func (answeringServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (answeringServer) Leave(context.Context, string)                               {}
 
 // changingServer answers with rights the instance later changes, and counts the leaves it is told of.
 type changingServer struct {
@@ -241,8 +241,8 @@ func (*changingServer) Prepare(context.Context, string) (Route, error) { return 
 func (s *changingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: false, Hear: true}, Changes: s.changes}, nil
 }
-func (s *changingServer) Update(context.Context, string, string, ipc.VoiceSelf) {}
-func (s *changingServer) Leave(context.Context, string)                         { s.leaves.Add(1) }
+func (s *changingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (s *changingServer) Leave(context.Context, string)                               { s.leaves.Add(1) }
 
 // What the account may do reaches the status with the answer, and each change the instance sends reaches
 // the status and the worker (M33); leaving tells the voice server.
@@ -277,8 +277,8 @@ func (*losingServer) Prepare(context.Context, string) (Route, error) { return Ro
 func (s *losingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}, Lost: s.lost}, nil
 }
-func (s *losingServer) Update(context.Context, string, string, ipc.VoiceSelf) {}
-func (s *losingServer) Leave(context.Context, string)                         { s.leaves.Add(1) }
+func (s *losingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (s *losingServer) Leave(context.Context, string)                               { s.leaves.Add(1) }
 
 // A call whose session the instance no longer holds ends at once, saying so (M33's manual pass).
 func TestACallEndsWithItsLostSession(t *testing.T) {

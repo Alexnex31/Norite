@@ -234,17 +234,20 @@ func (c *Coordinator) updateRights(ctx context.Context, guildID snowflake.ID, sp
 		if r.Mute == f.mute && r.Deaf == f.deaf && r.Suppress == suppress {
 			continue
 		}
-		err := database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
-			updated, err := db.New(tx).UpdateVoiceStateRights(ctx, db.UpdateVoiceStateRightsParams{
-				ConnectionID: r.ConnectionID, Mute: f.mute, Deaf: f.deaf, Suppress: suppress,
+		var err error
+		c.rowLock(snowflake.ID(r.ConnectionID), func() {
+			err = database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
+				updated, err := db.New(tx).UpdateVoiceStateRights(ctx, db.UpdateVoiceStateRightsParams{
+					ConnectionID: r.ConnectionID, Mute: f.mute, Deaf: f.deaf, Suppress: suppress,
+				})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				return c.queueState(ctx, updated)
 			})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			return c.queueState(ctx, updated)
 		})
 		if err != nil {
 			return err

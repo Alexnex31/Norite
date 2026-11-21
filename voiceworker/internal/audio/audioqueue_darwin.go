@@ -161,8 +161,8 @@ type queue struct {
 	closed bool
 	framer *framer
 	filler *filler
-	// heard tells the follower the queue called back (follow.go).
-	heard func()
+	// heard tells the follower the queue called back, and says whether it is the queue in use (follow.go).
+	heard func() bool
 	once  sync.Once
 	// input is the queue's direction, and device the default device it opened on; known is false when
 	// CoreAudio named none.
@@ -188,8 +188,7 @@ func (q *queue) captured(buf unsafe.Pointer) {
 	if q.closed {
 		return
 	}
-	q.heard()
-	if b.size > 0 && b.data != nil {
+	if q.heard() && b.size > 0 && b.data != nil {
 		q.framer.write(unsafe.Slice((*int16)(b.data), b.size/2))
 	}
 	enqueue(q.q, buf, 0, 0)
@@ -202,8 +201,11 @@ func (q *queue) render(buf unsafe.Pointer) {
 	if q.closed {
 		return
 	}
-	q.heard()
-	q.filler.read(unsafe.Slice((*int16)(b.data), b.capacity/2))
+	if out := unsafe.Slice((*int16)(b.data), b.capacity/2); q.heard() {
+		q.filler.read(out)
+	} else {
+		clear(out) // not the queue in use yet: silence
+	}
 	b.size = b.capacity
 	enqueue(q.q, buf, 0, 0)
 }
@@ -270,14 +272,14 @@ func openQueue(input bool, q *queue) (io.Closer, error) {
 
 func (audioQueue) Capture(_ context.Context, frame func([]int16)) (io.Closer, error) {
 	f := &framer{frame: frame}
-	return follow(func(heard func()) (io.Closer, error) {
+	return follow(func(heard func() bool) (io.Closer, error) {
 		return openQueue(true, &queue{framer: f, heard: heard})
 	})
 }
 
 func (audioQueue) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {
 	f := newFiller(fill)
-	return follow(func(heard func()) (io.Closer, error) {
+	return follow(func(heard func() bool) (io.Closer, error) {
 		return openQueue(false, &queue{filler: f, heard: heard})
 	})
 }

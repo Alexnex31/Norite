@@ -132,3 +132,40 @@ func TestAMutedSenderStaysMutedOffTheMap(t *testing.T) {
 	require.Len(t, c.seen, maxSources)
 	require.Len(t, c.order, maxSources)
 }
+
+// sends records what a control sends on its data channel.
+type sends struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (s *sends) SendText(m string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, m)
+	return nil
+}
+
+func (s *sends) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.got...)
+}
+
+// A subscription set before the SFU's ready waits for it and is sent then: the channel is open before its
+// hello goes, and the SFU closes a call whose first message is not hello (M34's /code-review).
+func TestASubscriptionWaitsForTheSFUsReady(t *testing.T) {
+	c := newControl(dsp.AllOn())
+	dc := &sends{}
+	c.dc = dc
+	two := 2
+	c.subscribe(voiceipc.Subscribe{Drop: []string{"7"}, Cap: &two})
+	require.Empty(t, dc.seen(), "a subscribe went before the SFU's ready")
+	c.onReady()
+	want, err := voiceproto.Encode(voiceproto.Subscribe{Op: voiceproto.OpSubscribe, Pin: []string{},
+		Drop: []string{"7"}, Cap: &two})
+	require.NoError(t, err)
+	require.Equal(t, []string{string(want)}, dc.seen())
+	c.subscribe(voiceipc.Subscribe{Drop: []string{}})
+	require.Len(t, dc.seen(), 2, "a subscribe after ready is sent at once")
+}

@@ -53,11 +53,18 @@ func (f *fakeDaemon) Do(_ context.Context, method, path string, body any) (ipc.R
 	return ipc.Result{Status: 200, Body: answer}, nil
 }
 
-// writes records what the commands wrote to config.toml, key=value, in order.
-type writes struct{ got []string }
+// writes records what the commands wrote to config.toml, key=value, in order, and how many writes that
+// took.
+type writes struct {
+	got   []string
+	calls int
+}
 
-func (w *writes) write(key, value string) error {
-	w.got = append(w.got, key+"="+value)
+func (w *writes) write(settings ...config.Setting) error {
+	w.calls++
+	for _, s := range settings {
+		w.got = append(w.got, s.Key+"="+s.Value)
+	}
 	return nil
 }
 
@@ -388,6 +395,36 @@ func TestAProcessingChangeReachesTheCall(t *testing.T) {
 	assert.Equal(t, []string{"GET " + ipc.PathVoice, "POST " + ipc.PathVoiceProcessing}, d.asked)
 	assert.Equal(t, `{"echo_cancellation":false,"noise_suppression":true,"auto_gain":true}`, d.bodies[1])
 	assert.Equal(t, []string{"voice.echo_cancellation=off", "voice.auto_gain=on"}, written.got)
+	assert.Equal(t, 1, written.calls, "the switches were not written together, all or none")
+}
+
+// A setting written to config.toml stays written whatever the daemon does next, and a failure after it says
+// so, keeping its exit code: an error alone read as nothing having changed (M34's /code-review).
+func TestASettingSavedBeforeTheDaemonFailsSaysItIsSaved(t *testing.T) {
+	for _, tc := range []struct {
+		args  []string
+		saved string
+	}{
+		{[]string{"streams", "2"}, "shared.voice.max_streams"},
+		{[]string{"processing", "--auto-gain", "off", "--echo-cancellation", "off"},
+			"shared.voice.echo_cancellation, shared.voice.auto_gain"},
+	} {
+		written = &writes{}
+		var out bytes.Buffer
+		root := &cli.Command{
+			Name: "norite", Writer: &out, ErrWriter: &out, Flags: []cli.Flag{&cli.BoolFlag{Name: "json"}},
+			ExitErrHandler: func(context.Context, *cli.Command, error) {},
+			Commands: []*cli.Command{Command(func(context.Context) (daemonclient.Caller, func(), error) {
+				return nil, nil, clierr.Unavailable("the daemon is not running")
+			}, allOn, written.write)},
+		}
+		err := root.Run(context.Background(), append([]string{"norite", "voice"}, tc.args...))
+		require.NotEmpty(t, written.got, tc.args)
+		var unavailable *clierr.UnavailableError
+		require.ErrorAs(t, err, &unavailable, "the exit code changed: %v", tc.args)
+		assert.Equal(t, tc.saved+": saved in config.toml for the next join, but the daemon was not told: "+
+			"the daemon is not running", err.Error())
+	}
 }
 
 // A join sends how many people the call is heard from first, when the file and the daemon disagree, and

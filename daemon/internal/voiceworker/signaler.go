@@ -29,9 +29,10 @@ type Signaler interface {
 	// Join provisions the call for the account in channel with the worker's offer, and what the person has
 	// set on themselves (M34).
 	Join(ctx context.Context, account, channel, offer string, self ipc.VoiceSelf) (Answer, error)
-	// Update tells the voice server what the person has set on themselves during the call (M34). Best
-	// effort, as Leave is: the person's own client applies it whatever the server records.
-	Update(ctx context.Context, account, channel string, self ipc.VoiceSelf)
+	// Update tells the voice server what the person has set on themselves during the call (M34). The
+	// person's own client applies it whatever the server records; an error is the update not having gone,
+	// which the call sends again (selfRetryEvery), or everybody else would keep seeing the old flags.
+	Update(ctx context.Context, account, channel string, self ipc.VoiceSelf) error
 	// Leave tells the voice server the call is over, once its worker is gone. Best effort: a voice server
 	// that is not told ends the call when the connection goes quiet.
 	Leave(ctx context.Context, account string)
@@ -118,7 +119,7 @@ func (h Harness) Join(ctx context.Context, account, channel, offer string, _ ipc
 func (h Harness) Leave(context.Context, string) {}
 
 // Update tells the harness nothing: it keeps no voice state for anybody to read.
-func (h Harness) Update(context.Context, string, string, ipc.VoiceSelf) {}
+func (h Harness) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
 
 func (h Harness) post(ctx context.Context, path string, in, out any) error {
 	body, err := json.Marshal(in)

@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -441,4 +442,93 @@ func TestAnUpdateReachesOnlyItsSessionsCall(t *testing.T) {
 	assert.False(t, deaf)
 	mute, _ = f.selfFlags(t, "b")
 	assert.False(t, mute, "another session's call changed")
+}
+
+// heldBus records what is published, in order, and holds the first publish once hold is set, until
+// released.
+type heldBus struct {
+	hold     atomic.Bool
+	held     chan struct{}
+	release  chan struct{}
+	mu       chan struct{}
+	payloads [][]byte
+}
+
+func newHeldBus() *heldBus {
+	b := &heldBus{held: make(chan struct{}), release: make(chan struct{}), mu: make(chan struct{}, 1)}
+	b.mu <- struct{}{}
+	return b
+}
+
+func (b *heldBus) Publish(_ context.Context, _ string, payload []byte) error {
+	if b.hold.CompareAndSwap(true, false) {
+		close(b.held)
+		<-b.release
+	}
+	<-b.mu
+	b.payloads = append(b.payloads, append([]byte(nil), payload...))
+	b.mu <- struct{}{}
+	return nil
+}
+
+func (b *heldBus) Subscribe(string, func([]byte)) (events.Subscription, error) { return nil, nil }
+func (b *heldBus) Close() error                                                { return nil }
+
+func (b *heldBus) selfMutes(t *testing.T) []bool {
+	t.Helper()
+	<-b.mu
+	defer func() { b.mu <- struct{}{} }()
+	var out []bool
+	for _, p := range b.payloads {
+		var ev struct {
+			Type string `json:"type"`
+			Data struct {
+				SelfMute bool `json:"self_mute"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(p, &ev))
+		if ev.Type == gatewayproto.EventVoiceStateUpdate {
+			out = append(out, ev.Data.SelfMute)
+		}
+	}
+	return out
+}
+
+// Two writes of one call's row publish in the order they committed, so the channel's viewers end on the
+// newer (M34's /code-review): each event carries the whole row. Staged: the first write's publish is held,
+// and the second, committing behind it, must not publish first.
+func TestWritesOfACallsRowPublishInTheOrderTheyCommitted(t *testing.T) {
+	f := newFixture(t)
+	event, _ := f.join(t, f.member, "a", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+	bus := newHeldBus()
+	f.c.opts.Events = dispatch.NewPublisher(bus, nil)
+	bus.hold.Store(true)
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		f.update(f.member, "a", f.channel, true, false)
+	}()
+	select {
+	case <-bus.held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first update never published")
+	}
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		f.update(f.member, "a", f.channel, false, false)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(bus.release)
+	for _, done := range []chan struct{}{first, second} {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("an update never returned")
+		}
+	}
+	assert.Equal(t, []bool{true, false}, bus.selfMutes(t), "the viewers were left on the older row")
+	mute, _ := f.selfFlags(t, "a")
+	assert.False(t, mute)
 }

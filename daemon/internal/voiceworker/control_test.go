@@ -6,6 +6,7 @@ package voiceworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,11 +22,13 @@ import (
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
-// selfServer answers every join, and records what it was told the person set on themselves.
+// selfServer answers every join, and records what it was told the person set on themselves. While down is
+// set, an update is refused as a gateway reconnecting refuses it, and not recorded.
 type selfServer struct {
 	mu      sync.Mutex
 	joined  []ipc.VoiceSelf
 	updates []ipc.VoiceSelf
+	down    bool
 }
 
 func (*selfServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
@@ -35,10 +38,20 @@ func (s *selfServer) Join(_ context.Context, _, _, _ string, self ipc.VoiceSelf)
 	s.joined = append(s.joined, self)
 	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}}, nil
 }
-func (s *selfServer) Update(_ context.Context, _, _ string, self ipc.VoiceSelf) {
+func (s *selfServer) Update(_ context.Context, _, _ string, self ipc.VoiceSelf) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.down {
+		return errors.New("not connected")
+	}
 	s.updates = append(s.updates, self)
+	return nil
+}
+
+func (s *selfServer) setDown(down bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.down = down
 }
 func (*selfServer) Leave(context.Context, string) {}
 
@@ -80,6 +93,73 @@ func TestTheSelfSwitchesReachTheJoinTheVoiceServerAndTheWorker(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "a self mute did not stop the sending: %+v", v.Status())
 	// The instance's own rights are not the person's: the status keeps the two apart.
 	require.Equal(t, &ipc.VoiceRights{Send: true, Hear: true}, v.Status().Rights)
+}
+
+// A self update the voice server did not take, as while the gateway connection is down and resuming, is sent
+// again once it can be, and not taken for sent: everybody else would see the old flags for the rest of the
+// call (M34's /code-review).
+func TestASelfUpdateMadeWhileTheGatewayIsDownIsSentOnceItIsBack(t *testing.T) {
+	fast(t)
+	srv := &selfServer{}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	srv.setDown(true)
+	_, err = v.SetSelf(SelfDeafen)
+	require.NoError(t, err)
+	time.Sleep(3 * selfRetryEvery / 2)
+	_, updates := srv.seen()
+	require.Empty(t, updates)
+	srv.setDown(false)
+	require.Eventually(t, func() bool {
+		_, updates := srv.seen()
+		return len(updates) == 1 && updates[0] == ipc.VoiceSelf{Mute: true, Deaf: true}
+	}, 5*time.Second, 10*time.Millisecond, "the deafen never reached the voice server")
+}
+
+// A daemon whose credential store did not open answers what the person sets with why it cannot, and does
+// not stop: it has no sign-in to keep them under, and asking it for one panicked the daemon (M34's
+// /code-review).
+func TestAVoiceWithNoSignInRefusesTheSwitches(t *testing.T) {
+	v := NewVoice(VoiceOptions{Unavailable: "the daemon could not open its credential store", Log: zerolog.Nop()})
+	for name, change := range map[string]func() (ipc.VoiceStatus, error){
+		"mute":       func() (ipc.VoiceStatus, error) { return v.SetSelf(SelfMute) },
+		"local mute": func() (ipc.VoiceStatus, error) { return v.LocalMute("7", true) },
+		"streams":    func() (ipc.VoiceStatus, error) { return v.Streams(2) },
+	} {
+		_, err := change()
+		var refused *Refusal
+		require.ErrorAs(t, err, &refused, name)
+		require.Equal(t, &Refusal{Msg: "the daemon could not open its credential store", Unavailable: true}, refused, name)
+	}
+}
+
+// A change of processing while the join is under way is read by the join under the lock the change takes
+// (M34's /code-review). Staged: once the worker is started, a change is set off on a goroutine of its own
+// with nothing ordering it against the join's building, and -race reports a read outside the lock.
+func TestAProcessingChangeDuringAJoinIsNoRace(t *testing.T) {
+	fast(t)
+	srv := &orderingServer{hold: true, joined: make(chan struct{}, 1)}
+	v := standinVoice(t, "good", srv)
+	changed := make(chan struct{})
+	v.started = func() {
+		go func() {
+			defer close(changed)
+			v.Processing(ipc.VoiceJoin{EchoCancellation: true})
+		}()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = v.Join(ctx, "1", ipc.VoiceAllOn())
+	}()
+	require.NoError(t, within(5*time.Second, srv.joined))
+	require.NoError(t, within(5*time.Second, changed))
+	require.Equal(t, &ipc.VoiceJoin{EchoCancellation: true}, v.Status().Processing)
+	cancel()
+	v.Leave()
+	require.NoError(t, within(5*time.Second, done))
 }
 
 // The switches compose as people expect: a deafen mutes, an undeafen puts back the mute from before, and

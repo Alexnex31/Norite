@@ -307,10 +307,10 @@ func activate(dir int) (client, service unsafe.Pointer, event uintptr, at endpoi
 
 func (wasapi) Capture(_ context.Context, frame func([]int16)) (io.Closer, error) {
 	f := &framer{frame: frame}
-	return follow(func(heard func()) (io.Closer, error) { return captureStream(f, heard) })
+	return follow(func(heard func() bool) (io.Closer, error) { return captureStream(f, heard) })
 }
 
-func captureStream(f *framer, heard func()) (io.Closer, error) {
+func captureStream(f *framer, heard func() bool) (io.Closer, error) {
 	silent := make([]int16, SampleRate/10)
 	return open(eCapture, func(_, cc unsafe.Pointer, l *loop) {
 		data, frames, flags := new(*int16), new(uint32), new(uint32)
@@ -321,15 +321,17 @@ func captureStream(f *framer, heard func()) (io.Closer, error) {
 					uintptr(unsafe.Pointer(flags)), 0, 0) != sOK {
 					break
 				}
-				heard()
 				n := int(*frames)
-				if *flags&bufferflagsSilent != 0 || *data == nil {
+				switch {
+				case !heard():
+					// Not the stream in use yet: the one before it still feeds the call (follow.go).
+				case *flags&bufferflagsSilent != 0 || *data == nil:
 					for n > 0 {
 						c := min(n, len(silent))
 						f.write(silent[:c])
 						n -= c
 					}
-				} else {
+				default:
 					f.write(unsafe.Slice(*data, n))
 				}
 				com(cc, ccReleaseBuffer, uintptr(*frames))
@@ -340,10 +342,10 @@ func captureStream(f *framer, heard func()) (io.Closer, error) {
 
 func (wasapi) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {
 	f := newFiller(fill)
-	return follow(func(heard func()) (io.Closer, error) { return playStream(f, heard) })
+	return follow(func(heard func() bool) (io.Closer, error) { return playStream(f, heard) })
 }
 
-func playStream(f *filler, heard func()) (io.Closer, error) {
+func playStream(f *filler, heard func() bool) (io.Closer, error) {
 	return open(eRender, func(client, rc unsafe.Pointer, l *loop) {
 		total, padding := new(uint32), new(uint32)
 		if com(client, acGetBufferSize, uintptr(unsafe.Pointer(total))) != sOK {
@@ -356,11 +358,15 @@ func playStream(f *filler, heard func()) (io.Closer, error) {
 			}
 			avail := *total - *padding
 			// The engine asked: the device is there, whether or not it has room for a frame now.
-			heard()
+			use := heard()
 			if avail == 0 || com(rc, rcGetBuffer, uintptr(avail), uintptr(unsafe.Pointer(data))) != sOK {
 				continue
 			}
-			f.read(unsafe.Slice(*data, int(avail)))
+			if out := unsafe.Slice(*data, int(avail)); use {
+				f.read(out)
+			} else {
+				clear(out) // not the stream in use yet (follow.go): silence
+			}
 			com(rc, rcReleaseBuffer, uintptr(avail), 0)
 		}
 	})

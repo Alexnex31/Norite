@@ -121,6 +121,21 @@ type Coordinator struct {
 	// inGuild counts both, per guild, so a re-check of a guild with nothing here costs a map read.
 	inGuild  map[snowflake.ID]int
 	rechecks map[snowflake.ID]*recheckState
+
+	// rows orders the writes of one call's row with their events, keyed by connection (rowLock): each event
+	// carries the whole row, and two writes that committed in one order published in the other when their
+	// AfterCommit hooks raced, leaving the channel's viewers on the older (M34's /code-review). The lock is
+	// held from before the write until its event is published. Every writer of a call's row is the process
+	// holding the call, so a lock of the process's orders them all.
+	rows [64]sync.Mutex
+}
+
+// rowLock is the lock of conn's row, which runs fn: a write of it and the publish of its event.
+func (c *Coordinator) rowLock(conn snowflake.ID, fn func()) {
+	m := &c.rows[uint64(conn)%uint64(len(c.rows))]
+	m.Lock()
+	defer m.Unlock()
+	fn()
 }
 
 // call is one connection this process provisioned, or is provisioning.
@@ -400,7 +415,19 @@ func (c *Coordinator) record(
 ) (db.VoiceState, string, error) {
 	var out db.VoiceState
 	var code string
-	err := database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
+	var err error
+	c.rowLock(cl.conn, func() { err = c.recordLocked(ctx, cl, ch, rights, v, &out, &code) })
+	if errors.Is(err, errNothingWritten) {
+		err = nil
+	}
+	return out, code, err
+}
+
+func (c *Coordinator) recordLocked(
+	ctx context.Context, cl *call, ch db.Channel, rights guildauth.VoiceRights, v gatewayproto.VoiceStateUpdate,
+	out *db.VoiceState, code *string,
+) error {
+	return database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
 		q := db.New(tx)
 		if err := q.LockVoiceChannel(ctx, int64(cl.channel)); err != nil {
 			return err
@@ -410,14 +437,14 @@ func (c *Coordinator) record(
 			return err
 		}
 		if full {
-			code = gatewayproto.VoiceFull
+			*code = gatewayproto.VoiceFull
 			return nil
 		}
 		flags, err := memberFlags(ctx, q, cl.guild, []snowflake.ID{cl.user})
 		if err != nil {
 			return err
 		}
-		out, err = q.InsertVoiceState(ctx, db.InsertVoiceStateParams{
+		*out, err = q.InsertVoiceState(ctx, db.InsertVoiceStateParams{
 			ConnectionID: int64(cl.conn), GuildID: int64(cl.guild), ChannelID: int64(cl.channel),
 			UserID: int64(cl.user), SessionID: cl.session, DeviceID: cl.device,
 			Mute: flags[cl.user].mute, Deaf: flags[cl.user].deaf, Suppress: !rights.Speak,
@@ -427,17 +454,13 @@ func (c *Coordinator) record(
 			var pgErr *pgconn.PgError
 			// The channel or the guild was deleted since the join was authorized.
 			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-				code = gatewayproto.VoiceNotFound
+				*code = gatewayproto.VoiceNotFound
 				return errNothingWritten
 			}
 			return err
 		}
-		return c.queueState(ctx, out)
+		return c.queueState(ctx, *out)
 	})
-	if errors.Is(err, errNothingWritten) {
-		err = nil
-	}
-	return out, code, err
 }
 
 // errNothingWritten rolls a transaction back that decided a refusal rather than failed.
@@ -484,17 +507,19 @@ func (c *Coordinator) Update(ctx context.Context, userID snowflake.ID, sessionID
 	if cl == nil || cl.user != userID || cl.channel != channelID {
 		return
 	}
-	err = database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
-		row, err := db.New(tx).UpdateVoiceStateSelf(ctx, db.UpdateVoiceStateSelfParams{
-			ConnectionID: int64(cl.conn), SessionID: sessionID, SelfMute: *v.SelfMute, SelfDeaf: *v.SelfDeaf,
+	c.rowLock(cl.conn, func() {
+		err = database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
+			row, err := db.New(tx).UpdateVoiceStateSelf(ctx, db.UpdateVoiceStateSelfParams{
+				ConnectionID: int64(cl.conn), SessionID: sessionID, SelfMute: *v.SelfMute, SelfDeaf: *v.SelfDeaf,
+			})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			return c.queueState(ctx, row)
 		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return c.queueState(ctx, row)
 	})
 	if err != nil {
 		c.log.Error().Err(err).Msg("a call's self mute and deafen could not be recorded")
@@ -711,15 +736,18 @@ func (c *Coordinator) end(ctx context.Context, cl *call, why string) {
 	if err := c.opts.SFU.EvictConnection(ctx, cl.conn, why); err != nil && !errors.Is(err, voice.ErrClosed) {
 		c.log.Warn().Err(err).Msg("the SFU could not end a call")
 	}
-	err := database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
-		row, err := db.New(tx).DeleteVoiceState(ctx, int64(cl.conn))
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return c.queueDeleted(ctx, row)
+	var err error
+	c.rowLock(cl.conn, func() {
+		err = database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
+			row, err := db.New(tx).DeleteVoiceState(ctx, int64(cl.conn))
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			return c.queueDeleted(ctx, row)
+		})
 	})
 	if err != nil {
 		c.log.Error().Err(err).Msg("a call's voice state could not be removed")

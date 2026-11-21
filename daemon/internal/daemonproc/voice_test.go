@@ -320,9 +320,9 @@ func TestASignInNotReadYetIsPending(t *testing.T) {
 	require.ErrorIs(t, err, voiceworker.ErrSignInPending)
 }
 
-func (refusingSignaler) Update(context.Context, string, string, ipc.VoiceSelf)  {}
-func (refusingSignaler) Leave(context.Context, string)                          {}
-func (*countingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) {}
-func (*countingSignaler) Leave(context.Context, string)                         {}
-func (holdingSignaler) Update(context.Context, string, string, ipc.VoiceSelf)   {}
-func (holdingSignaler) Leave(context.Context, string)                           {}
+func (refusingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (refusingSignaler) Leave(context.Context, string)                                {}
+func (*countingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (*countingSignaler) Leave(context.Context, string)                               {}
+func (holdingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error   { return nil }
+func (holdingSignaler) Leave(context.Context, string)                                 {}

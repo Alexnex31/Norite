@@ -1907,11 +1907,13 @@ And on the client config and the daemon's own requests, from M21:
   status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
   not be read, a check is already under way, or the instance has not been heard from. It takes no body and
   carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
-  instance (ledger). Two exceptions, each sent only after a request that says nothing has shown the daemon
-  knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), and the voice join's
-  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly. `relay.Target` refuses the prefix, and a test
-  holds `openapi.yaml` to never using it. The CLI side is `daemonclient.Local`, `LocalWith` for a body,
-  and `LocalRead`.
+  instance (ledger). Five exceptions, each sent only after a request that says nothing has shown the daemon
+  knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), the voice join's
+  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly, and since M34 the user id in
+  `/@daemon/voice/local-mute/{user}` and `local-unmute/{user}`, the number in `/@daemon/voice/streams/{n}`
+  and the body of `/@daemon/voice/processing`, which `norite voice` sends only after `GET /@daemon/voice`.
+  `relay.Target` refuses the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is
+  `daemonclient.Local`, `LocalWith` for a body, and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
   which nothing outside the daemon module can import. A write puts back the fields it did not understand.
   A step that must follow the state and not be interleaved with the next update goes in `Update`'s `then`.
@@ -2521,28 +2523,36 @@ And on the voice control surface, from M34:
   forgotten when the sign-in ends; a different sign-in starts from nothing. Never on disk until M36 decides
   what a rejoin carries.
 - **`push` sends the worker and the voice server only what changed**, ordered by `call.sendMu`, and nothing
-  before the worker has its answer (`call.answered`), which carries the instance's raw rights. The worker
-  applies the instance's rights less the person's switches (`effective`). A new switch is a field there
-  and a line in `push`.
+  before the worker has its answer (`call.answered`), which carries the instance's raw rights. An update the
+  gateway could not send is sent again every `selfRetryEvery` while the call lasts. The worker sends the SFU
+  no subscribe before its ready, which follows the hello the SFU requires first. The worker applies the
+  instance's rights less the person's switches (`effective`). A new switch is a field there and a line in
+  `push`.
 - **Op 4's update is spaced 250 ms per session** (`updateEvery`), and one waiting is replaced by a newer one
   only when it is the last request queued, so it never folds across a join or a leave. Anything new a
-  session can make the instance fan out gets the same treatment.
+  session can make the instance fan out gets the same treatment. Every write of a call's row and its event
+  run under the coordinator's lock for that connection (`rowLock`), since each event is the whole row and two
+  commits otherwise published in either order.
 - **A local mute is the SFU's `drop` and a skip in the mix**, of every sender any slot map has named
   (`control.seen`, bounded), since packets of a sender already buffered play after the SFU takes it off the
   map. It is never a report, which is `norite report user`, a separate act (architecture.md §6).
-- **A user id the daemon keeps is canonical and nonzero** (`ipc.IsUserID`): compared as text, `007` is not
-  user 7. The CLI refuses the rest as a usage error before attaching.
+- **A user id the daemon keeps is canonical, nonzero and a signed 64 bits** (`ipc.IsUserID`): compared as
+  text, `007` is not user 7, and the SFU refuses a whole subscribe naming an id past a snowflake. The CLI
+  refuses the rest as a usage error before attaching.
 - **What the worker runs is the worker's to say** (`OpDSP`, `VoiceStatus.dsp`); `processing` is what was
-  asked. A change of processing answers once the worker reports it running or failed, or after
+  asked. The worker takes up changes `reconfigureFrames` apart, the newest each time, since each makes a
+  chain and a report. A change of processing answers once the worker reports it running or failed, or after
   `processingWithin`, and the text says what was asked when it has not taken.
 - **The worker forwards who speaks at most every `speakingEvery`** (200 ms), the newest list, since the
   pipe cuts it off past 50 frames a second.
 - **A reported user is routed by a voice channel** (`reports.channel_id`): the filer sees it, the target is
   a member of its guild, or 404. One open report per reporter per target per guild.
 - **A stream follows the default device two ways** (`audio/follow.go`): one silent for `followAfter` is
-  opened again, and one whose OS names another default (`mover`) is opened at once. Each OS answers
-  `Moved` on its own terms, outside the follower's lock, and false when it cannot tell. Linux does
-  neither, since PulseAudio moves its streams.
+  opened again, and one whose OS names another default (`mover`) is opened at once, the old one closed only
+  once the new one is open, so a default that will not open leaves the call where it was. A stream feeds the
+  call only while `heard` says it is the one in use, so two never do at once. Each OS answers `Moved` on its
+  own terms, outside the follower's lock, and false when it cannot tell. Linux does neither, since
+  PulseAudio moves its streams.
 - **Testing:** `standin_test.go` echoes `SUBSCRIBE` as a failed DSP whose reason names the drop and the
   cap, and `PROCESSING` as running after 300 ms. `dspsilent` and `dspfails` play a worker that never
   reports, and one whose processing failed. The stand-in refuses `RIGHTS`, `SUBSCRIBE` and `PROCESSING`

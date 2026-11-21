@@ -298,14 +298,14 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 	require.False(t, st.EndedInCall, "a join that failed is not a call that ended")
 }
 
-func (*refusingServer) Update(context.Context, string, string, ipc.VoiceSelf)  {}
-func (*refusingServer) Leave(context.Context, string)                          {}
-func (*blockingServer) Update(context.Context, string, string, ipc.VoiceSelf)  {}
-func (*blockingServer) Leave(context.Context, string)                          {}
-func (*recordingServer) Update(context.Context, string, string, ipc.VoiceSelf) {}
-func (*recordingServer) Leave(context.Context, string)                         {}
-func (routelessServer) Update(context.Context, string, string, ipc.VoiceSelf)  {}
-func (routelessServer) Leave(context.Context, string)                          {}
+func (*refusingServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (*refusingServer) Leave(context.Context, string)                                {}
+func (*blockingServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (*blockingServer) Leave(context.Context, string)                                {}
+func (*recordingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (*recordingServer) Leave(context.Context, string)                               {}
+func (routelessServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (routelessServer) Leave(context.Context, string)                                {}
 
 // orderingServer records what it is asked, in order. A join waits for its context when hold is set; the
 // first leave waits for release when slowLeave is set; every join is refused.
@@ -346,7 +346,7 @@ func (s *orderingServer) Join(ctx context.Context, _, _, _ string, _ ipc.VoiceSe
 	return Answer{}, errors.New("the voice server refused: 409 room full")
 }
 
-func (s *orderingServer) Update(context.Context, string, string, ipc.VoiceSelf) {}
+func (s *orderingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
 func (s *orderingServer) Leave(context.Context, string) {
 	s.mu.Lock()
 	slow := s.slowLeave

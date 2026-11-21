@@ -201,9 +201,10 @@ func refusalWords(code string) string {
 }
 
 // Update sends op 4's update for the call in channel (M34). The instance answers it with the channel's
-// VOICE_STATE_UPDATE, to everybody and not only to this session, so nothing here waits.
-func (g *Gateway) Update(ctx context.Context, _ string, channel string, self ipc.VoiceSelf) {
-	_ = g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{ChannelID: &channel, SelfMute: &self.Mute,
+// VOICE_STATE_UPDATE, to everybody and not only to this session, so nothing here waits. A connection that
+// is not there, as while the gateway reconnects and resumes, is the update not sent.
+func (g *Gateway) Update(ctx context.Context, _ string, channel string, self ipc.VoiceSelf) error {
+	return g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{ChannelID: &channel, SelfMute: &self.Mute,
 		SelfDeaf: &self.Deaf})
 }
 

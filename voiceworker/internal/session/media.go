@@ -111,6 +111,10 @@ type media struct {
 	// which the speakers read (M34: a PROCESSING makes a new chain, and never brings back one that failed).
 	settings dsp.Settings
 	echo     atomic.Bool
+	// remadeAt is the frame the chain was last made again at for a change, once remade is set: changes are
+	// taken up reconfigureFrames apart.
+	remadeAt uint64
+	remade   bool
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
 	// queue lost before send took them.
 	skipped, dropped atomic.Int64
@@ -512,6 +516,9 @@ func (m *media) dropChain(why string) {
 	m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
 }
 
+// reconfigureFrames spaces the changes of processing a call takes up: 200 ms, five a second at most.
+const reconfigureFrames = 10
+
 // reconfigure makes the chain again when the person has changed which stages process the microphone
 // (M34). The new chain starts from nothing, its echo canceller converging again from the stamp, as a call's
 // first does. A chain that failed stays off: the input that failed it is a stranger's to send again.
@@ -520,6 +527,13 @@ func (m *media) reconfigure(stamp uint64) {
 	if want == m.settings {
 		return
 	}
+	// Spaced, the newest change taken up: each makes a chain and reports it, and changes sent faster than
+	// frames, from several attach clients at once, rebuilt the chain at every frame and put the worker
+	// past the daemon's fifty frames a second with their reports (M34's /code-review).
+	if m.remade && stamp-m.remadeAt < reconfigureFrames {
+		return
+	}
+	m.remade, m.remadeAt = true, stamp
 	m.settings = want
 	m.echo.Store(want.EchoCancellation)
 	if m.chain == nil {
