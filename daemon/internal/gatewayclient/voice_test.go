@@ -43,7 +43,8 @@ func TestOp4IsSentOnTheEstablishedConnectionAndRefusedWithoutOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	channel, video := "42", false
-	join := gatewayproto.VoiceStateUpdate{Nonce: "n1", ChannelID: &channel, Offer: "v=0\r\n", SupportsVideo: &video}
+	join := gatewayproto.VoiceStateUpdate{Nonce: "n1", ChannelID: &channel, Offer: "v=0\r\n", SupportsVideo: &video,
+		SelfMute: &video, SelfDeaf: &video}
 
 	require.ErrorIs(t, h.client.SendVoice(ctx, join), ErrNotConnected, "before any connection")
 	assert.False(t, h.client.Connected())
@@ -88,7 +89,8 @@ func TestTheRepliesToOp4NeverReachTheSink(t *testing.T) {
 	c.dispatch(gatewayproto.EventVoiceJoinRefused, map[string]any{"nonce": "n2", "channel_id": "2", "code": "full"})
 	c.dispatch(gatewayproto.EventVoiceStateUpdate, map[string]any{
 		"connection_id": "3", "guild_id": "1", "channel_id": "2", "user_id": "9", "mute": true, "deaf": false,
-		"suppress": false, "supports_video": false, "joined_at": "2026-01-01T00:00:00Z",
+		"suppress": false, "self_mute": false, "self_deaf": false, "supports_video": false,
+		"joined_at": "2026-01-01T00:00:00Z",
 	})
 	c.dispatch(gatewayproto.EventVoiceStateDelete, map[string]any{
 		"connection_id": "3", "guild_id": "1", "channel_id": "2", "user_id": "9",

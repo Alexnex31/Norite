@@ -1529,7 +1529,7 @@
     },
     "VoiceStateUpdate": {
       "type": "object",
-      "description": "op 4 (M33): join a voice channel with the voice-worker's SDP offer, or leave the call this session holds with channel_id null. One call per session: a join replaces the session's call, and the call of any older session of the same device. The reply to a join is VOICE_SERVER_UPDATE or VOICE_JOIN_REFUSED, to this session alone; a leave has none. A refused join never closes the connection.",
+      "description": "op 4 (M33): join a voice channel with the voice-worker's SDP offer, change what the caller has set on themselves in the call this session holds (M34), or leave that call with channel_id null. One call per session: a join replaces the session's call, and the call of any older session of the same device. The reply to a join is VOICE_SERVER_UPDATE or VOICE_JOIN_REFUSED, to this session alone; an update and a leave have none, an update being answered by the channel's VOICE_STATE_UPDATE. A refused join never closes the connection.",
       "required": [
         "op",
         "d",
@@ -1550,7 +1550,9 @@
                 "nonce",
                 "channel_id",
                 "offer",
-                "supports_video"
+                "supports_video",
+                "self_mute",
+                "self_deaf"
               ],
               "additionalProperties": false,
               "properties": {
@@ -1571,6 +1573,37 @@
                 "supports_video": {
                   "type": "boolean",
                   "description": "Whether the client can take video (M105). Terminal clients send false."
+                },
+                "self_mute": {
+                  "type": "boolean",
+                  "description": "The caller has muted themselves (M34). The client applies it, as it does a server mute."
+                },
+                "self_deaf": {
+                  "type": "boolean",
+                  "description": "The caller has deafened themselves (M34)."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Update (M34): what the caller has set on themselves, in the call this session holds in channel_id. Ignored when the session holds no call there, which is a call that ended as the frame was sent. A session's updates are applied newest first and a few a second at most, so toggling faster loses nothing but the intermediate states.",
+              "required": [
+                "channel_id",
+                "self_mute",
+                "self_deaf"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "channel_id": {
+                  "$ref": "#/$defs/Snowflake"
+                },
+                "self_mute": {
+                  "type": "boolean",
+                  "description": "The caller has muted themselves (M34). The client applies it, as it does a server mute."
+                },
+                "self_deaf": {
+                  "type": "boolean",
+                  "description": "The caller has deafened themselves (M34)."
                 }
               }
             },
@@ -1882,7 +1915,7 @@
     },
     "VoiceState": {
       "type": "object",
-      "description": "Generated from contracts/openapi.yaml#/components/schemas/VoiceState; a test holds the two equal. One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server.",
+      "description": "Generated from contracts/openapi.yaml#/components/schemas/VoiceState; a test holds the two equal. One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server. `self_mute` and `self_deaf` are what the caller has set on themselves (M34), which their client applies the same way.",
       "required": [
         "connection_id",
         "guild_id",
@@ -1891,6 +1924,8 @@
         "mute",
         "deaf",
         "suppress",
+        "self_mute",
+        "self_deaf",
         "supports_video",
         "joined_at"
       ],
@@ -1919,6 +1954,14 @@
         "suppress": {
           "type": "boolean",
           "description": "The account lacks `SPEAK` in this channel."
+        },
+        "self_mute": {
+          "type": "boolean",
+          "description": "The caller has muted themselves."
+        },
+        "self_deaf": {
+          "type": "boolean",
+          "description": "The caller has deafened themselves."
         },
         "supports_video": {
           "type": "boolean",

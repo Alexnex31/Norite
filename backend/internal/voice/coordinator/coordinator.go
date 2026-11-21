@@ -314,7 +314,7 @@ func (c *Coordinator) Join(
 		return refuse(code)
 	}
 
-	state, code, err := c.record(ctx, cl, row, mine, *v.SupportsVideo)
+	state, code, err := c.record(ctx, cl, row, mine, v)
 	if err != nil || code != "" {
 		_ = c.opts.SFU.EvictConnection(context.WithoutCancel(ctx), connID, "")
 		if err != nil {
@@ -396,7 +396,7 @@ func (c *Coordinator) channelFull(ctx context.Context, q *db.Queries, row db.Cha
 // record writes the call's row and tells the channel, under the channel's lock so user_limit holds against
 // a join racing this one. A code is a refusal decided here: the channel filled, or went.
 func (c *Coordinator) record(
-	ctx context.Context, cl *call, ch db.Channel, rights guildauth.VoiceRights, supportsVideo bool,
+	ctx context.Context, cl *call, ch db.Channel, rights guildauth.VoiceRights, v gatewayproto.VoiceStateUpdate,
 ) (db.VoiceState, string, error) {
 	var out db.VoiceState
 	var code string
@@ -421,7 +421,7 @@ func (c *Coordinator) record(
 			ConnectionID: int64(cl.conn), GuildID: int64(cl.guild), ChannelID: int64(cl.channel),
 			UserID: int64(cl.user), SessionID: cl.session, DeviceID: cl.device,
 			Mute: flags[cl.user].mute, Deaf: flags[cl.user].deaf, Suppress: !rights.Speak,
-			SupportsVideo: supportsVideo,
+			SupportsVideo: *v.SupportsVideo, SelfMute: *v.SelfMute, SelfDeaf: *v.SelfDeaf,
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -466,6 +466,38 @@ func memberFlags(ctx context.Context, q *db.Queries, guildID snowflake.ID, users
 func (c *Coordinator) Leave(ctx context.Context, userID snowflake.ID, sessionID string) {
 	if cl := c.take(sessionID, canceledByLeave); cl != nil {
 		c.end(ctx, cl, "")
+	}
+}
+
+// Update records what the caller has set on themselves in the session's call (M34), and tells the channel
+// when it changed. A frame naming another channel than the call's, or arriving when the session holds no
+// call, is ignored: it was sent as that call ended, and the leave or the end that came first has said so.
+// The row is keyed by the session as well as the connection, so an update reaches no call but its own.
+func (c *Coordinator) Update(ctx context.Context, userID snowflake.ID, sessionID string, v gatewayproto.VoiceStateUpdate) {
+	channelID, err := snowflake.Parse(*v.ChannelID)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	cl := c.calls[sessionID]
+	c.mu.Unlock()
+	if cl == nil || cl.user != userID || cl.channel != channelID {
+		return
+	}
+	err = database.RunInTx(ctx, c.opts.Pool, func(ctx context.Context, tx pgx.Tx) error {
+		row, err := db.New(tx).UpdateVoiceStateSelf(ctx, db.UpdateVoiceStateSelfParams{
+			ConnectionID: int64(cl.conn), SessionID: sessionID, SelfMute: *v.SelfMute, SelfDeaf: *v.SelfDeaf,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return c.queueState(ctx, row)
+	})
+	if err != nil {
+		c.log.Error().Err(err).Msg("a call's self mute and deafen could not be recorded")
 	}
 }
 

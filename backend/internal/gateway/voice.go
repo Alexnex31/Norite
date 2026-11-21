@@ -17,6 +17,8 @@ import (
 type Voice interface {
 	// Join answers a join with VOICE_SERVER_UPDATE or VOICE_JOIN_REFUSED, and the payload.
 	Join(ctx context.Context, userID snowflake.ID, sessionID, deviceID string, v gatewayproto.VoiceStateUpdate) (string, any)
+	// Update records what the caller has set on themselves in the session's call (M34).
+	Update(ctx context.Context, userID snowflake.ID, sessionID string, v gatewayproto.VoiceStateUpdate)
 	// Leave ends the session's call.
 	Leave(ctx context.Context, userID snowflake.ID, sessionID string)
 	// Ended ends the call of a dropped session. It must not block: it is called under the session's lock.
@@ -31,10 +33,16 @@ const voiceWithin = 20 * time.Second
 // rather than queuing it, so what waits is leaves, and a client sending more than this is closed.
 const voiceQueue = 8
 
+// updateEvery spaces a session's updates (M34). Each is a write and an event to everyone who can see the
+// channel, so a client toggling as fast as it can send would otherwise be a broadcast it controls; a
+// person's toggles are seconds apart. An update waiting for its turn is replaced by a newer one, so what is
+// lost is the states between, never the last.
+const updateEvery = 250 * time.Millisecond
+
 // voiceOp is one request in a session's queue.
 type voiceOp struct {
-	join  bool
-	frame gatewayproto.VoiceStateUpdate
+	join, update bool
+	frame        gatewayproto.VoiceStateUpdate
 }
 
 // voice takes op 4 for an identified connection, reporting whether the connection stays open.
@@ -44,13 +52,22 @@ type voiceOp struct {
 // read loop never waits on one.
 func (c *conn) voice(frame gatewayproto.VoiceStateUpdate) bool {
 	s := c.session()
-	if !frame.Leave() && c.srv.opts.Voice == nil {
+	if !frame.Leave() && !frame.Update() && c.srv.opts.Voice == nil {
 		s.reply(gatewayproto.EventVoiceJoinRefused, gatewayproto.VoiceJoinRefused{
 			Nonce: frame.Nonce, ChannelID: *frame.ChannelID, Code: gatewayproto.VoiceDisabled,
 		})
 		return true
 	}
 	if c.srv.opts.Voice == nil {
+		return true
+	}
+	if frame.Update() {
+		// An update has no reply, so a full queue is the only thing to say, and coalescing keeps updates
+		// from filling it.
+		if s.queueVoice(voiceOp{update: true, frame: frame}) == voiceFlooded {
+			c.closeWith(gatewayproto.CloseRateLimited, "too many voice requests")
+			return false
+		}
 		return true
 	}
 	switch s.queueVoice(voiceOp{join: !frame.Leave(), frame: frame}) {
@@ -84,6 +101,12 @@ func (s *session) queueVoice(op voiceOp) voiceQueueResult {
 	if op.join && s.voiceJoining {
 		return voiceBusy
 	}
+	// Newest wins over an update still waiting, when it is the last request queued: one behind a join or a
+	// leave is for whatever that request leaves the session in, and is queued after it.
+	if n := len(s.voiceOps); op.update && n > 0 && s.voiceOps[n-1].update {
+		s.voiceOps[n-1] = op
+		return voiceQueued
+	}
 	if len(s.voiceOps) >= voiceQueue {
 		return voiceFlooded
 	}
@@ -108,7 +131,16 @@ func (s *session) runVoice() {
 			return
 		}
 		op := s.voiceOps[0]
+		// An update waits for its turn in the queue, where a newer one can still replace it.
+		if wait := time.Until(s.voiceUpdated.Add(updateEvery)); op.update && wait > 0 {
+			s.mu.Unlock()
+			time.Sleep(wait)
+			continue
+		}
 		s.voiceOps = s.voiceOps[1:]
+		if op.update {
+			s.voiceUpdated = time.Now()
+		}
 		s.mu.Unlock()
 
 		ctx, cancel := context.WithTimeout(context.Background(), voiceWithin)
@@ -125,6 +157,8 @@ func (s *session) runVoice() {
 			if ended {
 				s.srv.opts.Voice.Ended(s.userID, s.id)
 			}
+		} else if op.update {
+			s.srv.opts.Voice.Update(ctx, s.userID, s.id, op.frame)
 		} else {
 			s.srv.opts.Voice.Leave(ctx, s.userID, s.id)
 		}

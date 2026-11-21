@@ -241,6 +241,7 @@ type Report struct {
 	ResolvedBy     *int64
 	CreatedAt      pgtype.Timestamptz
 	ResolvedAt     pgtype.Timestamptz
+	ChannelID      *int64
 }
 
 type Role struct {
@@ -313,4 +314,6 @@ type VoiceState struct {
 	Suppress      bool
 	SupportsVideo bool
 	CreatedAt     pgtype.Timestamptz
+	SelfMute      bool
+	SelfDeaf      bool
 }

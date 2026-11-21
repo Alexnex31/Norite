@@ -1,0 +1,1 @@
+ALTER TABLE voice_states DROP COLUMN IF EXISTS self_deaf, DROP COLUMN IF EXISTS self_mute;

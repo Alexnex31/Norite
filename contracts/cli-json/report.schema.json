@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://norite.chat/contracts/cli-json/report.schema.json",
   "title": "norite report --json",
-  "description": "The machine-readable output of `norite report file`, `list`, `show`, `resolve` and `dismiss`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
+  "description": "The machine-readable output of `norite report file`, `user`, `list`, `show`, `resolve` and `dismiss`.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. The shapes are the CLI's, re-declared from the instance's rather than passed through. Every nullable field is present and null, every list is [] rather than null, and every string an instance sent is exactly as sent, with what a terminal would act on escaped as \\uXXXX.",
   "anyOf": [
     {
       "$ref": "#/$defs/report",
-      "title": "file, resolve, dismiss"
+      "title": "file, user, resolve, dismiss"
     },
     {
       "$ref": "#/$defs/triagePage",
@@ -26,6 +26,7 @@
         "guild_id",
         "target_type",
         "target_id",
+        "channel_id",
         "reason",
         "detail",
         "status",
@@ -60,6 +61,14 @@
           "type": "string",
           "pattern": "^[0-9]+$",
           "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The voice channel a report against a user was filed from (M34); null for a message, and once that channel is deleted."
         },
         "reason": {
           "enum": [
@@ -117,6 +126,7 @@
         "guild_id",
         "target_type",
         "target_id",
+        "channel_id",
         "reason",
         "detail",
         "status",
@@ -153,6 +163,14 @@
           "type": "string",
           "pattern": "^[0-9]+$",
           "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The voice channel a report against a user was filed from (M34); null for a message, and once that channel is deleted."
         },
         "reason": {
           "enum": [
@@ -249,6 +267,7 @@
         "guild_id",
         "target_type",
         "target_id",
+        "channel_id",
         "reason",
         "detail",
         "status",
@@ -288,6 +307,14 @@
           "type": "string",
           "pattern": "^[0-9]+$",
           "description": "A Snowflake ID, as a decimal string."
+        },
+        "channel_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+$",
+          "description": "The voice channel a report against a user was filed from (M34); null for a message, and once that channel is deleted."
         },
         "reason": {
           "enum": [

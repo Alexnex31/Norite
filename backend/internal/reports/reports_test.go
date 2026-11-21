@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/internal/auth"
@@ -213,11 +214,11 @@ func TestADeletedMessageIsStillReportable(t *testing.T) {
 //
 // A target type nothing routes would be a report filed into a queue that never shows it, which is M14's
 // "reads as evidence of absence" pointed at a write.
-func TestOnlyAMessageCanBeReportedToday(t *testing.T) {
+func TestOnlyAMessageAndAUserCanBeReportedToday(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 
-	for _, kind := range []string{"whisper", "channel", "user"} {
+	for _, kind := range []string{"whisper", "channel"} {
 		_, err := f.svc.File(f.ctx, userActor(f.member), FileInput{
 			TargetType: kind, TargetID: f.messageID, ReasonCategory: "spam",
 		})
@@ -754,4 +755,132 @@ func TestAnInstanceAdminsCloseIsRecordedOnlyInTheGuildLog(t *testing.T) {
 			"with the guild, so today their action leaves no durable instance-level record. Wire it up "+
 			"and replace this tripwire with the assertion that it happened. Every guild mutation since "+
 			"M12 has the same shape; this is only the surface where rule 14 names the action.")
+}
+
+// --- a user, from a voice channel (M34) ---
+
+// voice adds a voice channel to the fixture's guild, which @everyone can see.
+func (f *fixture) voice(t *testing.T) snowflake.ID {
+	t.Helper()
+	id := f.next(t)
+	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	           VALUES ($1,$2,'lounge',2,1,now(),now())`, int64(id), int64(f.guildID))
+	return id
+}
+
+func (f *fixture) fileUser(actor, target, channel snowflake.ID) (Report, error) {
+	return f.svc.File(f.ctx, userActor(actor), FileInput{
+		TargetType: "user", TargetID: target, ChannelID: &channel, ReasonCategory: "harassment",
+	})
+}
+
+// A participant is reported from the voice channel, which routes the report to its guild, and the queue
+// shows it with no content and as an ordinary target.
+func TestAUserIsReportedFromAVoiceChannel(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	lounge := f.voice(t)
+
+	r, err := f.fileUser(f.member, f.owner, lounge)
+	require.NoError(t, err)
+	require.NotNil(t, r.GuildID)
+	assert.Equal(t, f.guildID, *r.GuildID)
+	require.NotNil(t, r.ChannelID)
+	assert.Equal(t, lounge, *r.ChannelID)
+	assert.Equal(t, "user", r.TargetType)
+
+	page, err := f.svc.List(f.ctx, userActor(f.mod), f.guildID, ListInput{})
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.NotNil(t, page[0].TargetIsE2E, "a user who exists resolves")
+	assert.False(t, *page[0].TargetIsE2E)
+
+	detail, err := f.svc.Get(f.ctx, userActor(f.mod), f.guildID, r.ID)
+	require.NoError(t, err)
+	assert.Nil(t, detail.TargetContent)
+	assert.Nil(t, detail.TargetAuthorID)
+
+	// A message's report names no channel of its own.
+	m := f.file(t, f.member, f.messageID)
+	assert.Nil(t, m.ChannelID)
+}
+
+// What a report against a user is refused for, each with the answer that discloses nothing more than the
+// caller can already see.
+func TestAReportAgainstAUserIsRefusedWithoutWhatItNeeds(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	lounge := f.voice(t)
+
+	_, err := f.svc.File(f.ctx, userActor(f.member), FileInput{
+		TargetType: "user", TargetID: f.owner, ReasonCategory: "spam",
+	})
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "no channel")
+
+	_, err = f.svc.File(f.ctx, userActor(f.member), FileInput{
+		TargetType: "message", TargetID: f.messageID, ChannelID: &lounge, ReasonCategory: "spam",
+	})
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "a message with a channel")
+
+	_, err = f.fileUser(f.member, f.member, lounge)
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "oneself")
+
+	_, err = f.fileUser(f.member, f.owner, f.channelID)
+	require.ErrorIs(t, err, httpx.ErrBadRequest, "a text channel")
+
+	_, err = f.fileUser(f.member, f.stranger, lounge)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "somebody who is not a member")
+
+	_, err = f.fileUser(f.member, f.owner, f.next(t))
+	require.ErrorIs(t, err, httpx.ErrNotFound, "a channel that does not exist")
+
+	// A channel the filer cannot see is the same 404, and is not described as voice or text.
+	hidden := f.voice(t)
+	f.exec(t, `INSERT INTO permission_overwrites (channel_id, target_type, target_id, allow, deny)
+	           VALUES ($1,0,$2,0,$3)`, int64(hidden), int64(f.everyoneRoleID), roles.PermViewChannel.Int64())
+	_, err = f.fileUser(f.member, f.owner, hidden)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "a channel the filer cannot see")
+	_, err = f.fileUser(f.stranger, f.owner, lounge)
+	require.ErrorIs(t, err, httpx.ErrNotFound, "a filer who is not a member")
+}
+
+// One open report per target per guild: the same person reported twice in one guild is a duplicate, and
+// reported in a second guild, to its own moderators, is not.
+func TestAUserReportedInTwoGuildsIsTwoReports(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	lounge := f.voice(t)
+	_, err := f.fileUser(f.member, f.owner, lounge)
+	require.NoError(t, err)
+	_, err = f.fileUser(f.member, f.owner, f.voice(t))
+	require.ErrorIs(t, err, httpx.ErrConflict, "the same guild, from another of its channels")
+
+	other, otherLounge, otherEveryone := f.next(t), f.next(t), f.next(t)
+	f.exec(t, `INSERT INTO guilds (id, name, owner_id, created_at, updated_at) VALUES ($1,'h',$2,now(),now())`,
+		int64(other), int64(f.owner))
+	f.exec(t, `INSERT INTO channels (id, guild_id, name, type, position, created_at, updated_at)
+	           VALUES ($1,$2,'lounge',2,0,now(),now())`, int64(otherLounge), int64(other))
+	f.exec(t, `INSERT INTO roles (id, guild_id, name, permissions, position, is_default, created_at, updated_at)
+	           VALUES ($1,$2,'@everyone',$3,0,true,now(),now())`, int64(otherEveryone), int64(other),
+		roles.PermViewChannel.Int64())
+	for _, u := range []snowflake.ID{f.owner, f.member} {
+		f.exec(t, `INSERT INTO guild_members (guild_id, user_id, joined_at) VALUES ($1,$2,now())`,
+			int64(other), int64(u))
+	}
+	r, err := f.fileUser(f.member, f.owner, otherLounge)
+	require.NoError(t, err)
+	assert.Equal(t, other, *r.GuildID)
+}
+
+// A deleted voice channel keeps its reports, which its guild still routes, with no channel left to name.
+func TestADeletedVoiceChannelKeepsItsReports(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	lounge := f.voice(t)
+	r, err := f.fileUser(f.member, f.owner, lounge)
+	require.NoError(t, err)
+	f.exec(t, `DELETE FROM channels WHERE id = $1`, int64(lounge))
+	detail, err := f.svc.Get(f.ctx, userActor(f.mod), f.guildID, r.ID)
+	require.NoError(t, err)
+	assert.Nil(t, detail.ChannelID)
 }

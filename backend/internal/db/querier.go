@@ -1605,6 +1605,10 @@ type Querier interface {
 	UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error)
 	// The rights the re-check found, when they changed.
 	UpdateVoiceStateRights(ctx context.Context, arg UpdateVoiceStateRightsParams) (VoiceState, error)
+	// What the caller set on themselves (M34). Keyed by the connection and its session both, so an update can
+	// only reach the call its own session holds. No row when that call has ended, or when nothing changed, so
+	// the channel is told only of a change.
+	UpdateVoiceStateSelf(ctx context.Context, arg UpdateVoiceStateSelfParams) (VoiceState, error)
 	// Write an overwrite, creating or replacing.
 	//
 	// PUT rather than POST/PATCH on the wire, so the same statement has to serve both — ON CONFLICT on the

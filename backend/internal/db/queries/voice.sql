@@ -1,9 +1,10 @@
 -- name: InsertVoiceState :one
 -- A connection the SFU has answered, as the channel is told about it.
 INSERT INTO voice_states (
-  connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video
+  connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video,
+  self_mute, self_deaf
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
 RETURNING *;
 
@@ -45,6 +46,14 @@ SELECT pg_advisory_xact_lock(1313033477, (sqlc.arg(channel_id)::bigint & 2147483
 -- name: UpdateVoiceStateRights :one
 -- The rights the re-check found, when they changed.
 UPDATE voice_states SET mute = $2, deaf = $3, suppress = $4 WHERE connection_id = $1 RETURNING *;
+
+-- name: UpdateVoiceStateSelf :one
+-- What the caller set on themselves (M34). Keyed by the connection and its session both, so an update can
+-- only reach the call its own session holds. No row when that call has ended, or when nothing changed, so
+-- the channel is told only of a change.
+UPDATE voice_states SET self_mute = $3, self_deaf = $4
+WHERE connection_id = $1 AND session_id = $2 AND (self_mute <> $3 OR self_deaf <> $4)
+RETURNING *;
 
 -- name: DeleteAllVoiceStates :exec
 -- At start, on a single process: every call it held ended with the process that held it, and no SFU

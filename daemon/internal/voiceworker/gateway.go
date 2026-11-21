@@ -123,9 +123,9 @@ func (g *Gateway) Join(ctx context.Context, account, channel, offer string) (Ans
 		g.mu.Unlock()
 	}()
 
-	video := false
+	no := false
 	if err := g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{
-		Nonce: nonce, ChannelID: &channel, Offer: offer, SupportsVideo: &video,
+		Nonce: nonce, ChannelID: &channel, Offer: offer, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no,
 	}); err != nil {
 		return Answer{}, fmt.Errorf("the join could not be sent to the instance: %w", err)
 	}

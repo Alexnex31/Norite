@@ -79,13 +79,20 @@ func errUnknownStoredValue(column string, value int16) error {
 
 // FileInput is a request to report something.
 type FileInput struct {
-	TargetType     string
-	TargetID       snowflake.ID
+	TargetType string
+	TargetID   snowflake.ID
+	// ChannelID is the voice channel a report against a user is filed from (M34), and names nothing for a
+	// message.
+	ChannelID      *snowflake.ID
 	ReasonCategory string
 	Detail         *string
 }
 
-// File records a report against a message.
+// ChannelGuildVoice is channels.type for a voice channel. guilds.ChannelGuildVoice is the same value, and
+// cmd/server's TestTheVoiceChannelTypeAgreesAcrossPackages holds the two equal, as for the coordinator's.
+const ChannelGuildVoice int16 = 2
+
+// File records a report against a message, or since M34 against a user in a voice channel.
 //
 // # What a filer must already be able to see
 //
@@ -121,11 +128,21 @@ func (s *Service) File(ctx context.Context, actor auth.Actor, in FileInput) (Rep
 	if !ok {
 		return Report{}, httpx.Errorf(httpx.ErrBadRequest, "target_type is not a kind of thing that can be reported")
 	}
-	if targetType != TargetMessage {
+	if targetType != TargetMessage && targetType != TargetUser {
 		// Named distinctly from the unknown case: the type exists in the vocabulary and is not accepted
 		// yet, which is a different thing for a client to learn than a typo.
 		return Report{}, httpx.Errorf(httpx.ErrBadRequest,
 			"this instance does not yet accept reports against a %s", in.TargetType)
+	}
+	switch {
+	case targetType == TargetUser && in.ChannelID == nil:
+		return Report{}, httpx.Errorf(httpx.ErrBadRequest,
+			"a report against a user names the voice channel it is filed from, as channel_id")
+	case targetType == TargetMessage && in.ChannelID != nil:
+		return Report{}, httpx.Errorf(httpx.ErrBadRequest,
+			"channel_id is for a report against a user; a message's channel is its own")
+	case targetType == TargetUser && in.TargetID == actor.UserID:
+		return Report{}, httpx.Errorf(httpx.ErrBadRequest, "you cannot report yourself")
 	}
 	if !knownReasonCategory(in.ReasonCategory) {
 		return Report{}, httpx.Errorf(httpx.ErrBadRequest, "reason_category is not a category this instance accepts")
@@ -137,6 +154,10 @@ func (s *Service) File(ctx context.Context, actor auth.Actor, in FileInput) (Rep
 	id, err := s.ids.Next()
 	if err != nil {
 		return Report{}, fmt.Errorf("reports: mint report id: %w", err)
+	}
+
+	if targetType == TargetUser {
+		return s.fileUser(ctx, actor, id, in)
 	}
 
 	var out Report
@@ -183,6 +204,65 @@ func (s *Service) File(ctx context.Context, actor auth.Actor, in FileInput) (Rep
 			return fmt.Errorf("reports: create report: %w", err)
 		}
 
+		out, err = reportFromRow(row)
+		return err
+	})
+	return out, err
+}
+
+// fileUser records a report against a user, filed from a voice channel (M34): somebody in a call, whom a
+// call leaves no message to point at.
+//
+// # What a filer must already be able to see
+//
+// The channel, as [Service.File] asks of a message's: AuthorizeChannelUnlocked at a need of zero, so a
+// channel the filer cannot see answers the channel filter's 404. The target must be a member of the
+// channel's guild, or the answer is the same 404: whether an id names an account is not something a
+// report should disclose, and a guild's moderators can do nothing about somebody who is not in it.
+//
+// **Not that the target is in the call now.** A report is filed just after the abuse, and the abuser
+// leaving first is the ordinary case, which refusing would turn into the way to dodge being reported, as
+// [Service.File] says of a deleted message. Nor that the filer is: somebody who heard it and left is the
+// same case. Nothing here reads voice_states, so a report says nothing about who is in a call either.
+func (s *Service) fileUser(ctx context.Context, actor auth.Actor, id snowflake.ID, in FileInput) (Report, error) {
+	var out Report
+	err := s.inTx(ctx, func(ctx context.Context, q *db.Queries) error {
+		channel, guildID, _, err := guildauth.AuthorizeChannelUnlocked(ctx, q, actor, *in.ChannelID, 0)
+		if err != nil {
+			return err
+		}
+		// Below the check, as a voice-only field's validation is (M12's "refuse before explaining"): what
+		// the channel is, is said only to somebody who can see it.
+		if channel.Type != ChannelGuildVoice {
+			return httpx.Errorf(httpx.ErrBadRequest, "channel_id is not a voice channel")
+		}
+		if _, err := q.GetGuildMember(ctx, db.GetGuildMemberParams{
+			GuildID: int64(guildID), UserID: int64(in.TargetID),
+		}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.ErrNotFound
+			}
+			return fmt.Errorf("reports: get target member: %w", err)
+		}
+
+		guild, channelID := int64(guildID), int64(*in.ChannelID)
+		row, err := q.CreateReport(ctx, db.CreateReportParams{
+			ID:             int64(id),
+			ReporterID:     int64(actor.UserID),
+			TargetType:     TargetUser,
+			TargetID:       int64(in.TargetID),
+			GuildID:        &guild,
+			ChannelID:      &channelID,
+			ReasonCategory: in.ReasonCategory,
+			Detail:         in.Detail,
+			RoutedTo:       RoutedToGuildModerators,
+		})
+		if err != nil {
+			if dup := duplicateOpenReport(err); dup != nil {
+				return dup
+			}
+			return fmt.Errorf("reports: create report: %w", err)
+		}
 		out, err = reportFromRow(row)
 		return err
 	})
@@ -282,7 +362,7 @@ func (s *Service) List(
 		}
 		out = make([]TriageEntry, 0, len(rows))
 		for _, row := range rows {
-			entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt)
+			entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt, row.TargetUserID)
 			if err != nil {
 				return nil, err
 			}
@@ -299,7 +379,7 @@ func (s *Service) List(
 	}
 	out = make([]TriageEntry, 0, len(rows))
 	for _, row := range rows {
-		entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt)
+		entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt, row.TargetUserID)
 		if err != nil {
 			return nil, err
 		}
@@ -344,7 +424,7 @@ func (s *Service) Get(
 		return TriageDetail{}, fmt.Errorf("reports: get guild report: %w", err)
 	}
 
-	entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt)
+	entry, err := triageEntry(row.Report, row.TargetIsE2e, row.TargetDeletedAt, row.TargetUserID)
 	if err != nil {
 		return TriageDetail{}, err
 	}
@@ -505,10 +585,16 @@ func (s *Service) writeResolutionAudit(
 	return nil
 }
 
-func triageEntry(row db.Report, isE2E *bool, deletedAt pgtype.Timestamptz) (TriageEntry, error) {
+// triageEntry is a report and two facts about its target. A user (M34) has no content and is never
+// end-to-end encrypted, so it is false while the account resolves and nil, as for a message, once it does
+// not.
+func triageEntry(row db.Report, isE2E *bool, deletedAt pgtype.Timestamptz, userID *int64) (TriageEntry, error) {
 	base, err := reportFromRow(row)
 	if err != nil {
 		return TriageEntry{}, err
+	}
+	if row.TargetType == TargetUser && userID != nil {
+		isE2E = new(bool)
 	}
 	out := TriageEntry{Report: base, TargetIsE2E: isE2E}
 	if deletedAt.Valid {

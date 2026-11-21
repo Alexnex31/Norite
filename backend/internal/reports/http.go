@@ -86,6 +86,7 @@ func (h *Handler) Routes(r chi.Router) {
 type fileRequest struct {
 	TargetType     string  `json:"target_type" validate:"required"`
 	TargetID       string  `json:"target_id" validate:"required"`
+	ChannelID      *string `json:"channel_id"`
 	ReasonCategory string  `json:"reason_category" validate:"required"`
 	Detail         *string `json:"detail" validate:"omitempty,max=2000"`
 }
@@ -112,9 +113,20 @@ func (h *Handler) file(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var channelID *snowflake.ID
+	if req.ChannelID != nil {
+		id, err := requiredID(*req.ChannelID, "channel_id")
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		channelID = &id
+	}
+
 	report, err := h.svc.File(r.Context(), actor, FileInput{
 		TargetType:     req.TargetType,
 		TargetID:       targetID,
+		ChannelID:      channelID,
 		ReasonCategory: req.ReasonCategory,
 		Detail:         req.Detail,
 	})

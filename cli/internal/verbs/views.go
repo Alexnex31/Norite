@@ -519,6 +519,7 @@ type reportView struct {
 	GuildID    *string    `json:"guild_id"`
 	TargetType string     `json:"target_type"`
 	TargetID   string     `json:"target_id"`
+	ChannelID  *string    `json:"channel_id"`
 	Reason     string     `json:"reason"`
 	Detail     *string    `json:"detail"`
 	Status     string     `json:"status"`
@@ -530,13 +531,16 @@ type reportView struct {
 func reportFrom(r apicontract.Report) reportView {
 	return reportView{
 		ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
-		Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status), ResolvedBy: r.ResolvedBy,
-		CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
+		ChannelID: r.ChannelId, Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
+		ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
 	}
 }
 
 func (r reportView) Text(t *output.Text) {
 	t.Line("%s  %s  %s %s  %s", c(r.ID), c(r.Status), c(r.TargetType), c(r.TargetID), c(r.Reason))
+	if r.ChannelID != nil {
+		t.Line("  from voice channel %s", c(*r.ChannelID))
+	}
 	if r.Detail != nil {
 		indented(t, *r.Detail)
 	}
@@ -554,7 +558,7 @@ func triageFrom(r apicontract.TriageReport) triageView {
 	return triageView{
 		reportView: reportView{
 			ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
-			Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
+			ChannelID: r.ChannelId, Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
 			ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
 		},
 		TargetIsE2E: r.TargetIsE2e, TargetDeletedAt: r.TargetDeletedAt,
@@ -586,8 +590,9 @@ func triageDetailFrom(r apicontract.TriageReportDetail) triageDetailView {
 		triageView: triageView{
 			reportView: reportView{
 				ID: r.Id, GuildID: r.GuildId, TargetType: string(r.TargetType), TargetID: r.TargetId,
-				Reason: string(r.ReasonCategory), Detail: r.Detail, Status: string(r.Status),
-				ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt, ResolvedAt: r.ResolvedAt,
+				ChannelID: r.ChannelId, Reason: string(r.ReasonCategory), Detail: r.Detail,
+				Status: string(r.Status), ResolvedBy: r.ResolvedBy, CreatedAt: r.CreatedAt,
+				ResolvedAt: r.ResolvedAt,
 			},
 			TargetIsE2E: r.TargetIsE2e, TargetDeletedAt: r.TargetDeletedAt,
 		},
@@ -597,6 +602,9 @@ func triageDetailFrom(r apicontract.TriageReportDetail) triageDetailView {
 
 func (r triageDetailView) Text(t *output.Text) {
 	r.reportView.Text(t)
+	if r.TargetType != string(apicontract.ReportTargetTypeMessage) {
+		return
+	}
 	t.Line("  target: %s in channel %s by %s", c(r.TargetID), output.OrNone(r.TargetChannelID),
 		output.OrNone(r.TargetAuthorID))
 	switch {

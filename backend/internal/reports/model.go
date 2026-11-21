@@ -147,10 +147,13 @@ const (
 //
 // Ids marshal as quoted strings (ADR 0003): 63 bits does not survive a float64.
 type Report struct {
-	ID             snowflake.ID  `json:"id"`
-	GuildID        *snowflake.ID `json:"guild_id"`
-	TargetType     string        `json:"target_type"`
-	TargetID       snowflake.ID  `json:"target_id"`
+	ID         snowflake.ID  `json:"id"`
+	GuildID    *snowflake.ID `json:"guild_id"`
+	TargetType string        `json:"target_type"`
+	TargetID   snowflake.ID  `json:"target_id"`
+	// ChannelID is the voice channel a report against a user was filed from (M34), which is how it reached
+	// this guild. Nil for a message, whose channel is its own, and once that channel is deleted.
+	ChannelID      *snowflake.ID `json:"channel_id"`
 	ReasonCategory string        `json:"reason_category"`
 	Detail         *string       `json:"detail"`
 	Status         string        `json:"status"`
@@ -287,6 +290,10 @@ func reportFromRow(row db.Report) (Report, error) {
 	if row.ResolvedBy != nil {
 		id := snowflake.ID(*row.ResolvedBy)
 		out.ResolvedBy = &id
+	}
+	if row.ChannelID != nil {
+		id := snowflake.ID(*row.ChannelID)
+		out.ChannelID = &id
 	}
 	if row.ResolvedAt.Valid {
 		t := row.ResolvedAt.Time

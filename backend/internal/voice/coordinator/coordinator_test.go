@@ -117,10 +117,24 @@ func (f *fixture) offer(t *testing.T) string {
 
 func (f *fixture) join(t *testing.T, user snowflake.ID, session string, sdp string) (string, any) {
 	t.Helper()
-	ch, video := f.channel.String(), false
+	ch, no := f.channel.String(), false
 	return f.c.Join(f.ctx, user, session, "device-"+session, gatewayproto.VoiceStateUpdate{
-		Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video,
+		Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no,
 	})
+}
+
+// update sends the session's update for channel.
+func (f *fixture) update(user snowflake.ID, session string, channel snowflake.ID, mute, deaf bool) {
+	ch := channel.String()
+	f.c.Update(f.ctx, user, session, gatewayproto.VoiceStateUpdate{ChannelID: &ch, SelfMute: &mute, SelfDeaf: &deaf})
+}
+
+// selfFlags reads what the session's row says the caller set on themselves.
+func (f *fixture) selfFlags(t *testing.T, session string) (mute, deaf bool) {
+	t.Helper()
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT self_mute, self_deaf FROM voice_states WHERE session_id = $1`, session).Scan(&mute, &deaf))
+	return mute, deaf
 }
 
 // recheck delivers a re-check of the fixture's guild and waits for it to have run.
@@ -318,9 +332,9 @@ func TestAnOlderJoinOfTheDeviceEndsNothingOfANewerOne(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeReplace = nil })
 	join := func(session, sdp string) string {
-		ch, video := f.channel.String(), false
+		ch, no := f.channel.String(), false
 		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
-			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no})
 		return event
 	}
 	old := make(chan string, 1)
@@ -353,9 +367,9 @@ func TestAJoinUnderWayOnAnotherSessionOfTheDeviceIsReplaced(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeProvision = nil })
 	join := func(session, sdp string) string {
-		ch, video := f.channel.String(), false
+		ch, no := f.channel.String(), false
 		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
-			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no})
 		return event
 	}
 	old := make(chan string, 1)
@@ -401,4 +415,30 @@ func TestAConnectionTheSFUClosesEndsItsCall(t *testing.T) {
 	defer f.c.mu.Unlock()
 	assert.Empty(t, f.c.calls)
 	assert.Empty(t, f.c.inGuild)
+}
+
+// An update reaches the call its own session holds and nothing else: another session's update, one for
+// another channel, and one from another account change nothing (M34).
+func TestAnUpdateReachesOnlyItsSessionsCall(t *testing.T) {
+	f := newFixture(t)
+	event, _ := f.join(t, f.member, "a", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+	event, _ = f.join(t, f.owner, "b", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+
+	f.update(f.member, "b", f.channel, true, true)
+	f.update(f.owner, "a", f.channel, true, true)
+	f.update(f.member, "a", f.ids.MustNext(), true, true)
+	for _, session := range []string{"a", "b"} {
+		mute, deaf := f.selfFlags(t, session)
+		assert.False(t, mute, session)
+		assert.False(t, deaf, session)
+	}
+
+	f.update(f.member, "a", f.channel, true, false)
+	mute, deaf := f.selfFlags(t, "a")
+	assert.True(t, mute)
+	assert.False(t, deaf)
+	mute, _ = f.selfFlags(t, "b")
+	assert.False(t, mute, "another session's call changed")
 }
