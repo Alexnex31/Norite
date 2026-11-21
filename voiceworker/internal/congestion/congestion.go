@@ -15,6 +15,12 @@
 // which a full drop-tail queue does not have. Under a 64 kbps bucket GCC left 190 ms of queue standing,
 // and this design 46.
 //
+// A buffer too shallow to hold a queue shows none, and its overflow reads as the link's own loss. What it
+// does show is the delivered rate: the packets that get through leave at the link's pace, so two sent one
+// frame apart arrive further apart than that, where random loss leaves the spacing of those it lets through
+// alone. So loss on a link whose arrivals are spread wider than its departures is congestion, at any
+// buffer's depth (M34, from M31's entry and architecture.md §17).
+//
 // The controller works in the encoder's bitrate, not in a rate the link is estimated to carry, so the
 // headers and the tag a packet carries beside its Opus are nowhere in its arithmetic: the queue says whether
 // what is sent fits.
@@ -112,6 +118,22 @@ const (
 	MaxStatuses = 256
 	// remembered is how long a departure stays: the ring's span at 50 packets a second.
 	remembered = ring * Frame
+
+	// spreadPairs is how many pairs of packets sent one after the other, both received, the spread is read
+	// over: a second of speech. spreadJudged is how many it needs before it says anything, and spreadRatio
+	// how much wider the arrivals must be than the departures for the link to be full: a link that carries
+	// 5% less than is sent overflows 5% of it. Jitter moves only the ends of a run, since the gaps between
+	// are a sum: 20 ms of it over a second is 2%.
+	spreadPairs  = 50
+	spreadJudged = 20
+	spreadRatio  = 1.03
+	// spreading is the spread past which the bitrate no longer climbs: a link already delivering a little
+	// slower than it is sent to has no room, and climbing on it until it is full overflowed 6% of a shallow
+	// buffer's packets. Jitter past it holds the climb and cuts nothing.
+	spreading = 1.02
+	// overflowing is the loss past which a full link is cut: it is the link's overflow, since random loss
+	// spreads nothing, so it needs less than congested's evidence.
+	overflowing = 0.05
 )
 
 // Controller is one call's. Sent is called by the sender, Feedback by the RTCP reader, and the rest by
@@ -143,8 +165,22 @@ type Controller struct {
 
 	lastDecrease time.Time
 
+	// The spread: the newest spreadPairs pairs of packets sent one after the other within a talk-spurt and
+	// both received with a delta, each its gap on arrival and on departure, and the last such packet read,
+	// which the next pairs with. A decrease needs decided packets sent after the last, a second of speech,
+	// by when the pairs it acted on are gone.
+	pairs            [spreadPairs]gaps
+	pairsNext, pairN int
+	prev             struct {
+		seq             uint16
+		arrival, depart time.Duration
+		ok              bool
+	}
+
 	visited int // packets read out of feedback, for a test of the bound
 }
+
+type gaps struct{ arrival, depart time.Duration }
 
 type departure struct {
 	seq  uint16
@@ -223,6 +259,7 @@ func (c *Controller) Feedback(fb *rtcp.TransportLayerCC, now time.Time) {
 		if hasDelta {
 			timed++
 			queue = min(queue, c.delay(arrival-d.at, now))
+			c.pair(seq, arrival, d.at)
 		}
 		return true
 	}
@@ -250,6 +287,38 @@ walk:
 	}
 	c.adjust(feedback{received: received, timed: timed, queue: queue}, now)
 }
+
+// pair takes a packet received with a delta, and keeps its gaps from the one before when that is the packet
+// sent just before it, within a talk-spurt. A gap on arrival may be negative, a packet overtaken by the next:
+// leaving those out kept only the gaps jitter had widened, and read 30 ms of it on a link with room as full.
+func (c *Controller) pair(seq uint16, arrival, depart time.Duration) {
+	if c.prev.ok && seq == c.prev.seq+1 && depart-c.prev.depart <= pause {
+		c.pairs[c.pairsNext] = gaps{arrival: arrival - c.prev.arrival, depart: depart - c.prev.depart}
+		c.pairsNext = (c.pairsNext + 1) % spreadPairs
+		c.pairN = min(c.pairN+1, spreadPairs)
+	}
+	c.prev.seq, c.prev.arrival, c.prev.depart, c.prev.ok = seq, arrival, depart, true
+}
+
+// spread is how much wider the arrivals are than the departures: 1, as wide, until there are pairs enough
+// to say. A call has them within half a second of its first words, and keeps them through its silences.
+func (c *Controller) spread() float64 {
+	if c.pairN < spreadJudged {
+		return 1
+	}
+	var arrived, departed time.Duration
+	for _, g := range c.pairs[:c.pairN] {
+		arrived += g.arrival
+		departed += g.depart
+	}
+	if departed <= 0 {
+		return 1
+	}
+	return float64(arrived) / float64(departed)
+}
+
+// full is whether the link delivers slower than it is sent to.
+func (c *Controller) full() bool { return c.spread() > spreadRatio }
 
 // feedback is what one transport-wide feedback said about the queue on this controller's packets.
 type feedback struct {
@@ -329,12 +398,14 @@ func (c *Controller) adjust(f feedback, now time.Time) {
 	queued := f.timed > 0 && f.queue > high
 	standing := f.timed > 0 && f.queue > low
 	drained := f.timed > 0 && f.queue < low
+	ratio := c.spread()
+	full, room := ratio > spreadRatio, ratio <= spreading
 	switch {
 	case queued && canDecrease:
 		c.decrease(backoff, now)
-	case canDecrease && judging && (loss > policed || (loss > congested && standing)):
+	case canDecrease && judging && (loss > policed || (loss > congested && standing) || (loss > overflowing && full)):
 		c.decrease(1-loss/2, now)
-	case f.received >= flowing && drained && t.spurt.known >= spurt && t.spurt.ratio() <= congested:
+	case f.received >= flowing && drained && room && t.spurt.known >= spurt && t.spurt.ratio() <= congested:
 		speech := min(time.Duration(f.received)*Frame, settle)
 		c.rate = min(c.ceiling, c.rate*math.Pow(climb, speech.Seconds()))
 	}

@@ -33,16 +33,31 @@ func TestTheBitrateFollowsAConstrainedLink(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds M26's harness and makes real calls through a shaped link")
 	}
-	var with, without linkRun
+	var with, without, shallow linkRun
 	t.Run("group", func(t *testing.T) {
-		t.Run("with the controller", func(t *testing.T) { t.Parallel(); with = runShaped(t, false) })
-		t.Run("without", func(t *testing.T) { t.Parallel(); without = runShaped(t, true) })
+		t.Run("with the controller", func(t *testing.T) { t.Parallel(); with = runShaped(t, false, 0) })
+		t.Run("without", func(t *testing.T) { t.Parallel(); without = runShaped(t, true, 0) })
+		t.Run("a shallow buffer", func(t *testing.T) {
+			t.Parallel()
+			shallow = runShaped(t, false, 35*time.Millisecond)
+		})
 	})
 	if t.Failed() {
 		return
 	}
 	t.Logf("with: %+v", with)
 	t.Logf("without: %+v", without)
+	t.Logf("a shallow buffer: %+v", shallow)
+
+	// A buffer too shallow to hold a queue shows none, and M31 left its overflow standing as the link's own
+	// loss. The spread of the arrivals sees it (M34), asserted on what reached the SFU in the limit's last
+	// twelve seconds. Measured at M34: 16% dropped without the spread, 5 to 7% with it, where the model in
+	// internal/congestion drops 2 to 3%: speech's packets vary in size, and a buffer holding one and a half
+	// of them drops the loud ones of a bitrate that fits on average.
+	if lost := float64(shallow.limitedDropped) / float64(max(1, shallow.limitedSent)); lost > 0.10 {
+		t.Errorf("a 35 ms buffer at 64 kbit/s dropped %d of %d packets in the limit's last 12 s", shallow.limitedDropped,
+			shallow.limitedSent)
+	}
 
 	fits := float64((64000/8/50 - 62) * 8 * 50)
 	if with.limitedRate > fits || with.limitedRate < congestion.Floor {
@@ -89,6 +104,7 @@ type linkRun struct {
 	limitedRate, liftedRate float64 // the encoder's bitrate, the highest in the limit's last 12 s, the last
 	limitedQueue            time.Duration
 	limitedDropped          int
+	limitedSent             int // what reached the SFU, and what the shaper dropped
 	// At the far end: how well its loudness follows the reading while shaped, at which delay, against the
 	// delay before the link was shaped, and what its jitter buffer concealed or recovered.
 	heard               float64
@@ -96,8 +112,9 @@ type linkRun struct {
 	concealed           int
 }
 
-// runShaped is one call through a shaper: 6 s open, 20 s at 64 kbps, 16 s open again.
-func runShaped(t *testing.T, fixed bool) linkRun {
+// runShaped is one call through a shaper: 6 s open, 20 s at 64 kbps, 16 s open again, its buffer depth
+// shallow when set and 300 ms otherwise.
+func runShaped(t *testing.T, fixed bool, depth time.Duration) linkRun {
 	h := startHarness(t)
 	reading := recordings.Near()
 	frames := len(reading) / audio.FrameSamples
@@ -136,6 +153,9 @@ func runShaped(t *testing.T, fixed bool) linkRun {
 		time.Sleep(time.Until(start.Add(time.Duration(sec) * time.Second)))
 		switch sec {
 		case 6:
+			if depth > 0 {
+				sh.deep(depth)
+			}
 			sh.limit(64000)
 		case 26:
 			sh.limit(0)
@@ -154,6 +174,7 @@ func runShaped(t *testing.T, fixed bool) linkRun {
 			// The limit's last twelve seconds: the controller has had eight to come down.
 			r.limitedRate = max(r.limitedRate, rate)
 			r.limitedDropped += d.dropped
+			r.limitedSent += d.packets + d.dropped
 			if talking {
 				queued += d.queue * time.Duration(d.packets)
 				queuedN += d.packets
