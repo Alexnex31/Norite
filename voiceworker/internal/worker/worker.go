@@ -44,6 +44,14 @@ type Call interface {
 	// not at all: the ended state says which devices ended it, and the daemon keeps nothing else of them
 	// past an end.
 	Devices() <-chan voiceipc.Devices
+	// Speaking delivers who is speaking, the newest list only, and DSP what the audio processing is doing,
+	// the newest only (M34). DSP is nil for a call with no devices.
+	Speaking() <-chan voiceipc.Speaking
+	DSP() <-chan voiceipc.DSP
+	// Subscribe is whom the person does not want to hear and how many people at once, and Processing how
+	// they want the microphone processed (M34), each changed during the call.
+	Subscribe(s voiceipc.Subscribe)
+	Processing(p voiceipc.Processing)
 	// Close ends the call. It may block, which is why the worker bounds how long it waits for it.
 	Close()
 }
@@ -176,6 +184,14 @@ func (r *run) loop(ctx context.Context) int {
 			if err := voiceipc.Write(r.out, voiceipc.OpDevices, d); err != nil {
 				return ExitOK
 			}
+		case sp := <-call.Speaking():
+			if err := voiceipc.Write(r.out, voiceipc.OpSpeaking, sp); err != nil {
+				return ExitOK
+			}
+		case d := <-call.DSP():
+			if err := voiceipc.Write(r.out, voiceipc.OpDSP, d); err != nil {
+				return ExitOK
+			}
 		case <-ready:
 			ready = nil
 			connect.Stop()
@@ -187,12 +203,27 @@ func (r *run) loop(ctx context.Context) int {
 		case reason := <-call.Ended():
 			return r.ended(reason)
 		case f := <-r.frames:
-			if f.Op == voiceipc.OpRights {
+			switch f.Op {
+			case voiceipc.OpRights:
 				var rights voiceipc.Rights
 				if err := ipc.Decode(f, &rights); err != nil {
 					return r.violation(f)
 				}
 				call.Rights(rights)
+				continue
+			case voiceipc.OpSubscribe:
+				var sub voiceipc.Subscribe
+				if err := ipc.Decode(f, &sub); err != nil || sub.Check() != nil {
+					return r.violation(f)
+				}
+				call.Subscribe(sub)
+				continue
+			case voiceipc.OpProcessing:
+				var p voiceipc.Processing
+				if err := ipc.Decode(f, &p); err != nil {
+					return r.violation(f)
+				}
+				call.Processing(p)
 				continue
 			}
 			if f.Op != voiceipc.OpLeave {

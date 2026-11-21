@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -32,9 +33,30 @@ import (
 // Connector attaches to the daemon. verbs.Daemon is the real one.
 type Connector func(ctx context.Context) (daemonclient.Caller, func(), error)
 
-// Settings reads the call's audio processing as config.toml sets it (M30), with a line for each thing the
-// file got wrong about it. FileSettings is the real one.
-type Settings func() (ipc.VoiceJoin, []string, error)
+// Settings reads the call's audio processing (M30) and how many people it is heard from at once (M34) as
+// config.toml sets them, with a line for each thing the file got wrong about them. FileSettings is the
+// real one.
+type Settings func() (Read, []string, error)
+
+// Read is what config.toml says of the calls.
+type Read struct {
+	Processing ipc.VoiceJoin
+	// Streams is how many people a call is heard from at once, 1 to ipc.MaxStreams, or 0 for every one it
+	// has room for.
+	Streams int
+}
+
+// Write sets a voice key in config.toml's [shared], as the terminal client reads it. FileWrite is the real
+// one.
+type Write func(key, value string) error
+
+// FileWrite sets key in the file the terminal client reads, which the command tree shares (ADR 0026).
+func FileWrite(key, value string) error {
+	if _, err := config.SetFor(config.TUI, config.Shared, key, value); err != nil {
+		return fmt.Errorf("config.toml could not be written: %s", termsafe.Text(err.Error()))
+	}
+	return nil
+}
 
 // voiceKeys are the switches a join reads, and how a warning names each.
 var voiceKeys = []struct{ key, words string }{
@@ -46,16 +68,16 @@ var voiceKeys = []struct{ key, words string }{
 // FileSettings reads the user's config.toml as the terminal client does, since the command tree is the one
 // M-x runs there (ADR 0026): [shared], then [tui], or config.tui.toml while the toggle has split them. A
 // file that is not there is every switch on.
-func FileSettings() (ipc.VoiceJoin, []string, error) {
+func FileSettings() (Read, []string, error) {
 	path, _, err := config.PathFor(config.TUI)
 	if err != nil {
-		return ipc.VoiceJoin{}, nil, fmt.Errorf("finding the config file: %s", termsafe.Text(err.Error()))
+		return Read{}, nil, fmt.Errorf("finding the config file: %s", termsafe.Text(err.Error()))
 	}
 	cfg, err := config.Load(path, config.TUI)
 	if err != nil {
 		// Not the defaults: somebody who turned a switch off and broke the file meanwhile would be put in a
 		// call with it on. The path in the error is the filesystem's.
-		return ipc.VoiceJoin{}, nil, fmt.Errorf("the voice settings could not be read: %s", termsafe.Text(err.Error()))
+		return Read{}, nil, fmt.Errorf("the voice settings could not be read: %s", termsafe.Text(err.Error()))
 	}
 	return settingsOf(cfg, filepath.Base(path))
 }
@@ -63,7 +85,7 @@ func FileSettings() (ipc.VoiceJoin, []string, error) {
 // settingsOf is a join's settings out of a config that loaded, and its warnings about them: anything the
 // file got wrong under voice in the sections this client reads, a misspelled switch included, which would
 // otherwise leave the switch meant on without a word. The GUI's section applies to nothing here.
-func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error) {
+func settingsOf(cfg *config.Config, file string) (Read, []string, error) {
 	var warnings []string
 	for _, w := range cfg.Warnings {
 		for _, section := range []config.Section{config.Shared, config.TUI} {
@@ -79,6 +101,9 @@ func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error
 					outcome = fmt.Sprintf("so %s is %s", k.words, onOff(cfg.On(k.key)))
 				}
 			}
+			if w.Key == string(section)+"."+config.KeyVoiceMaxStreams {
+				outcome = "so " + streamsWords(streamsOf(cfg))
+			}
 			warnings = append(warnings, fmt.Sprintf("%s: %s; %s", termsafe.Text(file), w.String(), outcome))
 		}
 	}
@@ -87,19 +112,55 @@ func settingsOf(cfg *config.Config, file string) (ipc.VoiceJoin, []string, error
 		warnings = append(warnings, fmt.Sprintf("%s: %d more problems, not listed, may concern the voice settings; "+
 			"`norite config get` says what applies", termsafe.Text(file), cfg.MoreWarnings))
 	}
-	return ipc.VoiceJoin{
+	return Read{Processing: ipc.VoiceJoin{
 		EchoCancellation: cfg.On(config.KeyVoiceEchoCancellation),
 		NoiseSuppression: cfg.On(config.KeyVoiceNoiseSuppression),
 		AutoGain:         cfg.On(config.KeyVoiceAutoGain),
-	}, warnings, nil
+	}, Streams: streamsOf(cfg)}, warnings, nil
 }
 
-// Command returns the `norite voice` group. settings is FileSettings unless a test sets it.
-func Command(connect Connector, settings Settings) *cli.Command {
+// streamsOf is voice.max_streams as a number, 0 for every one a call has room for. A value the file got
+// wrong is a warning and leaves the default.
+func streamsOf(cfg *config.Config) int {
+	v, _ := cfg.Value(config.KeyVoiceMaxStreams)
+	s, _ := v.(string)
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > ipc.MaxStreams {
+		return 0
+	}
+	return n
+}
+
+// streamsWords says how many people a call is heard from at once.
+func streamsWords(n int) string {
+	switch n {
+	case 0:
+		return "you hear everybody the call has room for at once"
+	case 1:
+		return "you hear one person at a time"
+	}
+	return fmt.Sprintf("you hear at most %d people at once", n)
+}
+
+// Command returns the `norite voice` group. settings is FileSettings and write FileWrite unless a test sets
+// them.
+func Command(connect Connector, settings Settings, write Write) *cli.Command {
 	if settings == nil {
 		settings = FileSettings
 	}
+	if write == nil {
+		write = FileWrite
+	}
 	readSettings, join := joinWith(settings)
+	self := func(name, usage, path string) *cli.Command {
+		return &cli.Command{Name: name, Usage: usage,
+			Description: "What you set on yourself holds in the call you are in and in every one after it, until\n" +
+				"you sign out. Everybody in the channel sees it. Deafening mutes you too, and undeafening\n" +
+				"puts back the mute you had before.",
+			Action: run(connect, argNone, nil, local(path))}
+	}
+	prepareStreams, streams := streamsWith(write)
+	prepareProcessing, processing := processingWith(settings, write)
 	return &cli.Command{
 		Name:  "voice",
 		Usage: "Join a voice channel, leave it, and see how the call stands",
@@ -109,8 +170,8 @@ func Command(connect Connector, settings Settings) *cli.Command {
 		Commands: []*cli.Command{
 			{
 				Name:   "status",
-				Usage:  "Say whether you are in a call, and how the last one ended",
-				Action: run(connect, false, nil, status),
+				Usage:  "Say whether you are in a call, who is speaking, and how the last one ended",
+				Action: run(connect, argNone, nil, status),
 			},
 			{
 				Name:      "join",
@@ -121,14 +182,151 @@ func Command(connect Connector, settings Settings) *cli.Command {
 					"shared.voice.auto_gain, each \"on\" or \"off\" and all on by default, set with\n" +
 					"`norite config set shared.voice.auto_gain off` for instance. A change applies at the\n" +
 					"next join.",
-				Action: run(connect, true, readSettings, join),
+				Action: run(connect, argChannel, readSettings, join),
 			},
 			{
 				Name:   "leave",
 				Usage:  "Leave the call you are in",
-				Action: run(connect, false, nil, leave),
+				Action: run(connect, argNone, nil, leave),
+			},
+			self("mute", "Mute yourself, for everybody in the call", ipc.PathVoiceMute),
+			self("unmute", "Unmute yourself, which undeafens you too", ipc.PathVoiceUnmute),
+			self("deafen", "Deafen yourself: hear nobody, and be heard by nobody", ipc.PathVoiceDeafen),
+			self("undeafen", "Undeafen yourself, back to the mute you had before", ipc.PathVoiceUndeafen),
+			{
+				Name:      "local-mute",
+				Usage:     "Stop hearing somebody, for you alone",
+				ArgsUsage: "USER_ID",
+				Description: "Nobody else is told, and they are not reported: `norite report user` does that,\n" +
+					"separately. The voice server stops sending you their audio, in this call and every one\n" +
+					"after it until you sign out. `norite voice status` lists whom you muted.",
+				Action: run(connect, argUser, nil, idAsked(ipc.PathVoiceLocalMute)),
+			},
+			{
+				Name:      "local-unmute",
+				Usage:     "Hear somebody you muted for yourself again",
+				ArgsUsage: "USER_ID",
+				Action:    run(connect, argUser, nil, idAsked(ipc.PathVoiceLocalUnmute)),
+			},
+			{
+				Name:      "streams",
+				Usage:     "Hear at most this many people at once",
+				ArgsUsage: "1|2|3|all",
+				Description: "Fewer is less of your downlink: each person is up to the channel's bitrate. Set in\n" +
+					"config.toml as shared.voice.max_streams, so it holds for every call, and applied to the\n" +
+					"call you are in at once.",
+				Action: run(connect, argStreams, prepareStreams, streams),
+			},
+			{
+				Name:  "processing",
+				Usage: "Turn the microphone's echo cancellation, noise suppression or automatic gain on or off",
+				Description: "Set in config.toml, as shared.voice.echo_cancellation, shared.voice.noise_suppression\n" +
+					"and shared.voice.auto_gain, so it holds for every call, and applied to the call you are\n" +
+					"in at once. Echo cancellation turned back on mid-call starts converging again, so the\n" +
+					"far end may hear a moment of echo.",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "echo-cancellation", Usage: "`on` or off"},
+					&cli.StringFlag{Name: "noise-suppression", Usage: "`on` or off"},
+					&cli.StringFlag{Name: "auto-gain", Usage: "`on` or off"},
+				},
+				Action: run(connect, argNone, prepareProcessing, processing),
 			},
 		},
+	}
+}
+
+// local is a request that carries nothing, so it needs no question first.
+func local(path string) asker {
+	return func(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+		var st ipc.VoiceStatus
+		return st, daemonclient.Local(ctx, c, path, &st)
+	}
+}
+
+// idAsked is a request carrying the argument, a user id, in its path: asked only of a daemon that answered
+// PathVoice, as the join's channel is.
+func idAsked(path func(string) string) asker {
+	return func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+		st, err := status(ctx, cmd, c)
+		if err != nil {
+			return st, err
+		}
+		return st, daemonclient.Local(ctx, c, path(cmd.Args().First()), &st)
+	}
+}
+
+// streamsWith writes voice.max_streams before anything is attached to, then tells a daemon that answered
+// PathVoice, so the call there is follows at once.
+func streamsWith(write Write) (func(*cli.Command) error, asker) {
+	var n int
+	prepare := func(cmd *cli.Command) error {
+		arg := cmd.Args().First()
+		value := arg
+		if arg == config.StreamsAll {
+			n = 0
+		} else {
+			n, _ = strconv.Atoi(arg)
+		}
+		return write(config.KeyVoiceMaxStreams, value)
+	}
+	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+		st, err := status(ctx, cmd, c)
+		if err != nil {
+			return st, err
+		}
+		return st, daemonclient.Local(ctx, c, ipc.PathVoiceStreams(n), &st)
+	}
+}
+
+// processingWith reads the switches config.toml has, applies the flags, writes what changed and then,
+// when there is a call, sends the call the whole of it (D5): the next join reads the file.
+func processingWith(settings Settings, write Write) (func(*cli.Command) error, asker) {
+	var body ipc.VoiceJoin
+	prepare := func(cmd *cli.Command) error {
+		read, _, err := settings()
+		if err != nil {
+			return err
+		}
+		body = read.Processing
+		flags := []struct {
+			name, key string
+			field     *bool
+		}{
+			{"echo-cancellation", config.KeyVoiceEchoCancellation, &body.EchoCancellation},
+			{"noise-suppression", config.KeyVoiceNoiseSuppression, &body.NoiseSuppression},
+			{"auto-gain", config.KeyVoiceAutoGain, &body.AutoGain},
+		}
+		named := 0
+		for _, f := range flags {
+			if !cmd.IsSet(f.name) {
+				continue
+			}
+			named++
+			v := cmd.String(f.name)
+			if v != config.On && v != config.Off {
+				return clierr.Usage("--%s is on or off", f.name)
+			}
+			*f.field = v == config.On
+		}
+		if named == 0 {
+			return clierr.Usage("norite voice processing names --echo-cancellation, --noise-suppression or " +
+				"--auto-gain, each on or off")
+		}
+		for _, f := range flags {
+			if cmd.IsSet(f.name) {
+				if err := write(f.key, cmd.String(f.name)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
+		st, err := status(ctx, cmd, c)
+		if err != nil || st.State == ipc.VoiceIdle {
+			return st, err
+		}
+		return st, daemonclient.LocalWith(ctx, c, ipc.PathVoiceProcessing, body, &st)
 	}
 }
 
@@ -146,6 +344,7 @@ func status(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voi
 // problem, said as one whether or not a daemon is running, and sends nothing.
 func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
 	var body ipc.VoiceJoin
+	var streams int
 	prepare = func(cmd *cli.Command) error {
 		read, warnings, err := settings()
 		if err != nil {
@@ -154,7 +353,7 @@ func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
 		for _, w := range warnings {
 			_, _ = fmt.Fprintln(cmd.Root().ErrWriter, w)
 		}
-		body = read
+		body, streams = read.Processing, read.Streams
 		return nil
 	}
 	return prepare, func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error) {
@@ -164,6 +363,13 @@ func joinWith(settings Settings) (prepare func(*cli.Command) error, ask asker) {
 		}
 		if !st.Available {
 			return st, &clierr.RefusedError{Message: output.Clean(st.Unavailable)}
+		}
+		// How many people the call is heard from goes first, when the file and the daemon disagree, so the
+		// call has it from its start.
+		if have := st.MaxStreams; (have == nil) != (streams == 0) || (have != nil && *have != streams) {
+			if err := daemonclient.Local(ctx, c, ipc.PathVoiceStreams(streams), &st); err != nil {
+				return st, err
+			}
 		}
 		err = daemonclient.LocalWith(ctx, c, ipc.PathVoiceJoin(cmd.Args().First()), body, &st)
 		if err != nil {
@@ -199,18 +405,30 @@ func leave(ctx context.Context, _ *cli.Command, c daemonclient.Caller) (ipc.Voic
 // asker is one command's requests to the daemon, and what they answered.
 type asker func(ctx context.Context, cmd *cli.Command, c daemonclient.Caller) (ipc.VoiceStatus, error)
 
+// What a command's one argument is, if it has one.
+const (
+	argNone = iota
+	argChannel
+	argUser
+	argStreams
+)
+
 // run wraps one command: its argument checked before anything is attached to, so a mistyped id is a usage
 // error on a machine with no daemon running too, then prepare, the command's own local checks when it has
 // some, then the request, then its answer printed.
-func run(connect Connector, takesChannel bool, prepare func(*cli.Command) error, ask asker) cli.ActionFunc {
+func run(connect Connector, arg int, prepare func(*cli.Command) error, ask asker) cli.ActionFunc {
+	what := map[int]string{argChannel: "channel id", argUser: "user id"}[arg]
 	return func(ctx context.Context, cmd *cli.Command) error {
+		first := cmd.Args().First()
 		switch {
-		case !takesChannel && cmd.Args().Len() != 0:
+		case arg == argNone && cmd.Args().Len() != 0:
 			return clierr.Usage("norite voice %s takes no arguments", cmd.Name)
-		case takesChannel && cmd.Args().Len() != 1:
-			return clierr.Usage("norite voice %s takes one channel id", cmd.Name)
-		case takesChannel && !ops.IsID(cmd.Args().First()):
-			return clierr.Usage("%q is not a channel id", output.Clean(cmd.Args().First()))
+		case arg == argStreams && (cmd.Args().Len() != 1 || !validStreams(first)):
+			return clierr.Usage("norite voice %s takes 1, 2, 3 or all", cmd.Name)
+		case arg != argNone && arg != argStreams && cmd.Args().Len() != 1:
+			return clierr.Usage("norite voice %s takes one %s", cmd.Name, what)
+		case arg != argNone && arg != argStreams && !ops.IsID(first):
+			return clierr.Usage("%q is not a %s", output.Clean(first), what)
 		}
 		if prepare != nil {
 			if err := prepare(cmd); err != nil {
@@ -228,6 +446,13 @@ func run(connect Connector, takesChannel bool, prepare func(*cli.Command) error,
 		st, err := ask(ctx, cmd, c)
 		if err != nil {
 			return err
+		}
+		// Every list is [] rather than null in what is printed (contracts/cli-json), whichever daemon sent it.
+		if st.LocalMutes == nil {
+			st.LocalMutes = []string{}
+		}
+		if st.Speaking == nil {
+			st.Speaking = []string{}
 		}
 		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{st, runtime.GOOS})
 	}
@@ -259,11 +484,34 @@ func (v view) Text(t *output.Text) {
 			t.Line("The last join failed: %s.", output.Clean(v.Reason))
 		}
 	}
-	if p := v.Processing; p != nil && v.State != ipc.VoiceIdle {
-		// What the join asked for. The worker logs, and does not report, a DSP that could not start or was
-		// dropped, so this says what was asked rather than what runs.
+	// What the processing is doing, as the worker said (M34), and what was asked before it has said.
+	switch d := v.DSP; {
+	case v.State == ipc.VoiceIdle:
+	case d != nil && d.State == ipc.VoiceDSPRunning:
+		t.Line("Processing the microphone with echo cancellation %s, noise suppression %s, automatic gain %s.",
+			onOff(d.EchoCancellation), onOff(d.NoiseSuppression), onOff(d.AutoGain))
+	case d != nil && d.State == ipc.VoiceDSPFailed:
+		t.Line("The microphone goes unprocessed: %s.", output.Clean(d.Reason))
+	case v.Processing != nil:
+		p := v.Processing
 		t.Line("Joined with echo cancellation %s, noise suppression %s, automatic gain %s.",
 			onOff(p.EchoCancellation), onOff(p.NoiseSuppression), onOff(p.AutoGain))
+	}
+	if v.State == ipc.VoiceInCall {
+		if len(v.Speaking) == 0 {
+			t.Line("Nobody is speaking.")
+		} else {
+			t.Line("Speaking now: %s.", ids(v.Speaking))
+		}
+	}
+	for _, line := range ops.VoiceSelf(v.Self) {
+		t.Line("%s.", line)
+	}
+	if len(v.LocalMutes) > 0 {
+		t.Line("Muted for you alone: %s.", ids(v.LocalMutes))
+	}
+	if v.MaxStreams != nil {
+		t.Line("%s.", capitalized(streamsWords(*v.MaxStreams)))
 	}
 	// What the devices are doing (M32): during a call, and after one their failing ended. The words are the
 	// client's, and the worker's reason in them is cleaned.
@@ -277,6 +525,26 @@ func (v view) Text(t *output.Text) {
 	if !v.Available {
 		t.Line("This daemon cannot join voice calls: %s.", output.Clean(v.Unavailable))
 	}
+}
+
+// ids is a list of user ids for a line, each cleaned.
+func ids(users []string) string {
+	out := make([]string, len(users))
+	for i, u := range users {
+		out[i] = output.Clean(u)
+	}
+	return strings.Join(out, ", ")
+}
+
+func capitalized(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func validStreams(s string) bool {
+	return s == config.StreamsAll || (len(s) == 1 && s[0] >= '1' && s[0] <= '0'+ipc.MaxStreams)
 }
 
 func onOff(on bool) string {

@@ -79,6 +79,9 @@ type Options struct {
 	// worker's default, as the harness's answer is. muted answers without the right to send.
 	bitrate int
 	muted   bool
+	// subscribe is what a test's harness subscribes to as soon as the answer is applied, before the SFU says
+	// ready, as the daemon does with the local mutes it keeps from call to call.
+	subscribe *voiceipc.Subscribe
 }
 
 // Session is one call's connection.
@@ -86,8 +89,11 @@ type Session struct {
 	opts Options
 	pc   *webrtc.PeerConnection
 	// processing is which of the DSP's three components process the microphone, as the join said. All off
-	// still runs RNNoise, for the voice probability the audio level's V flag follows (M30).
+	// still runs RNNoise, for the voice probability the audio level's V flag follows (M30). M34's
+	// PROCESSING changes it during the call, through ctl.
 	processing dsp.Settings
+	// ctl is what the call says beside its media (M34, control.go).
+	ctl *control
 
 	ready   chan struct{}
 	ended   chan string
@@ -207,6 +213,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		return nil, err
 	}
 	s := &Session{opts: opts, pc: pc, processing: dsp.Settings(join.Processing),
+		ctl:   newControl(dsp.Settings(join.Processing)),
 		ready: make(chan struct{}), ended: make(chan string, 1),
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		bitrate: opus.DefaultEncoderOptions().Bitrate,
@@ -421,6 +428,9 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	s.ctl.mu.Lock()
+	s.ctl.dc = dc
+	s.ctl.mu.Unlock()
 	dc.OnOpen(func() {
 		b, err := voiceproto.Encode(voiceproto.Hello{Op: voiceproto.OpHello, Version: s.opts.Version})
 		if err == nil {
@@ -498,9 +508,9 @@ func (s *Session) readRTCP(r rtcpReader) {
 	}
 }
 
-// message reads one message from the SFU. Ready is the one this milestone acts on; a refusal ends the
-// call with the SFU's reason, which is a stranger's text and is cut to what a STATE carries here and
-// cleaned by the daemon where it is shown. The slot map and the speaking list are M34's.
+// message reads one message from the SFU. Ready starts the media; a refusal ends the call with the SFU's
+// reason, which is a stranger's text and is cut to what a STATE carries here and cleaned by the daemon
+// where it is shown. The slot map and the speaking list are control's (M34).
 func (s *Session) message(b []byte) {
 	op, err := voiceproto.OpOf(b)
 	if err != nil {
@@ -509,11 +519,16 @@ func (s *Session) message(b []byte) {
 	switch op {
 	case voiceproto.OpReady:
 		s.readyOne.Do(func() {
+			s.ctl.onReady()
 			close(s.ready)
 			if s.opts.Device != nil {
 				go s.runMedia()
 			}
 		})
+	case voiceproto.OpSlots:
+		s.ctl.onSlots(b)
+	case voiceproto.OpSpeaking:
+		s.ctl.onSpeaking(b)
 	case voiceproto.OpRefused:
 		// The SFU's last word. Once the call is up it is why the instance ended the call, a kick or a lost
 		// right (M33), which is said as it is; before, it is why the call was refused.
@@ -566,6 +581,29 @@ func (s *Session) Rights(r voiceipc.Rights) {
 	s.mayNotHear.Store(!r.Hear)
 }
 
+// Speaking delivers who the SFU says is speaking, the newest list only and a few a second at most (M34).
+func (s *Session) Speaking() <-chan voiceipc.Speaking { return s.ctl.speakingOut }
+
+// DSP delivers what the audio processing is doing each time it changes, the newest only (M34). A session
+// with no device processes nothing and says nothing.
+func (s *Session) DSP() <-chan voiceipc.DSP {
+	if s.opts.Device == nil {
+		return nil
+	}
+	return s.ctl.dspOut
+}
+
+// Subscribe is whom the person does not want to hear, and how many people at once (M34).
+func (s *Session) Subscribe(sub voiceipc.Subscribe) { s.ctl.subscribe(sub) }
+
+// Processing is how the person wants the microphone processed now (M34). The sender applies it at its next
+// frame, making the chain again with the new stages, so an echo canceller turned back on starts converging
+// from nothing.
+func (s *Session) Processing(p voiceipc.Processing) {
+	settings := dsp.Settings(p.Processing)
+	s.ctl.want.Store(&settings)
+}
+
 // Ready is closed once the SFU has said ready, which it does only once connected.
 func (s *Session) Ready() <-chan struct{} { return s.ready }
 
@@ -575,6 +613,7 @@ func (s *Session) Ended() <-chan string { return s.ended }
 // Close closes the peer connection. The SFU sees the data channel and DTLS close at once rather than
 // waiting out ICE's timeout.
 func (s *Session) Close() {
+	s.ctl.stop()
 	s.mediaMu.Lock()
 	s.closing = true
 	m, starting := s.media, s.mediaStarting

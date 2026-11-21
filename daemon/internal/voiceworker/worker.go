@@ -108,6 +108,9 @@ type Event struct {
 	Offer   *voiceipc.Offer
 	State   *voiceipc.State
 	Devices *voiceipc.Devices
+	// Speaking and DSP are M34's: who speaks, and what the processing is doing.
+	Speaking *voiceipc.Speaking
+	DSP      *voiceipc.DSP
 }
 
 // Worker is one running worker.
@@ -523,6 +526,24 @@ func (w *Worker) decode(f gatewayproto.Frame) (Event, error) {
 			return Event{}, broke(err.Error())
 		}
 		return Event{Devices: &d}, nil
+	case voiceipc.OpSpeaking:
+		var sp voiceipc.Speaking
+		if err := ipc.Decode(f, &sp); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		if err := sp.Check(); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		return Event{Speaking: &sp}, nil
+	case voiceipc.OpDSP:
+		var d voiceipc.DSP
+		if err := ipc.Decode(f, &d); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		if err := d.Check(); err != nil {
+			return Event{}, broke(err.Error())
+		}
+		return Event{DSP: &d}, nil
 	}
 	return Event{}, broke(fmt.Sprintf("op %d, which a worker does not send after HELLO", f.Op))
 }

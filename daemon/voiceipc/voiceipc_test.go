@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -71,7 +72,15 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoDevice}}}, true},
 		{"devices", OpDevices, Devices{Microphone: Device{State: DeviceRefused},
 			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason)}}, true},
+		{"speaking", OpSpeaking, Speaking{Users: []string{"1", "18446744073709551615"}}, true},
+		{"nobody speaking", OpSpeaking, Speaking{Users: []string{}}, true},
+		{"the DSP starting", OpDSP, DSP{State: DSPStarting}, true},
+		{"the DSP running", OpDSP, DSP{State: DSPRunning, EchoCancellation: true, AutoGain: true}, true},
+		{"the DSP failed", OpDSP, DSP{State: DSPFailed, Reason: strings.Repeat("r", MaxReason)}, true},
 		{"join", OpJoin, Join{Loopback: true}, false},
+		{"subscribe", OpSubscribe, Subscribe{Drop: []string{"42"}, Cap: new(2)}, false},
+		{"subscribe to everybody", OpSubscribe, Subscribe{Drop: []string{}}, false},
+		{"processing", OpProcessing, Processing{Processing: ipc.VoiceJoin{NoiseSuppression: true}}, false},
 		{"answer", OpAnswer, Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{
 			"turn:192.0.2.1:3478?transport=tcp", "turns:voice.example:5349"}, Username: "1700000000:42",
 			Credential: "c2VjcmV0"}}, Bitrate: 128000, Rights: Rights{Send: true, Hear: true}}, false},
@@ -119,6 +128,15 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 			Microphone: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason+1)}}},
 		{"the speakers' reason past the bound", OpDevices, Devices{Microphone: Device{State: DeviceOpen},
 			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason+1)}}},
+		{"too many speaking", OpSpeaking, Speaking{Users: slices.Repeat([]string{"1"}, MaxSpeaking+1)}},
+		{"a speaker that is not an id", OpSpeaking, Speaking{Users: []string{"1x"}}},
+		{"a speaker past an id's digits", OpSpeaking, Speaking{Users: []string{strings.Repeat("9", 21)}}},
+		{"the DSP in an unknown state", OpDSP, DSP{State: "humming"}},
+		{"a stage running in a DSP starting", OpDSP, DSP{State: DSPStarting, NoiseSuppression: true}},
+		{"a stage running in a DSP failed", OpDSP, DSP{State: DSPFailed, Reason: "r", EchoCancellation: true}},
+		{"a DSP failed saying nothing", OpDSP, DSP{State: DSPFailed}},
+		{"a reason for a DSP running", OpDSP, DSP{State: DSPRunning, Reason: "r"}},
+		{"a DSP reason past the bound", OpDSP, DSP{State: DSPFailed, Reason: strings.Repeat("r", MaxReason+1)}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -137,6 +155,17 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 	long := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{"turn:" + strings.Repeat("a", MaxURL)}}}}
 	secret := Answer{SDP: "v=0\r\n", ICEServers: []ICEServer{{URLs: []string{"turn:a"},
 		Credential: strings.Repeat("c", MaxCredential+1)}}}
+	for name, sub := range map[string]Subscribe{
+		"too many dropped":                 {Drop: slices.Repeat([]string{"1"}, MaxDrop+1)},
+		"a dropped user that is not an id": {Drop: []string{""}},
+		"no slot":                          {Drop: []string{}, Cap: new(0)},
+		"more slots than the worker has":   {Drop: []string{}, Cap: new(MaxSlots + 1)},
+	} {
+		require.Error(t, sub.Check(), name)
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpSubscribe, sub)))
+		require.NoError(t, err)
+		require.Error(t, daemon.Validate(doc), name)
+	}
 	for name, a := range map[string]Answer{"too many servers": many, "a URL past its bound": long,
 		"a credential past its bound": secret, "no answer": {ICEServers: []ICEServer{}}} {
 		require.Error(t, a.Check(), name)
@@ -205,7 +234,8 @@ func TestTheOpsAreTheContracts(t *testing.T) {
 	}
 	want := map[int]string{int(OpHello): "Hello", int(OpOffer): "Offer", int(OpState): "State",
 		int(OpDevices): "Devices", int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave",
-		int(OpRights): "RightsFrame"}
+		int(OpRights): "RightsFrame", int(OpSpeaking): "SpeakingFrame", int(OpDSP): "DSPFrame",
+		int(OpSubscribe): "SubscribeFrame", int(OpProcessing): "ProcessingFrame"}
 	require.Equal(t, want, got)
 }
 
@@ -279,4 +309,26 @@ func TestTheLongestHostNamesTURNURLIsAdmitted(t *testing.T) {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpAnswer, a)))
 	require.NoError(t, err)
 	require.NoError(t, compile(t, "DaemonFrame").Validate(doc), "the contract refuses what the check admits")
+}
+
+// Every state the contract names for the DSP is one the check accepts, and no other.
+func TestTheDSPStatesAreTheContracts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "contracts", "voice-worker.schema.json"))
+	require.NoError(t, err)
+	var doc struct {
+		Defs struct {
+			DSP struct {
+				Properties struct {
+					State struct {
+						Enum []string `json:"enum"`
+					} `json:"state"`
+				} `json:"properties"`
+			} `json:"DSP"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	require.ElementsMatch(t, []string{DSPStarting, DSPRunning, DSPFailed}, doc.Defs.DSP.Properties.State.Enum)
+	require.NoError(t, DSP{State: DSPStarting}.Check())
+	require.NoError(t, DSP{State: DSPRunning}.Check())
+	require.NoError(t, DSP{State: DSPFailed, Reason: "r"}.Check())
 }

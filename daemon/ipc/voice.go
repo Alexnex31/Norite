@@ -27,7 +27,70 @@ const (
 	PathVoiceLeave = PathVoice + "/leave"
 	// pathVoiceJoin begins PathVoiceJoin.
 	pathVoiceJoin = PathVoice + "/join/"
+
+	// PathVoiceMute, PathVoiceUnmute, PathVoiceDeafen and PathVoiceUndeafen are POST (M34): what the person
+	// sets on themselves, in the call and for every call after it until the sign-in ends. Deafening mutes
+	// too, and undeafening puts back the mute from before. Each answers a VoiceStatus, and carries nothing.
+	PathVoiceMute     = PathVoice + "/mute"
+	PathVoiceUnmute   = PathVoice + "/unmute"
+	PathVoiceDeafen   = PathVoice + "/deafen"
+	PathVoiceUndeafen = PathVoice + "/undeafen"
+	// PathVoiceProcessing is POST (M34): how the person wants the microphone processed, the join's body
+	// with every switch named, for the call there is and every join after it until the sign-in ends.
+	PathVoiceProcessing = PathVoice + "/processing"
+
+	// pathVoiceLocalMute, pathVoiceLocalUnmute and pathVoiceStreams begin the requests that carry an id or
+	// a number, sent only to a daemon that answered PathVoice, as the join's channel is.
+	pathVoiceLocalMute   = PathVoice + "/local-mute/"
+	pathVoiceLocalUnmute = PathVoice + "/local-unmute/"
+	pathVoiceStreams     = PathVoice + "/streams/"
 )
+
+// MaxLocalMutes is how many people one account may mute for itself (M34): a full room, which is also the
+// most the SFU takes in one subscribe.
+const MaxLocalMutes = 64
+
+// MaxStreams is the most people a call is heard from at once: the slots the worker receives on.
+const MaxStreams = 3
+
+// PathVoiceLocalMute and PathVoiceLocalUnmute are POST (M34): mute user for this account alone, in every
+// call until the sign-in ends, or hear them again. A local mute is never a report: the two are separate
+// acts (architecture.md §6). Each answers a VoiceStatus.
+func PathVoiceLocalMute(user string) string   { return pathVoiceLocalMute + user }
+func PathVoiceLocalUnmute(user string) string { return pathVoiceLocalUnmute + user }
+
+// PathVoiceStreams is POST (M34): hear at most n people at once, 1 to MaxStreams, or every one the call has
+// room for with 0. It answers a VoiceStatus.
+func PathVoiceStreams(n int) string { return pathVoiceStreams + strconv.Itoa(n) }
+
+// VoiceLocalMuteUser reads the user out of a PathVoiceLocalMute or PathVoiceLocalUnmute path, reports
+// whether it is one, and whether the path mutes.
+func VoiceLocalMuteUser(path string) (user string, mute, ok bool) {
+	if u, cut := strings.CutPrefix(path, pathVoiceLocalMute); cut {
+		return u, true, digitsID(u)
+	}
+	if u, cut := strings.CutPrefix(path, pathVoiceLocalUnmute); cut {
+		return u, false, digitsID(u)
+	}
+	return "", false, false
+}
+
+// VoiceStreams reads the number out of a PathVoiceStreams path, and reports whether it is 0 to MaxStreams.
+func VoiceStreams(path string) (int, bool) {
+	n, cut := strings.CutPrefix(path, pathVoiceStreams)
+	if !cut || len(n) != 1 || n[0] < '0' || n[0] > '0'+MaxStreams {
+		return 0, false
+	}
+	return int(n[0] - '0'), true
+}
+
+func digitsID(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
+}
 
 // PathVoiceJoin is POST: join a voice channel, ending any call already joined. It answers a VoiceStatus
 // once the call is up, or a refusal saying why it could not be.
@@ -109,8 +172,20 @@ func DecodeVoiceJoin(body json.RawMessage) (VoiceJoin, error) {
 	return out, nil
 }
 
+// DecodeVoiceProcessing reads a PathVoiceProcessing request's body: the join's object, every switch named.
+// Unlike a join's, no body is not every component on, since a change that names nothing changes nothing.
+func DecodeVoiceProcessing(body json.RawMessage) (VoiceJoin, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return VoiceJoin{}, errors.New("the processing must name echo_cancellation, noise_suppression and " +
+			"auto_gain")
+	}
+	return DecodeVoiceJoin(body)
+}
+
 // EventVoice tells a watching client that what PathVoice answers has changed: a join began, a call came up,
-// or one ended. It carries an empty object, and the client asks, as for EventUpdate.
+// or one ended, and since M34 who speaks, and what the person or the processing changed. It carries an
+// empty object, and the client asks, as for EventUpdate.
 const EventVoice = LocalEventPrefix + "VOICE"
 
 // The call's states.
@@ -149,7 +224,45 @@ type VoiceStatus struct {
 	// and hear the call. A moderator's server mute or a channel without SPEAK takes the first, a server
 	// deafen the second, and this client applies them. Nil while there is no call answered.
 	Rights *VoiceRights `json:"rights"`
+
+	// Self is what the person has set on themselves (M34), in a call or not: it goes with the next join, and
+	// lasts until the sign-in ends. LocalMutes is whom they muted for themselves alone, sorted, and
+	// MaxStreams how many people they hear at once, nil for every one the call has room for; both last as
+	// long. None of the three is the instance's, which hears of Self alone.
+	Self       VoiceSelf `json:"self"`
+	LocalMutes []string  `json:"local_mutes"`
+	MaxStreams *int      `json:"max_streams"`
+	// Speaking is who the voice server says is speaking now, as user ids, while there is a call, local
+	// mutes included: the indicator is how somebody finds whom to mute or report. [] with no call.
+	Speaking []string `json:"speaking"`
+	// DSP is what the call's audio processing is doing, as its worker last said, where Processing is what
+	// was asked: nil before it has said and with no call.
+	DSP *VoiceDSP `json:"dsp"`
 }
+
+// VoiceSelf is what the person has set on themselves.
+type VoiceSelf struct {
+	Mute bool `json:"mute"`
+	Deaf bool `json:"deaf"`
+}
+
+// VoiceDSP is what the call's audio processing is doing: VoiceDSPStarting while it compiles,
+// VoiceDSPRunning with the stages that process the microphone, or VoiceDSPFailed for the rest of the call,
+// Reason, the worker's words cleaned, saying why.
+type VoiceDSP struct {
+	State            string `json:"state"`
+	Reason           string `json:"reason"`
+	EchoCancellation bool   `json:"echo_cancellation"`
+	NoiseSuppression bool   `json:"noise_suppression"`
+	AutoGain         bool   `json:"auto_gain"`
+}
+
+// The DSP's states, voiceipc's words, held equal by a test in daemon/internal/voiceworker.
+const (
+	VoiceDSPStarting = "starting"
+	VoiceDSPRunning  = "running"
+	VoiceDSPFailed   = "failed"
+)
 
 // VoiceRights is what the account may do in its call.
 type VoiceRights struct {

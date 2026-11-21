@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
@@ -105,7 +106,7 @@ func localInstance(raw string) bool {
 }
 
 // Join sends op 4 and waits for its reply.
-func (g *Gateway) Join(ctx context.Context, account, channel, offer string) (Answer, error) {
+func (g *Gateway) Join(ctx context.Context, account, channel, offer string, self ipc.VoiceSelf) (Answer, error) {
 	nonce, err := newNonce()
 	if err != nil {
 		return Answer{}, err
@@ -125,7 +126,7 @@ func (g *Gateway) Join(ctx context.Context, account, channel, offer string) (Ans
 
 	no := false
 	if err := g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{
-		Nonce: nonce, ChannelID: &channel, Offer: offer, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no,
+		Nonce: nonce, ChannelID: &channel, Offer: offer, SupportsVideo: &no, SelfMute: &self.Mute, SelfDeaf: &self.Deaf,
 	}); err != nil {
 		return Answer{}, fmt.Errorf("the join could not be sent to the instance: %w", err)
 	}
@@ -197,6 +198,13 @@ func refusalWords(code string) string {
 		return "the voice server could not take the call; try again"
 	}
 	return "the instance refused the join"
+}
+
+// Update sends op 4's update for the call in channel (M34). The instance answers it with the channel's
+// VOICE_STATE_UPDATE, to everybody and not only to this session, so nothing here waits.
+func (g *Gateway) Update(ctx context.Context, _ string, channel string, self ipc.VoiceSelf) {
+	_ = g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{ChannelID: &channel, SelfMute: &self.Mute,
+		SelfDeaf: &self.Deaf})
 }
 
 // Leave sends op 4 with no channel. Best effort: a connection that is not there has no session, and an

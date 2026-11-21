@@ -89,6 +89,18 @@ func VoiceRights(r *ipc.VoiceRights) []string {
 	return out
 }
 
+// VoiceSelf words what the person set on themselves (M34): a deafen, which mutes too, or a mute, or
+// nothing.
+func VoiceSelf(s ipc.VoiceSelf) []string {
+	switch {
+	case s.Deaf:
+		return []string{"You deafened yourself: you hear nobody, and nobody hears you"}
+	case s.Mute:
+		return []string{"You muted yourself: nobody hears you"}
+	}
+	return nil
+}
+
 func withReason(line, reason string) string {
 	if reason == "" {
 		return line

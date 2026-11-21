@@ -666,7 +666,8 @@ func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		renders := 0
 		m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: on}},
-			chain: counting{renders: &renders}}
+			chain: counting{renders: &renders}, settings: dsp.Settings{EchoCancellation: on}}
+		m.echo.Store(on) // as startMedia sets them from the join
 		for range 10 {
 			m.fill(make([]int16, audio.FrameSamples))
 			m.process(make([]int16, audio.FrameSamples), m.ref.count())
@@ -723,7 +724,8 @@ func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		chain: pairing{mu: &mu, renders: &renders, captures: &captures, most: &most}, taken: true, enc: enc,
-		codec: keepOpen{}}
+		codec: keepOpen{}, settings: s.processing}
+	m.echo.Store(true)
 	m.sent.Add(1)
 	go m.send()
 	frame := make([]int16, audio.FrameSamples)
@@ -875,8 +877,10 @@ func TestADSPTakenUpBehindIsNotBlamedForTheBacklog(t *testing.T) {
 // chain that failed, and when the module never started.
 func TestNoChainForGoodStopsTheReference(t *testing.T) {
 	closed := false
-	m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true}},
-		chain: failingChain{closed: &closed}, taken: true}
+	echo := dsp.Settings{EchoCancellation: true}
+	m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: echo},
+		chain: failingChain{closed: &closed}, taken: true, settings: echo}
+	m.echo.Store(true) // as startMedia sets them from the join
 	frame := make([]int16, audio.FrameSamples)
 	m.fill(frame)
 	m.process(frame, m.ref.count())
@@ -888,7 +892,8 @@ func TestNoChainForGoodStopsTheReference(t *testing.T) {
 	s := &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true},
 		dspDone: make(chan struct{}), dspErr: errors.New("no module")}
 	close(s.dspDone)
-	m = &media{s: s}
+	m = &media{s: s, settings: echo}
+	m.echo.Store(true)
 	m.process(frame, m.ref.count())
 	m.fill(frame)
 	if m.ref.count() != 0 {

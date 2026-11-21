@@ -182,7 +182,9 @@ func standin(mode string) int {
 		return 0
 	}
 
-	// A correct worker from here, with a few modes that break it at a step.
+	// A correct worker from here, with a few modes that break it at a step. Like the real one, it takes no
+	// RIGHTS, SUBSCRIBE or PROCESSING before its ANSWER, and says the daemon broke the protocol.
+	answered := false
 	for {
 		f, err := voiceipc.Read(in, voiceipc.MaxDaemonFrame)
 		if err != nil {
@@ -212,7 +214,15 @@ func standin(mode string) int {
 				continue
 			}
 			send(voiceipc.OpOffer, voiceipc.Offer{SDP: "v=0\r\nstandin\r\n"})
+		case voiceipc.OpRights, voiceipc.OpSubscribe, voiceipc.OpProcessing:
+			if !answered {
+				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "the daemon broke the protocol"})
+				return 1
+			}
+		}
+		switch f.Op {
 		case voiceipc.OpAnswer:
+			answered = true
 			send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateConnecting})
 			if mode == "neverready" || mode == "endsasleft" {
 				continue
@@ -276,6 +286,19 @@ func standin(mode string) int {
 			if mode == "crashincall" {
 				os.Exit(2)
 			}
+			if mode == "speaksbadly" { // a speaker that is no user id, a moment after the call is up
+				time.Sleep(200 * time.Millisecond)
+				send(voiceipc.OpSpeaking, voiceipc.Speaking{Users: []string{"seven"}})
+			}
+			if mode == "dspbadly" { // a stage running in a processing that failed
+				time.Sleep(200 * time.Millisecond)
+				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed, Reason: "r", AutoGain: true})
+			}
+			if mode == "speaks" { // who speaks, and the processing as the join asked it, once up (M34)
+				send(voiceipc.OpSpeaking, voiceipc.Speaking{Users: []string{"7"}})
+				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: true,
+					NoiseSuppression: true, AutoGain: true})
+			}
 		case voiceipc.OpRights:
 			// Says the rights it was sent as its microphone's reason, which the daemon keeps in the status:
 			// the test's way of seeing what reached the worker (M33).
@@ -286,6 +309,27 @@ func standin(mode string) int {
 			send(voiceipc.OpDevices, voiceipc.Devices{
 				Microphone: voiceipc.Device{State: voiceipc.DeviceOpen, Reason: fmt.Sprintf("send=%t hear=%t", r.Send, r.Hear)},
 				Speakers:   voiceipc.Device{State: voiceipc.DeviceOpen}})
+		case voiceipc.OpSubscribe:
+			// Says the subscription it was sent as a processing that failed, which the daemon keeps in the
+			// status: the test's way of seeing what reached the worker, as RIGHTS has the microphone (M34).
+			var sub voiceipc.Subscribe
+			if ipc.Decode(f, &sub) != nil {
+				return 9
+			}
+			cap := "none"
+			if sub.Cap != nil {
+				cap = fmt.Sprint(*sub.Cap)
+			}
+			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed,
+				Reason: fmt.Sprintf("drop=%s cap=%s", strings.Join(sub.Drop, ","), cap)})
+		case voiceipc.OpProcessing:
+			// The processing it was asked for, as running (M34).
+			var p voiceipc.Processing
+			if ipc.Decode(f, &p) != nil {
+				return 9
+			}
+			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: p.Processing.EchoCancellation,
+				NoiseSuppression: p.Processing.NoiseSuppression, AutoGain: p.Processing.AutoGain})
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue

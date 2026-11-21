@@ -399,6 +399,13 @@ func (b *Buffer) Stats() Stats {
 	return b.stats
 }
 
+// Sender is the source id of the slot's sender, the CSRC its packets carry, and whether it has had one.
+func (b *Buffer) Sender() (uint32, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sender, b.haveSender
+}
+
 // ResetPending is whether the slot has changed sender since the last step: the next step will carry
 // Reset. It does not consume it.
 func (b *Buffer) ResetPending() bool {

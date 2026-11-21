@@ -128,6 +128,20 @@ portable = true
 consumer = "M30"
 live = true
 
+# How many people a call is heard from at once (M34), applied at the next join and by `norite voice
+# streams` at once: 1 to 3, or all of those the call has room for. Fewer is less of the downlink: each is
+# up to the channel's bitrate.
+
+[[key]]
+name = "voice.max_streams"
+section = "shared"
+type = "enum"
+values = ["all", "1", "2", "3"]
+default = "all"
+portable = true
+consumer = "M34"
+live = true
+
 # --- Reserved: the format is settled here, and nothing reads these until the milestone named. ---
 
 [[key]]

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Alexnex31/Norite/backend/gatewayproto"
+	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
@@ -80,7 +81,7 @@ func TestTheGatewaySignalerJoinsByOp4(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a, err := g.Join(ctx, "9", "42", "v=0\r\noffer\r\n")
+	a, err := g.Join(ctx, "9", "42", "v=0\r\noffer\r\n", ipc.VoiceSelf{})
 	require.NoError(t, err)
 	assert.Equal(t, "v=0\r\nanswer\r\n", a.SDP)
 	assert.Equal(t, 128000, a.Bitrate)
@@ -163,7 +164,7 @@ func TestTheGatewaySignalerRefuses(t *testing.T) {
 			link.mu.Unlock()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, err := g.Join(ctx, "9", "42", "v=0\r\n")
+			_, err := g.Join(ctx, "9", "42", "v=0\r\n", ipc.VoiceSelf{})
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
@@ -173,7 +174,7 @@ func TestTheGatewaySignalerRefuses(t *testing.T) {
 	link.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = g.Join(ctx, "9", "42", "v=0\r\n")
+	_, err = g.Join(ctx, "9", "42", "v=0\r\n", ipc.VoiceSelf{})
 	require.ErrorContains(t, err, "did not answer", "an instance that never answers")
 }
 
@@ -186,7 +187,7 @@ func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
 
 	failed := make(chan error, 1)
 	go func() {
-		_, err := g.Join(context.Background(), "9", "42", "v=0\r\n")
+		_, err := g.Join(context.Background(), "9", "42", "v=0\r\n", ipc.VoiceSelf{})
 		failed <- err
 	}()
 	require.Eventually(t, func() bool {
@@ -209,7 +210,7 @@ func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
 	link.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a, err := g.Join(ctx, "9", "42", "v=0\r\n")
+	a, err := g.Join(ctx, "9", "42", "v=0\r\n", ipc.VoiceSelf{})
 	require.NoError(t, err)
 	select {
 	case <-a.Lost:
@@ -224,7 +225,7 @@ func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
 	}
 	g.SessionLost() // a second fresh session, with no call: nothing to close twice
 
-	b, err := g.Join(ctx, "9", "42", "v=0\r\n")
+	b, err := g.Join(ctx, "9", "42", "v=0\r\n", ipc.VoiceSelf{})
 	require.NoError(t, err)
 	g.Leave(context.Background(), "9")
 	g.SessionLost()
@@ -256,7 +257,7 @@ func TestAnUpdateBeforeTheReplyIsTheCallsRights(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	a, err := g.Join(ctx, "9", "42", "v=0\r\noffer\r\n")
+	a, err := g.Join(ctx, "9", "42", "v=0\r\noffer\r\n", ipc.VoiceSelf{})
 	require.NoError(t, err)
 	assert.Equal(t, voiceipc.Rights{Send: false, Hear: true}, a.Rights,
 		"the mute that came before the reply was lost, or another's update was taken")
