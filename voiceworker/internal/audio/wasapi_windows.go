@@ -17,8 +17,8 @@ import (
 // 48 kHz mono 16-bit, which the audio engine converts to and from whatever the device runs at
 // (AUTOCONVERTPCM). Windows names the worker's executable in its microphone switch (ADR 0034); with the
 // switch off, activating the microphone is refused, and the error is a Refused Failure (outcome.go). A
-// device that goes away mid-call stops the engine's events, which the session sees as the device falling
-// silent.
+// device that goes away mid-call stops the engine's events, its calls answering AUDCLNT_E_DEVICE_INVALIDATED,
+// and the stream is opened again on the default device there is then (follow.go, M34).
 //
 // Written at M29 against Microsoft's documentation and cross-compiled; run in M24's Windows VM by the
 // milestone's manual pass, which is the first time it ran.
@@ -228,6 +228,10 @@ func wait(event uintptr, stop <-chan struct{}) bool {
 
 func (wasapi) Capture(_ context.Context, frame func([]int16)) (io.Closer, error) {
 	f := &framer{frame: frame}
+	return follow(func(heard func()) (io.Closer, error) { return captureStream(f, heard) })
+}
+
+func captureStream(f *framer, heard func()) (io.Closer, error) {
 	silent := make([]int16, SampleRate/10)
 	return open(eCapture, func(_, cc unsafe.Pointer, event uintptr, stop <-chan struct{}) {
 		data, frames, flags := new(*int16), new(uint32), new(uint32)
@@ -238,6 +242,7 @@ func (wasapi) Capture(_ context.Context, frame func([]int16)) (io.Closer, error)
 					uintptr(unsafe.Pointer(flags)), 0, 0) != sOK {
 					break
 				}
+				heard()
 				n := int(*frames)
 				if *flags&bufferflagsSilent != 0 || *data == nil {
 					for n > 0 {
@@ -256,6 +261,10 @@ func (wasapi) Capture(_ context.Context, frame func([]int16)) (io.Closer, error)
 
 func (wasapi) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {
 	f := newFiller(fill)
+	return follow(func(heard func()) (io.Closer, error) { return playStream(f, heard) })
+}
+
+func playStream(f *filler, heard func()) (io.Closer, error) {
 	return open(eRender, func(client, rc unsafe.Pointer, event uintptr, stop <-chan struct{}) {
 		total, padding := new(uint32), new(uint32)
 		if com(client, acGetBufferSize, uintptr(unsafe.Pointer(total))) != sOK {
@@ -267,6 +276,8 @@ func (wasapi) Play(_ context.Context, fill func([]int16)) (io.Closer, error) {
 				continue
 			}
 			avail := *total - *padding
+			// The engine asked: the device is there, whether or not it has room for a frame now.
+			heard()
 			if avail == 0 || com(rc, rcGetBuffer, uintptr(avail), uintptr(unsafe.Pointer(data))) != sOK {
 				continue
 			}
