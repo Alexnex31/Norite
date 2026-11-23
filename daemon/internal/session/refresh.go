@@ -11,9 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // The two requests the daemon makes with a refresh token: renewing it, and handing back one it cannot keep.
@@ -87,9 +90,7 @@ func refreshSession(ctx context.Context, client *http.Client, instanceURL, refre
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// The URL is not included: it would be, via url.Error, and the request body carries the refresh
-		// token — a wrapped transport error is one library change away from rendering it.
-		return tokenPair{}, time.Time{}, errors.New("could not reach the instance")
+		return tokenPair{}, time.Time{}, unreachable(err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16)); _ = resp.Body.Close() }()
 
@@ -163,4 +164,19 @@ func handBackToken(parent context.Context, log zerolog.Logger, client *http.Clie
 		return
 	}
 	log.Info().Msg("revoked the token this daemon could no longer keep")
+}
+
+// unreachable is why the instance could not be reached, as the network said it: the error url.Error wraps,
+// never url.Error itself. That one renders the URL, and the request body carries the refresh token, a
+// wrapped transport error being one library change away from rendering it. Without the network's words the
+// log said only that the instance was unreachable, which on a Mac whose launchd agent could not reach a
+// LAN instance that the same Mac's Terminal reached left nothing to go on (M34's Mac pass). What the
+// network says is a stranger's text only as far as a host's name is, and is cleaned with the rest of the
+// log (M19).
+func unreachable(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return fmt.Errorf("could not reach the instance: %s", termsafe.Text(ue.Err.Error()))
+	}
+	return errors.New("could not reach the instance")
 }
