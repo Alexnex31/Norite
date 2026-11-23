@@ -57,6 +57,10 @@ type Answer struct {
 	// Lost is closed if the instance drops the session the call was signaled on, which ends the call there;
 	// nil for a voice server with no such session.
 	Lost <-chan struct{}
+	// Resumed delivers each time the session the call was signaled on resumed, the latest only; nil for a
+	// voice server with no such session. An update written into the connection the resume replaced may
+	// never have arrived, and nothing replays it, so the call sends the person's flags again.
+	Resumed <-chan struct{}
 }
 
 // Harness signals through M26's harness (backend/internal/voice/voicetest/cmd/voice-sfu): POST

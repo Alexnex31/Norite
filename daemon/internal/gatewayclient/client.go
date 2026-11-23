@@ -81,6 +81,10 @@ type Options struct {
 	// before it is gone, a voice call among it (M33: a call belongs to its session): an instance that
 	// restarted, or a connection lost past the resume window.
 	NewSession func()
+	// Resumed is told when a session resumes, by RESUMED, from the read loop once the connection is live, so
+	// it must not block. What this daemon wrote to the connection that was lost may not have arrived, and
+	// nothing replays it (M34's /code-review: a self mute written into a dying connection).
+	Resumed func()
 
 	// The waits between connections. Zero means the defaults; tests shrink them.
 	RetryMin, RetryMax time.Duration
@@ -136,6 +140,7 @@ type Client struct {
 	onVersionRefused func()
 	voice            func(string, json.RawMessage)
 	newSession       func()
+	resumed          func()
 	// live is the connection while it is established, for SendVoice; nil between connections.
 	live atomic.Pointer[websocket.Conn]
 	log  zerolog.Logger
@@ -160,6 +165,7 @@ func New(opts Options) *Client {
 		onVersionRefused: opts.OnVersionRefused,
 		voice:            opts.Voice,
 		newSession:       opts.NewSession,
+		resumed:          opts.Resumed,
 		log:              opts.Log,
 		retryMin:         orDefault(opts.RetryMin, defaultRetryMin),
 		retryMax:         orDefault(opts.RetryMax, defaultRetryMax),

@@ -151,10 +151,13 @@ type call struct {
 	sentRights     voiceipc.Rights
 	sentSub        voiceipc.Subscribe
 	sentProcessing ipc.VoiceJoin
-	// selfUnsent is the voice server having refused the last update, which push sends again however
-	// sentSelf compares, and retry the timer that pushes it again, both under Voice.mu.
+	// selfUnsent is the voice server having refused the last update, or the session having resumed since,
+	// which push sends again however sentSelf compares, and retry the timer that pushes it again, both
+	// under Voice.mu.
 	selfUnsent bool
 	retry      *time.Timer
+	// selfKick tells sendSelf there are flags to send, the latest only.
+	selfKick chan struct{}
 	// dspChanged is closed, and replaced, each time the worker says what its processing does, under
 	// Voice.mu: what a change of processing waits on.
 	dspChanged chan struct{}
@@ -553,7 +556,8 @@ func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinR
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{}),
-		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}), input: req.VoiceInput}
+		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}), input: req.VoiceInput,
+		selfKick: make(chan struct{}, 1)}
 	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
@@ -722,6 +726,18 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		fail(true, w.Exit().Devices, "%s", w.Exit().Reason)
 		return
 	}
+	// The person's flags go to the voice server from a goroutine of their own, which ends before the leave
+	// is sent (the deferred leave above runs after this), so no update follows it.
+	selfCtx, stopSelf := context.WithCancel(ctx)
+	selfDone := make(chan struct{})
+	go func() {
+		defer close(selfDone)
+		v.sendSelf(selfCtx, c)
+	}()
+	defer func() {
+		stopSelf()
+		<-selfDone
+	}()
 	// The worker has its answer: from here what the person changes reaches it, and what they changed while
 	// the join was on its way goes now, the self the voice server was joined with included.
 	v.mu.Lock()
@@ -762,7 +778,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 
 	// The call is up. What the worker says from here is drained, so it never waits on the daemon, until it
 	// ends; its end, crash or not, is the call's. What the instance says the account may do goes to it.
-	changes := answer.Changes
+	changes, resumed := answer.Changes, answer.Resumed
 	for events := w.Events(); events != nil; {
 		select {
 		case ev, ok := <-events:
@@ -779,6 +795,12 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		case r := <-changes:
 			v.rights(c, r)
 			// A worker gone already ends the call by its events; nothing more to do here.
+			v.push(c)
+		case <-resumed:
+			// What the lost connection took of the person's flags may not have arrived: sent again.
+			v.mu.Lock()
+			c.selfUnsent = true
+			v.mu.Unlock()
 			v.push(c)
 		}
 	}
@@ -953,6 +975,8 @@ func (v *Voice) push(c *call) {
 	newInput, pressed := input != c.sentInput || c.presses != c.sentPresses, c.presses != c.sentPresses
 	wasHeld := c.sentInput.Held
 	c.sentRights, c.sentSub, c.sentProcessing, c.sentSelf = rights, sub, processing, self
+	// Asked for below, once: a send that fails marks it again (selfSent).
+	c.selfUnsent = false
 	c.sentInput, c.sentPresses = input, c.presses
 	v.mu.Unlock()
 	// A worker gone already ends the call by its events; a send it misses changes nothing.
@@ -977,9 +1001,32 @@ func (v *Voice) push(c *call) {
 		}
 		_ = w.Send(voiceipc.OpInput, input)
 	}
+	// The voice server is told by sendSelf, never here: push runs on the call's event loop and on the key's
+	// thread, and a gateway write takes up to signalLeaveWithin on a connection going bad, which stalled
+	// both, the worker's events past their buffer included (M34's /code-review).
 	if newSelf {
-		ctx, cancel := context.WithTimeout(context.Background(), signalLeaveWithin)
-		err := v.opts.Signaler.Update(ctx, c.account, c.channel, self)
+		select {
+		case c.selfKick <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// sendSelf sends the voice server the person's flags, the latest each time push says they changed, until
+// ctx ends.
+func (v *Voice) sendSelf(ctx context.Context, c *call) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.selfKick:
+		}
+		v.mu.Lock()
+		self := v.prefs.live().self
+		c.sentSelf = self
+		v.mu.Unlock()
+		sendCtx, cancel := context.WithTimeout(ctx, signalLeaveWithin)
+		err := v.opts.Signaler.Update(sendCtx, c.account, c.channel, self)
 		cancel()
 		v.selfSent(c, err == nil)
 	}

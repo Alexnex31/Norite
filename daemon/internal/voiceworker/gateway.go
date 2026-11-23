@@ -51,6 +51,8 @@ type Gateway struct {
 	conn    string
 	changes chan voiceipc.Rights
 	lost    chan struct{}
+	// resumed is told, the latest only, when the session the call was signaled on resumes.
+	resumed chan struct{}
 	// early is what the account's own VOICE_STATE_UPDATEs in the joined channel said while the join waited,
 	// by connection, at most maxEarly: one can arrive before the reply, or before Join has read it, since
 	// the reply goes straight to the session and the update through the bus, and nothing orders the two.
@@ -159,14 +161,14 @@ func (g *Gateway) Join(ctx context.Context, account, channel, offer string, self
 	if err := (voiceipc.Answer{SDP: a.SDP, ICEServers: a.ICEServers, Bitrate: a.Bitrate}).Check(); err != nil {
 		return Answer{}, fmt.Errorf("the instance's answer is past a bound: %w", err)
 	}
-	changes, lost := make(chan voiceipc.Rights, 1), make(chan struct{})
+	changes, lost, resumed := make(chan voiceipc.Rights, 1), make(chan struct{}), make(chan struct{}, 1)
 	g.mu.Lock()
 	if r, ok := g.early[s.ConnectionID]; ok {
 		a.Rights = r
 	}
-	g.conn, g.changes, g.lost = s.ConnectionID, changes, lost
+	g.conn, g.changes, g.lost, g.resumed = s.ConnectionID, changes, lost, resumed
 	g.mu.Unlock()
-	a.Changes, a.Lost = changes, lost
+	a.Changes, a.Lost, a.Resumed = changes, lost, resumed
 	return a, nil
 }
 
@@ -212,7 +214,7 @@ func (g *Gateway) Update(ctx context.Context, _ string, channel string, self ipc
 // instance whose session ends ends the call with it.
 func (g *Gateway) Leave(ctx context.Context, _ string) {
 	g.mu.Lock()
-	g.conn, g.changes, g.lost = "", nil, nil
+	g.conn, g.changes, g.lost, g.resumed = "", nil, nil, nil
 	g.mu.Unlock()
 	_ = g.Link.SendVoice(ctx, gatewayproto.VoiceStateUpdate{})
 }
@@ -232,7 +234,23 @@ func (g *Gateway) SessionLost() {
 	if g.lost != nil {
 		close(g.lost)
 	}
-	g.conn, g.changes, g.lost = "", nil, nil
+	g.conn, g.changes, g.lost, g.resumed = "", nil, nil, nil
+}
+
+// Resumed is the gateway client's Resumed: the session a call was signaled on resumed on a new connection.
+// An op 4 update the old connection took may have died with it, since a write that returns has reached
+// the kernel and not the instance, and a resume replays only what the instance sent (M34's /code-review).
+// The call is told, and sends the person's flags again. From the read loop, so it never blocks.
+func (g *Gateway) Resumed() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.resumed == nil {
+		return
+	}
+	select {
+	case g.resumed <- struct{}{}:
+	default:
+	}
 }
 
 // Deliver takes a voice dispatch from the gateway client's read loop, so it never blocks.

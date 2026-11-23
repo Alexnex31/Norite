@@ -317,6 +317,7 @@ func Run(ctx context.Context, opts Options) error {
 				Credentials: src, Sink: server, Version: opts.Version,
 				Log: part("gateway"), OnVersionRefused: update.Nudge, Voice: voiceGateway.Deliver,
 				NewSession: voiceGateway.SessionLost,
+				Resumed:    voiceGateway.Resumed,
 			})
 			// Before anything runs: the voice signaler reads it from the join's goroutine.
 			voiceGateway.Link = gw

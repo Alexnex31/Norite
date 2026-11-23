@@ -175,6 +175,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 				out.established = true
 				c.live.Store(ws)
 				c.log.Info().Int64("seq", seq.Load()).Msg("resumed the gateway session")
+				if c.resumed != nil {
+					c.resumed()
+				}
 			case gatewayproto.EventVoiceServerUpdate, gatewayproto.EventVoiceJoinRefused:
 				// A reply to this daemon's op 4, which nothing attached is told (Options.Voice).
 				if c.voice != nil {

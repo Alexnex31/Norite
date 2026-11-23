@@ -108,15 +108,21 @@ func TestTheRepliesToOp4NeverReachTheSink(t *testing.T) {
 func strictJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 
 // A session that begins afresh is told, before the connection is live, and one resumed is not: a voice call
-// belongs to its session (M33), so the daemon's ends with the session the instance no longer holds.
+// belongs to its session (M33), so the daemon's ends with the session the instance no longer holds. A resumed
+// one is told as resumed, once the connection is live, so the call can send again what the lost connection
+// may have dropped (M34's /code-review).
 func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
-	var fresh atomic.Int32
-	var liveWhenTold atomic.Bool
+	var fresh, resumed atomic.Int32
+	var liveWhenTold, liveWhenResumed atomic.Bool
 	var h *harness
 	h = start(t, func(o *Options) {
 		o.NewSession = func() {
 			fresh.Add(1)
 			liveWhenTold.Store(h.client.Connected())
+		}
+		o.Resumed = func() {
+			resumed.Add(1)
+			liveWhenResumed.Store(h.client.Connected())
 		}
 	})
 	c := h.g.next()
@@ -132,6 +138,9 @@ func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
 	c2.dispatch("RESUMED", map[string]any{})
 	require.Eventually(t, h.client.Connected, 5*time.Second, time.Millisecond)
 	assert.Equal(t, int32(1), fresh.Load(), "a resumed session was told it was fresh")
+	require.Eventually(t, func() bool { return resumed.Load() == 1 }, 5*time.Second, time.Millisecond,
+		"a resumed session was not told")
+	assert.True(t, liveWhenResumed.Load(), "told before the connection was live, where nothing could be sent")
 
 	c2.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
 	c3 := h.g.next()
@@ -142,4 +151,5 @@ func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
 	c3.ready("sess-2")
 	require.Eventually(t, func() bool { return fresh.Load() == 2 }, 5*time.Second, time.Millisecond,
 		"a session that could not be resumed was not told")
+	assert.Equal(t, int32(1), resumed.Load(), "a fresh session was told it was resumed")
 }
