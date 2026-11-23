@@ -525,6 +525,56 @@ func TestWithNoCallTheSelfSwitchesAreSaidOfTheNextCall(t *testing.T) {
 		"You deafened yourself: your next call starts deafened, and `norite voice undeafen` undoes it.\n", r.out)
 }
 
+// With no call, the mode set is said of the next call, and so is push-to-talk in the file, from status:
+// M35's manual pass set it with no call and was told only "Not in a voice call." By voice, the default, a
+// status says nothing more, and --json carries no input, the daemon having none without a call.
+func TestWithNoCallTheModeIsSaidOfTheNextCall(t *testing.T) {
+	written = &writes{}
+	d := &fakeDaemon{status: available()}
+	keyed := func() (Read, []string, error) {
+		return Read{Processing: ipc.VoiceAllOn(), Input: ipc.VoiceInput{Mode: ipc.VoiceInputVoice, Key: "ctrl+f9"}},
+			nil, nil
+	}
+	r := noriteWith(t, d, keyed, false, "mode", "push-to-talk")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n"+
+		"The next call is by push-to-talk: you will be heard while you hold ctrl+f9.\n", r.out)
+	r = noriteWith(t, d, keyed, false, "mode", "push-to-talk", "--key", "Alt+F10")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n"+
+		"The next call is by push-to-talk: you will be heard while you hold alt+f10.\n", r.out)
+	r = noriteWith(t, d, keyed, false, "mode", "voice")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\nThe next call is by voice: you will be heard whenever you speak.\n", r.out)
+
+	byKey := func() (Read, []string, error) {
+		return Read{Processing: ipc.VoiceAllOn(), Input: ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk,
+			Key: "ctrl+f9"}}, nil, nil
+	}
+	r = noriteWith(t, d, byKey, false, "status")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n"+
+		"The next call is by push-to-talk: you will be heard while you hold ctrl+f9.\n", r.out)
+	r = noriteWith(t, d, keyed, false, "status")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n", r.out)
+	broken := func() (Read, []string, error) { return Read{}, nil, errors.New("the file is broken") }
+	r = noriteWith(t, d, broken, false, "status")
+	require.NoError(t, r.err, "a status failed on a file only a join reads")
+	assert.Equal(t, "Not in a voice call.\n", r.out)
+	r = noriteWith(t, d, byKey, true, "status")
+	require.NoError(t, r.err)
+	assert.Contains(t, r.out, `"input": null`)
+	assert.NotContains(t, r.out, "ctrl+f9")
+
+	// In a call, the call's own input says it, and nothing is said of the next.
+	d.status = ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true, Input: &ipc.VoiceInputStatus{
+		Mode: ipc.VoiceInputVoice, Key: "ctrl+f9"}}
+	r = noriteWith(t, d, byKey, false, "status")
+	require.NoError(t, r.err)
+	assert.NotContains(t, r.out, "next call")
+}
+
 // A change of mode during a call writes the file and sends the call the mode with the key the file holds,
 // or the one --key names, written its one way and saved beside the mode in one write.
 func TestAModeChangeReachesTheCall(t *testing.T) {

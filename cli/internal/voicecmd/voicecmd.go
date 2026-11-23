@@ -196,7 +196,7 @@ func Command(connect Connector, settings Settings, write Write) *cli.Command {
 	}
 	prepareStreams, streams := streamsWith(write)
 	prepareProcessing, processing := processingWith(settings, write)
-	prepareMode, mode := modeWith(settings, write)
+	prepareMode, mode, nextMode := modeWith(settings, write)
 	return &cli.Command{
 		Name:  "voice",
 		Usage: "Join a voice channel, leave it, and see how the call stands",
@@ -207,7 +207,7 @@ func Command(connect Connector, settings Settings, write Write) *cli.Command {
 			{
 				Name:   "status",
 				Usage:  "Say whether you are in a call, who is speaking, and how the last one ended",
-				Action: run(connect, argNone, nil, status),
+				Action: runNext(connect, argNone, nil, status, fileInput(settings)),
 			},
 			{
 				Name:      "join",
@@ -282,7 +282,7 @@ func Command(connect Connector, settings Settings, write Write) *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "key", Usage: "the push-to-talk `KEY`, as in ctrl+shift+space"},
 				},
-				Action: run(connect, argMode, prepareMode, mode),
+				Action: runNext(connect, argMode, prepareMode, mode, nextMode),
 			},
 		},
 	}
@@ -386,8 +386,8 @@ func processingWith(settings Settings, write Write) (preparer, asker) {
 
 // modeWith writes voice.input_mode, and voice.push_to_talk_key when --key names one, before anything is
 // attached to, then tells a daemon in a call that answered PathVoice how the call's microphone is let
-// through now, the key the file holds included.
-func modeWith(settings Settings, write Write) (preparer, asker) {
+// through now, the key the file holds included. With no call, next is what the next join will ask for.
+func modeWith(settings Settings, write Write) (preparer, asker, func() *ipc.VoiceInput) {
 	var body ipc.VoiceInput
 	prepare := func(cmd *cli.Command) (string, error) {
 		mode, word := ipc.VoiceInputVoice, config.InputVoice
@@ -422,6 +422,19 @@ func modeWith(settings Settings, write Write) (preparer, asker) {
 			return st, err
 		}
 		return st, daemonclient.LocalWith(ctx, c, ipc.PathVoiceMode, body, &st)
+	}, func() *ipc.VoiceInput { return &body }
+}
+
+// fileInput is how config.toml lets the next join's microphone through when it is by push-to-talk, the
+// default being by voice and said by nothing, or nil when the file does not load, which a join says as its
+// own problem.
+func fileInput(settings Settings) func() *ipc.VoiceInput {
+	return func() *ipc.VoiceInput {
+		read, _, err := settings()
+		if err != nil || read.Input.Mode != ipc.VoiceInputPushToTalk {
+			return nil
+		}
+		return &read.Input
 	}
 }
 
@@ -522,6 +535,13 @@ type preparer func(*cli.Command) (saved string, err error)
 // for the next join whether or not the daemon could be told, and an error alone read as nothing having
 // changed (M34's /code-review).
 func run(connect Connector, arg int, prepare preparer, ask asker) cli.ActionFunc {
+	return runNext(connect, arg, prepare, ask, nil)
+}
+
+// runNext is run, and with no call says what the next join's microphone does, as next says: the daemon
+// knows the mode only for a call, and the file is the client's (M21). M35's manual pass set push-to-talk
+// with no call and was told only "Not in a voice call."
+func runNext(connect Connector, arg int, prepare preparer, ask asker, next func() *ipc.VoiceInput) cli.ActionFunc {
 	what := map[int]string{argChannel: "channel id", argUser: "user id"}[arg]
 	return func(ctx context.Context, cmd *cli.Command) error {
 		first := cmd.Args().First()
@@ -571,7 +591,11 @@ func run(connect Connector, arg int, prepare preparer, ask asker) cli.ActionFunc
 		if st.Speaking == nil {
 			st.Speaking = []string{}
 		}
-		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), view{st, runtime.GOOS})
+		v := view{VoiceStatus: st, goos: runtime.GOOS}
+		if next != nil && st.State == ipc.VoiceIdle {
+			v.next = next()
+		}
+		return output.Render(output.Writer(cmd.Root().Writer), cmd.Root().Bool("json"), v)
 	}
 }
 
@@ -580,6 +604,8 @@ type view struct {
 	ipc.VoiceStatus
 	// goos is the OS whose settings a refusal names: this machine's, the daemon's and the worker's too.
 	goos string
+	// next is how the next join lets the microphone through, said with no call; nil says nothing.
+	next *ipc.VoiceInput
 }
 
 // Text draws it for a person.
@@ -631,6 +657,11 @@ func (v view) Text(t *output.Text) {
 	// How the microphone is let through (M35): the key's state and the desktop's binding are its words.
 	for _, line := range ops.VoiceInput(v.Input) {
 		t.Line("%s.", output.Clean(line))
+	}
+	if n := v.next; n != nil && n.Mode == ipc.VoiceInputPushToTalk {
+		t.Line("The next call is by push-to-talk: you will be heard while you hold %s.", output.Clean(n.Key))
+	} else if n != nil {
+		t.Line("The next call is by voice: you will be heard whenever you speak.")
 	}
 	for _, line := range ops.VoiceSelf(v.Self, v.State != ipc.VoiceIdle) {
 		t.Line("%s.", line)
