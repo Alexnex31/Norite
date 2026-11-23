@@ -954,3 +954,23 @@ func TestChangesOfProcessingAreSpaced(t *testing.T) {
 		t.Errorf("the newest change was not taken up: %+v", m.settings)
 	}
 }
+
+// Echo cancellation turned off stops the reference, and its stamp with it, and a change after that is still
+// taken up (M34's Mac pass: spaced by the stamp, turning echo cancellation back on never took).
+func TestAChangeAfterEchoCancellationOffIsTakenUp(t *testing.T) {
+	made := 0
+	s := &Session{opts: Options{Log: io.Discard}, ctl: newControl(dsp.AllOn())}
+	m := &media{s: s, module: countingModule{made: &made}, chain: marking{}, settings: dsp.AllOn()}
+	const stamp = 500 // the reference stands still from here, nothing writing it
+	off := dsp.Settings{NoiseSuppression: true, AutoGain: true}
+	s.ctl.want.Store(&off)
+	m.reconfigure(stamp)
+	on := dsp.AllOn()
+	s.ctl.want.Store(&on)
+	for range 2 * reconfigureFrames {
+		m.reconfigure(stamp)
+	}
+	if m.settings != on || made != 2 {
+		t.Errorf("echo cancellation turned back on was not taken up: %+v after %d chains", m.settings, made)
+	}
+}
