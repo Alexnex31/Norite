@@ -525,7 +525,7 @@ agent never creates a `v*` tag or bumps a version.**
   failing leaves the call up; both failing as it starts end it. On Linux, where nothing refuses, the worker
   asks where PulseAudio put its stream and asks logind why. Seven `/code-review` rounds moved the judgement
   of the start into the worker, which says it. Its manual pass ran on Linux (KDE) and Windows 11 in VMs;
-  macOS is the author's Mac, not yet walked. The Developer ID was not taken.
+  macOS was walked on the author's Mac at M34's end. The Developer ID was not taken.
 - **M33 — Voice signaling, real**: done. Op 4 joins a call over the daemon's own gateway connection, and
   `backend/internal/voice/coordinator` authorizes it, provisions it and records it in `voice_states`. The
   TURN credential comes with the answer, so the worker's offer carries no candidate and gathers afterwards
@@ -544,11 +544,15 @@ agent never creates a `v*` tag or bumps a version.**
 - **M34 — Voice control surface**: done. Self mute and deafen over op 4's new update shape, local mute as
   the SFU's `drop`, a stream cap, the active speaker and what the DSP runs in the status, the DSP's verbs
   mid-call, a user reported from a voice channel, the delivered rate in the controller, and following the
-  default device on Windows and macOS. Its manual pass ran on Linux and Windows 11 in VMs; macOS is the
-  author's Mac, not yet walked. It found three things, all fixed:
+  default device on Windows and macOS. Its manual pass ran on Linux and Windows 11 in VMs, and on the
+  author's Mac with M32's never-run kit. It found three things, all fixed:
   - `processing` answered before the change ran;
   - a headset plugged back in was not followed;
   - a local mute took user `0`.
+
+  The Mac found that echo cancellation turned back on mid-call never took, which its review's fix had
+  caused, fixed; and that a daemon under launchd cannot reach a LAN instance (Local Network privacy),
+  carried with the Developer ID.
 
 ## What keeps coming back
 

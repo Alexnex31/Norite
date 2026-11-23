@@ -2292,13 +2292,19 @@ of this section.
     an error mid-call (WASAPI's invalidation stops the callbacks), and `open` again if it resumes.
     Following a new default device is carried to M34.
   - **The Developer ID is not taken now** (the author's decision). It is more than a signature, and the
-    entry that takes it inherits all four parts:
+    entry that takes it inherits all five parts:
     - notarizing needs the hardened runtime;
     - under it, the microphone needs the `com.apple.security.device.audio-input` entitlement;
     - wazero's compiler writes executable memory, which needs `allow-jit` or
       `allow-unsigned-executable-memory`, or the codec fails every call;
     - the usage description goes in an `Info.plist` embedded in an `__info_plist` section, which Go's
-      linker does not write.
+      linker does not write;
+    - **from M34's Mac pass:** macOS's Local Network privacy refuses the daemon under launchd an instance
+      on the LAN (`connect: no route to host`), while the same Mac's Terminal reaches it, and switching
+      norite-daemon on under Local Network changed nothing. The `Info.plist` needs
+      `NSLocalNetworkUsageDescription`, and whether that is enough is to be seen on a Mac. Until then a LAN
+      instance on macOS needs the daemon started in a terminal, and `norite setup` says only that the
+      instance may be unreachable.
 
     No macOS runner exists, so signing would be `rcodesign` on the Linux runner. Until then the question
     comes once per daemon build, as ADR 0034 says.
@@ -2337,7 +2343,8 @@ of this section.
     - **A gotcha for the next pass:** WirePlumber keeps a moved stream's target
       (`~/.local/state/wireplumber/stream-properties`), so a pass that moves a stream undoes the move, or the
       next call opens where the last test left it.
-    - **Not walked:** macOS, on the author's Mac with the AVFoundation spike (S2); a PulseAudio server rather
+    - **Not walked:** macOS, on the author's Mac with the AVFoundation spike (S2), until M34's end, where
+      the kit's legs A to E passed (M34's entry); a PulseAudio server rather
       than PipeWire, and a desktop other than KDE; a device unplugged on real hardware.
     - **Left:** after a call ended for want of a session, `norite voice status` says the reason twice, in
       "The last call ended" and the line after it. On Windows a refusal names the desktop-apps switch
@@ -2602,10 +2609,18 @@ of this section.
         a new default, within about 2 s;
       - `local-mute 0` was taken; a user id is now canonical and nonzero (`ipc.IsUserID`), since `007`
         would never have matched user 7.
+    - **macOS, on the author's Mac** (macOS 27, arm64), with M32's kit, never run before, on loopback:
+      - M32's legs A to E: the question names norite-daemon, the join does not wait on it, a refusal names
+        the setting, and leaving while it is asked opens nothing;
+      - with bob from a daemon started in Terminal, since launchd's cannot reach a LAN instance (M32's
+        entry, the Developer ID): audio both ways, echo cancellation in a real room (nothing back, against
+        0.80 of bob's own voice without it), mute, deafen, local mute, and the output following a headset
+        and back. The worker costs about a quarter of a core;
+      - it found echo cancellation turned back on mid-call never taking: the spacing of changes counted the
+        reference's frames, which stop with it off. Fixed, counting the frames processed.
     - **Not walked:**
-      - macOS, the author's Mac, at the end of this milestone;
-      - the microphone's following on Windows, since QEMU's USB audio has no microphone and Windows would
-        not unplug the HDA cards;
+      - the microphone's following: on Windows QEMU's USB audio has no microphone and Windows would not
+        unplug the HDA cards, and on the Mac no second microphone was at hand;
       - `VOICE_STATE_UPDATE` as an attach client sees it, which no verb prints.
 - **M35 — Voice input mode**: voice-activity-detection is the default (from M30: RNNoise's voice
   probability, which runs whatever the settings and sets the audio level's V flag at 0.5, with no
