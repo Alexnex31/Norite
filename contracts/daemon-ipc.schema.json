@@ -752,7 +752,7 @@
         "mode": { "$ref": "#/$defs/VoiceInputMode" },
         "key": { "type": "string", "maxLength": 64, "description": "The key as asked, written the canonical way." },
         "hotkey": { "enum": ["", "registering", "waiting", "registered", "unavailable"], "description": "Empty by voice. registering while the daemon registers it; waiting while the desktop asks the person about it (Linux's portal); registered; unavailable, reason saying why. Push-to-talk with a key unavailable sends nothing." },
-        "reason": { "type": "string", "maxLength": 256, "description": "Why the key is unavailable, the OS's or the desktop's words, sanitized; empty otherwise." },
+        "reason": { "type": "string", "maxLength": 256, "description": "Why the key is unavailable, the OS's or the desktop's words, sanitized; and, registered, what to do where the desktop binds the key in its own settings and named none (Hyprland); empty otherwise." },
         "trigger": { "type": "string", "maxLength": 256, "description": "The key as the desktop says it is bound, which on Linux's portal the person chooses and may differ from key, sanitized; empty where the OS takes key as it is." },
         "held": { "type": "boolean", "description": "Whether the key is down now." }
       }

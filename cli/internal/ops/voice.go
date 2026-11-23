@@ -128,13 +128,16 @@ func VoiceInput(in *ipc.VoiceInputStatus) []string {
 		key = in.Trigger + ", as the desktop bound it"
 	}
 	var line string
-	switch in.Hotkey {
-	case ipc.VoiceHotkeyRegistered:
+	switch {
+	case in.Hotkey == ipc.VoiceHotkeyRegistered && in.Reason != "":
+		// A desktop that binds keys only in its own settings, and named none (Hyprland, M25).
+		line = "Push-to-talk is registered, and " + in.Reason
+	case in.Hotkey == ipc.VoiceHotkeyRegistered:
 		line = "Push-to-talk: you are heard while you hold " + key
-	case ipc.VoiceHotkeyWaiting:
+	case in.Hotkey == ipc.VoiceHotkeyWaiting:
 		line = "Push-to-talk on " + key + ": the desktop is asking you to confirm the shortcut, and nobody hears " +
 			"you until it is"
-	case ipc.VoiceHotkeyUnavailable:
+	case in.Hotkey == ipc.VoiceHotkeyUnavailable:
 		line = withReason("Push-to-talk has no key, so nobody hears you", in.Reason) +
 			"; `norite voice mode voice` sends whenever you speak instead"
 	default:

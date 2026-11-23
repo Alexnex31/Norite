@@ -605,3 +605,14 @@ func TestTheStatusSaysWhatBecameOfTheKey(t *testing.T) {
 		assert.NotContains(t, r.out, "\x1b")
 	}
 }
+
+// A desktop that binds the key in its own settings, and named none, says what to do there.
+func TestADesktopThatNamesNoKeySaysWhatToDo(t *testing.T) {
+	st := ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true, Input: &ipc.VoiceInputStatus{
+		Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+space", Hotkey: ipc.VoiceHotkeyRegistered,
+		Reason: "the desktop names no key for it: bind Norite's push to talk in the desktop's settings"}}
+	r := norite(t, &fakeDaemon{status: st}, false, "status")
+	require.NoError(t, r.err)
+	assert.Contains(t, r.out, "Push-to-talk is registered, and the desktop names no key for it: bind Norite's "+
+		"push to talk in the desktop's settings.\n")
+}

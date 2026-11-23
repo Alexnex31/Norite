@@ -257,7 +257,7 @@
                 },
                 "reason": {
                   "type": "string",
-                  "description": "Why the key is unavailable, the OS's or the desktop's words, with what a terminal would act on escaped; empty otherwise."
+                  "description": "Why the key is unavailable, the OS's or the desktop's words, with what a terminal would act on escaped; and, registered, what to do where the desktop binds the key in its own settings and named none; empty otherwise."
                 },
                 "trigger": {
                   "type": "string",

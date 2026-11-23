@@ -32,6 +32,7 @@ import (
 	"github.com/Alexnex31/Norite/daemon/credentials"
 	"github.com/Alexnex31/Norite/daemon/internal/attach"
 	"github.com/Alexnex31/Norite/daemon/internal/gatewayclient"
+	"github.com/Alexnex31/Norite/daemon/internal/hotkey"
 	"github.com/Alexnex31/Norite/daemon/internal/paths"
 	"github.com/Alexnex31/Norite/daemon/internal/relay"
 	"github.com/Alexnex31/Norite/daemon/internal/session"
@@ -307,6 +308,8 @@ func Run(ctx context.Context, opts Options) error {
 				Signaler: signaler, Unavailable: unavailable, Account: signedInAccount(src),
 				Log:     part("voice"),
 				Changed: func(ipc.VoiceStatus) { server.Local(ipc.EventVoice, json.RawMessage("{}")) },
+				// Push-to-talk's key, registered while a call by push-to-talk lasts (M35).
+				Hotkey: hotkey.Default(),
 			})
 			voice.Store(calls)
 			local.voice = calls

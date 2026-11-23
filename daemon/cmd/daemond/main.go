@@ -78,6 +78,14 @@ func main() {
 		return
 	}
 
+	// The run on a goroutine and the main thread kept for macOS's application loop, which Carbon's
+	// push-to-talk key needs (ADR 0034 §2); elsewhere the run on the main goroutine, as it always was. Either
+	// way the process exits with the run's code.
+	serve(func() int { return run(*debug, *logFile, *stderrLog) })
+}
+
+// run is the daemon from its signals to its end, and the code the process exits with.
+func run(debug bool, logFile string, stderrLog bool) int {
 	// NotifyContext rather than a signal channel: the whole shutdown path is a context cancellation
 	// already, so this makes the signal indistinguishable from any other reason to stop. stop() restores
 	// the default disposition, so a second SIGTERM arriving during a hung shutdown kills the process
@@ -86,12 +94,12 @@ func main() {
 	defer stop()
 
 	level := zerolog.InfoLevel
-	if *debug {
+	if debug {
 		level = zerolog.DebugLevel
 	}
 
 	var stderr io.Writer
-	if *stderrLog {
+	if stderrLog {
 		stderr = os.Stderr
 	}
 
@@ -102,37 +110,37 @@ func main() {
 		Version:  Version,
 		Updates:  true,
 		LogLevel: level,
-		LogFile:  *logFile,
+		LogFile:  logFile,
 		Stderr:   stderr,
 	})
 
 	switch {
 	case err == nil:
-		return
+		return 0
 	case errors.Is(err, daemonproc.ErrRestart):
 		// The run returned and released its lock; the program at this one's path is now another version.
 		stop()
 		if selfErr != nil {
 			fmt.Fprintf(os.Stderr, "norite-daemon: cannot find this program to start it again: %v\n", selfErr)
-			os.Exit(exitRestart)
+			return exitRestart
 		}
 		// On Unix this does not return when it works: the process becomes the installed version. On
 		// Windows it returns once that version is started as a process of its own, and this one is done.
 		if err := startAgain(self); err != nil {
 			fmt.Fprintf(os.Stderr, "norite-daemon: cannot start the installed version: %v\n", err)
-			os.Exit(exitRestart)
+			return exitRestart
 		}
-		return
+		return 0
 	case errors.Is(err, daemonproc.ErrAlreadyRunning):
 		// Not a failure worth alarming anyone over — say so plainly and exit with a code the caller can
 		// tell apart from a real problem. `norite daemon status` is the way to see the running one.
 		fmt.Fprintln(os.Stderr, "norite-daemon: already running for this user; nothing to do")
-		os.Exit(exitAlreadyUp)
+		return exitAlreadyUp
 	case errors.Is(err, daemonproc.ErrMisconfigured):
 		fmt.Fprintf(os.Stderr, "norite-daemon: %v\n", err)
-		os.Exit(exitMisconfigured)
+		return exitMisconfigured
 	default:
 		fmt.Fprintf(os.Stderr, "norite-daemon: %v\n", err)
-		os.Exit(exitFailure)
+		return exitFailure
 	}
 }

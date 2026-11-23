@@ -314,7 +314,7 @@ func DecodeVoiceJoin(body json.RawMessage) (VoiceJoinRequest, error) {
 			"noise_suppression and auto_gain, each true or false, and input_mode and push_to_talk_key, each " +
 			"once, and nothing else")
 	}
-	if err := out.VoiceInput.check(); err != nil {
+	if err := out.check(); err != nil {
 		return VoiceJoinRequest{}, err
 	}
 	return out, nil
