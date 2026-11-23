@@ -6,6 +6,7 @@ package hotkey
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,8 +82,9 @@ func connect(t *testing.T, addr string) *dbus.Conn {
 }
 
 // fakePortal is a desktop portal as xdg-desktop-portal 1.19.4 and a desktop behind it answer: the host
-// registry, GlobalShortcuts' session and binding, each answered through a Request object's Response signal
-// after the call returns, and the shortcut's signals when the test says.
+// registry, GlobalShortcuts' session, listing and binding, each answered through a Request object's Response
+// signal after the call returns, and the shortcut's signals when the test says. Like Plasma, it keeps what
+// a binding decided for the sessions after it, which ListShortcuts names.
 type fakePortal struct {
 	t    *testing.T
 	conn *dbus.Conn
@@ -96,6 +98,10 @@ type fakePortal struct {
 	suggested   string
 	session     dbus.ObjectPath
 	closed      bool
+	// binds counts BindShortcuts, and stored is what the last one bound, nil before any: the key the
+	// desktop names, "" for none.
+	binds  int
+	stored *string
 }
 
 // newFakePortal owns the portal's name on addr. registry false plays a portal older than 1.19.4.
@@ -119,7 +125,8 @@ func (r registryOf) Register(app string, _ map[string]dbus.Variant) *dbus.Error 
 	r.p.mu.Lock()
 	defer r.p.mu.Unlock()
 	if app != AppID {
-		return dbus.MakeFailedError(fmt.Errorf("App info not found for %q", app))
+		// What xdg-desktop-portal 1.20 answers for an app id with no .desktop file.
+		return dbus.NewError(portalFailed, []any{fmt.Sprintf("Could not register app ID: App info not found for %q", app)})
 	}
 	r.p.app = app
 	return nil
@@ -167,13 +174,35 @@ func (p *fakePortal) BindShortcuts(sender dbus.Sender, session dbus.ObjectPath, 
 		p.suggested, _ = shortcuts[0].Options["preferred_trigger"].Value().(string)
 	}
 	code, trigger := p.bindCode, p.bindTrigger
+	p.binds++
+	if code == 0 {
+		p.stored = &trigger
+	}
 	p.mu.Unlock()
+	return p.respond(sender, tok, code, map[string]dbus.Variant{"shortcuts": described(trigger)}), nil
+}
+
+// ListShortcuts names what an earlier binding stored, as Plasma's does for a new session of the component.
+func (p *fakePortal) ListShortcuts(sender dbus.Sender, session dbus.ObjectPath, opts map[string]dbus.Variant) (
+	dbus.ObjectPath, *dbus.Error) {
+	tok, _ := opts["handle_token"].Value().(string)
+	p.mu.Lock()
+	stored := p.stored
+	p.mu.Unlock()
+	list := dbus.MakeVariant([]shortcut{})
+	if stored != nil {
+		list = described(*stored)
+	}
+	return p.respond(sender, tok, 0, map[string]dbus.Variant{"shortcuts": list}), nil
+}
+
+// described is the portal's list holding Norite's shortcut, bound to trigger ("" for no key named).
+func described(trigger string) dbus.Variant {
 	given := map[string]dbus.Variant{"description": dbus.MakeVariant("Push to talk in a Norite call")}
 	if trigger != "" {
 		given["trigger_description"] = dbus.MakeVariant(trigger)
 	}
-	return p.respond(sender, tok, code, map[string]dbus.Variant{
-		"shortcuts": dbus.MakeVariant([]shortcut{{ID: shortcutID, Options: given}})}), nil
+	return dbus.MakeVariant([]shortcut{{ID: shortcutID, Options: given}})
 }
 
 // answers sets what BindShortcuts responds.
@@ -200,6 +229,13 @@ func (p *fakePortal) shortcut(session dbus.ObjectPath, id string, down bool) {
 	}
 	require.NoError(p.t, p.conn.Emit(portalPath, name, session, id, uint64(time.Now().UnixMilli()),
 		map[string]dbus.Variant{}))
+}
+
+// bindings is how many times BindShortcuts was asked.
+func (p *fakePortal) bindings() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.binds
 }
 
 func (p *fakePortal) state() (app, suggested string, session dbus.ObjectPath, closed bool) {
@@ -337,4 +373,68 @@ func TestTheDesktopsWordsForTheKeyAreBounded(t *testing.T) {
 	require.NotEmpty(t, st.Trigger)
 	require.LessOrEqual(t, len(st.Trigger), maxTrigger)
 	require.True(t, strings.HasPrefix(long, st.Trigger), "cut off a character's boundary")
+}
+
+// A shortcut the desktop already binds to a key is taken from ListShortcuts, and BindShortcuts is not asked
+// again: on Plasma 6.3 it opens System Settings each time, which M35's manual pass saw at every join. The
+// key still reaches the call. One the desktop holds with no key is asked for again, which is the person's
+// way back to a key.
+func TestABoundShortcutIsNotAskedForAgain(t *testing.T) {
+	addr := privateBus(t)
+	p := newFakePortal(t, addr, true)
+	rec, stop := portalBinding(t, addr, "ctrl+shift+space")
+	require.Eventually(t, func() bool { return rec.last().State == ipc.VoiceHotkeyRegistered }, 10*time.Second,
+		5*time.Millisecond, "%+v", rec.last())
+	require.NoError(t, stop())
+	require.Equal(t, 1, p.bindings())
+
+	rec, stop = portalBinding(t, addr, "ctrl+shift+space")
+	require.Eventually(t, func() bool { return rec.last().State == ipc.VoiceHotkeyRegistered }, 10*time.Second,
+		5*time.Millisecond, "%+v", rec.last())
+	require.Equal(t, Status{State: ipc.VoiceHotkeyRegistered, Trigger: "Ctrl+Shift+Space"}, rec.last())
+	rec.mu.Lock()
+	require.Len(t, rec.statuses, 1, "the desktop was asked again: %+v", rec.statuses)
+	rec.mu.Unlock()
+	require.Equal(t, 1, p.bindings(), "BindShortcuts was asked again")
+	_, _, session, _ := p.state()
+	p.shortcut(session, shortcutID, true)
+	p.shortcut(session, shortcutID, false)
+	require.Eventually(t, func() bool { return len(rec.heldSoFar()) >= 2 }, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, []bool{true, false}, rec.heldSoFar())
+	require.NoError(t, stop())
+
+	// The person took the key away in the desktop's settings: asked again.
+	none := ""
+	p.mu.Lock()
+	p.stored = &none
+	p.mu.Unlock()
+	rec, stop = portalBinding(t, addr, "ctrl+shift+space")
+	require.Eventually(t, func() bool { return rec.last().State == ipc.VoiceHotkeyRegistered }, 10*time.Second,
+		5*time.Millisecond)
+	require.NoError(t, stop())
+	require.Equal(t, 2, p.bindings(), "a shortcut held with no key was not asked for again")
+}
+
+// The registry's refusal is said for what it is. Only the portal's own failure to take the app id is a
+// missing .desktop file; a portal the bus could not start names the bus's error (M35's manual pass masked
+// it, and was sent to install a file that was there).
+func TestAPortalRefusalSaysWhatTheBusSaid(t *testing.T) {
+	for name, want := range map[string]string{
+		"org.freedesktop.DBus.Error.ServiceUnknown": "no desktop portal answers on the session bus",
+		"org.freedesktop.DBus.Error.UnknownMethod": "the desktop portal is older than xdg-desktop-portal 1.19.4, " +
+			"which an unsandboxed program needs to name itself",
+		portalFailed: "the desktop portal does not know Norite: io.github.alexnex31.Norite.desktop is installed by " +
+			"install.sh and by Norite's packages",
+		"org.freedesktop.systemd1.UnitMasked": "the desktop portal could not be asked " +
+			"(org.freedesktop.systemd1.UnitMasked)",
+		"org.freedesktop.DBus.Error.Spawn.ChildExited": "the desktop portal could not be asked " +
+			"(org.freedesktop.DBus.Error.Spawn.ChildExited)",
+	} {
+		var none *noPortal
+		require.ErrorAs(t, portalRefusal(*dbus.NewError(name, []any{"words"})), &none)
+		require.Equal(t, want, none.why, name)
+	}
+	var none *noPortal
+	require.ErrorAs(t, portalRefusal(errors.New("context deadline exceeded")), &none)
+	require.Equal(t, "the desktop portal did not answer", none.why)
 }

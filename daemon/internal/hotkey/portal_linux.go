@@ -93,29 +93,25 @@ func bindPortal(ctx context.Context, bus *dbus.Conn, key Key, ev Events) error {
 		_ = bus.Object(portalName, session).CallWithContext(closeCtx, portalSession+".Close", 0).Err
 	}()
 
-	shortcuts := []shortcut{{ID: shortcutID, Options: map[string]dbus.Variant{
-		"description":       dbus.MakeVariant("Push to talk in a Norite call"),
-		"preferred_trigger": dbus.MakeVariant(key.Trigger()),
-	}}}
-	// The desktop may ask the person now, and waits for them, however long they take.
-	waiting := func() { ev.Status(Status{State: ipc.VoiceHotkeyWaiting}) }
-	code, results, err = req.ask(ctx, 0, waiting, desktop, globalShortcuts+".BindShortcuts", session, shortcuts,
-		"", map[string]dbus.Variant{})
-	switch {
-	case ctx.Err() != nil:
-		return nil
-	case err != nil:
-		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the desktop portal could not bind the shortcut"})
-		return nil
-	case code == 1:
-		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the shortcut was refused on the desktop; " +
-			"join again to be asked again"})
-		return nil
-	case code != 0:
-		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the desktop did not bind the shortcut"})
+	// A shortcut the desktop already binds to a key, from an earlier session, is not asked for again: the
+	// session has it. Plasma 6.3's BindShortcuts opens System Settings at every call, which M35's manual pass
+	// saw at every join, while its CreateSession loads what the component holds, so ListShortcuts names it.
+	// Only a shortcut the desktop lists with a key is taken this way, so a desktop that lists nothing for a
+	// new session is asked as before. Walked on Plasma 6.3 alone.
+	listed := Status{}
+	code, results, err = req.ask(ctx, sessionWithin, nil, desktop, globalShortcuts+".ListShortcuts", session,
+		map[string]dbus.Variant{})
+	if ctx.Err() != nil {
 		return nil
 	}
-	ev.Status(bound(results["shortcuts"]))
+	if err == nil && code == 0 {
+		listed = bound(results["shortcuts"])
+	}
+	if listed.Trigger != "" {
+		ev.Status(listed)
+	} else if !bindShortcut(ctx, req, desktop, session, key, ev) {
+		return nil
+	}
 
 	down := false
 	for {
@@ -144,14 +140,50 @@ func bindPortal(ctx context.Context, bus *dbus.Conn, key Key, ev Events) error {
 	}
 }
 
+// bindShortcut asks the desktop to bind the shortcut, suggesting key, and reports what it decided. It
+// returns whether the shortcut is bound, so the binding goes on to listen for it.
+func bindShortcut(ctx context.Context, req requests, desktop dbus.BusObject, session dbus.ObjectPath, key Key,
+	ev Events) bool {
+	shortcuts := []shortcut{{ID: shortcutID, Options: map[string]dbus.Variant{
+		"description":       dbus.MakeVariant("Push to talk in a Norite call"),
+		"preferred_trigger": dbus.MakeVariant(key.Trigger()),
+	}}}
+	// The desktop may ask the person now, and waits for them, however long they take.
+	waiting := func() { ev.Status(Status{State: ipc.VoiceHotkeyWaiting}) }
+	code, results, err := req.ask(ctx, 0, waiting, desktop, globalShortcuts+".BindShortcuts", session, shortcuts,
+		"", map[string]dbus.Variant{})
+	switch {
+	case ctx.Err() != nil:
+		return false
+	case err != nil:
+		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the desktop portal could not bind the shortcut"})
+		return false
+	case code == 1:
+		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the shortcut was refused on the desktop; " +
+			"join again to be asked again"})
+		return false
+	case code != 0:
+		ev.Status(Status{State: ipc.VoiceHotkeyUnavailable, Reason: "the desktop did not bind the shortcut"})
+		return false
+	}
+	ev.Status(bound(results["shortcuts"]))
+	return true
+}
+
 // shortcut is one entry of the a(sa{sv}) the portal takes.
 type shortcut struct {
 	ID      string
 	Options map[string]dbus.Variant
 }
 
+// portalFailed is the error xdg-desktop-portal's registry answers when it cannot take an app id, as one with
+// no .desktop file installed (XDG_DESKTOP_PORTAL_ERROR_FAILED, "Could not register app ID").
+const portalFailed = "org.freedesktop.portal.Error.Failed"
+
 // portalRefusal is what the host registry's refusal says of the portal: none, one too old to know the
-// registry, or one that does not know Norite's app id.
+// registry, one that does not know Norite's app id, or one the bus could not ask, which names its error.
+// M35's manual pass masked the portal, and the bus's org.freedesktop.systemd1.UnitMasked was worded as a
+// missing .desktop file, sending the person to install a file that was there.
 func portalRefusal(err error) error {
 	var de dbus.Error
 	if !errors.As(err, &de) {
@@ -164,9 +196,12 @@ func portalRefusal(err error) error {
 		"org.freedesktop.DBus.Error.UnknownObject":
 		return &noPortal{why: "the desktop portal is older than xdg-desktop-portal 1.19.4, which an unsandboxed " +
 			"program needs to name itself"}
+	case portalFailed:
+		return &noPortal{why: "the desktop portal does not know Norite: " + AppID + ".desktop is installed by " +
+			"install.sh and by Norite's packages"}
 	}
-	return &noPortal{why: "the desktop portal does not know Norite: " + AppID + ".desktop is installed by " +
-		"install.sh and by Norite's packages"}
+	// The bus's words, a stranger's, are cleaned and cut where they are kept (the status's reason).
+	return &noPortal{why: "the desktop portal could not be asked (" + de.Name + ")"}
 }
 
 // bound is what became of the shortcut as the portal's list of bound shortcuts says: the key the desktop
