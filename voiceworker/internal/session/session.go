@@ -117,6 +117,10 @@ type Session struct {
 	// mayNotSend and mayNotHear are the account's rights in the call, negated so the zero value is a call
 	// that sends and hears (Rights).
 	mayNotSend, mayNotHear atomic.Bool
+	// ptt is whether the input is push-to-talk, held whether its key is down, and presses how many times it
+	// has gone down in the call (M35, Input): the sender's gate reads all three.
+	ptt, held atomic.Bool
+	presses   atomic.Uint64
 
 	codecDone chan struct{}
 	codec     opus.Codec
@@ -218,6 +222,7 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 		codecDone: make(chan struct{}), dspDone: make(chan struct{}),
 		bitrate: opus.DefaultEncoderOptions().Bitrate,
 		cc:      newController(time.Now(), opus.DefaultEncoderOptions().Bitrate)}
+	s.Input(join.Input)
 	if opts.Device != nil {
 		s.devs = newDevices(func(why string, by voiceipc.Devices) { s.endFor(why, &by) })
 		if a, ok := opts.Device.(audio.Authorizer); ok {
@@ -602,6 +607,20 @@ func (s *Session) Subscribe(sub voiceipc.Subscribe) { s.ctl.subscribe(sub) }
 func (s *Session) Processing(p voiceipc.Processing) {
 	settings := dsp.Settings(p.Processing)
 	s.ctl.want.Store(&settings)
+}
+
+// Input is how the microphone is let through now (M35): by voice, the gate reading RNNoise, or by
+// push-to-talk, the gate open while the key is down and for tailFrames after. A press is counted as it
+// arrives, so one released before the sender's next frame still opens the gate for its tail: M25 saw the
+// portal deliver a press and its release at the same instant.
+func (s *Session) Input(in voiceipc.Input) {
+	ptt := in.Mode == voiceipc.InputPushToTalk
+	held := ptt && in.Held
+	if held && !s.held.Load() {
+		s.presses.Add(1)
+	}
+	s.held.Store(held)
+	s.ptt.Store(ptt)
 }
 
 // Ready is closed once the SFU has said ready, which it does only once connected.

@@ -186,6 +186,62 @@ func TestEchoStaysCanceledWhenTheSenderFallsBehind(t *testing.T) {
 	}
 }
 
+// received counts the packets a call's slots have received, every one of which carries an audio level.
+func received(s *Session) int64 {
+	m := mediaOf(s)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, sl := range m.slots {
+		n += sl.levels.Load()
+	}
+	return n
+}
+
+// TestASilentCallerSendsNothingWhileTheOtherSpeaks is M31's carried done-when, held at the far end: a
+// caller whose microphone hears only the room's echo of the other's speech, with echo cancellation on,
+// sends no more than DTX's updates, one every 400 ms. Before M35's gate it sent what AEC3 left of the echo
+// at about -80 dBFS, which Opus does not take for silence: 526 packets in 13 s at M31's manual pass, and
+// none of the tests saw it, since their far end was a tone. The first 4 s are AEC3 converging and RNNoise
+// warming up, which the gate lets through as it would a word. The second caller then speaks, and the first
+// must hear them, or a sender that sent nothing at all would pass.
+func TestASilentCallerSendsNothingWhileTheOtherSpeaks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	h := startHarness(t)
+	for i, c := range []struct {
+		name string
+		s    dsp.Settings
+	}{
+		{"echo cancellation", dsp.Settings{EchoCancellation: true}},
+		{"everything", dsp.AllOn()},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			room := string(rune('1' + i))
+			a := &audiotest.Device{Source: loop(recordings.Far(), 1)}
+			b := &audiotest.Echoing{Room: echoRoom()}
+			sa := h.join(t, room, "1", a, Options{})
+			// Speech from 13 s after this, which the join's own time puts past the 8 s counted.
+			b.Source = speaksAfter(13*time.Second, recordings.Near())
+			h.joinWith(t, room, "2", b, c.s, Options{})
+			time.Sleep(4 * time.Second)
+			from := received(sa)
+			time.Sleep(8 * time.Second)
+			quiet := received(sa) - from
+			time.Sleep(3 * time.Second)
+			spoke := received(sa) - from - quiet
+			t.Logf("the silent caller sent %d packets in 8 s, then %d as they began to speak", quiet, spoke)
+			if spoke < 50 {
+				t.Fatalf("the second caller sent %d packets once speaking: is their sender sending at all?", spoke)
+			}
+			if quiet > 20 {
+				t.Errorf("the silent caller sent %d packets in 8 s, more than DTX's 20 updates", quiet)
+			}
+		})
+	}
+}
+
 // TestTheAudioLevelFollowsTheProcessedSignal reads RFC 6464's audio level and V flag where the SFU
 // delivers them, on the far end's slot. The level is computed on the frame as sent, so a quiet speaker
 // AGC2 raises reads louder; V follows RNNoise's voice probability, so speech sets it and rain does not.

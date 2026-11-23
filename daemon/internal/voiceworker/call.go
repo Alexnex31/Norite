@@ -514,7 +514,9 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}()
 
-	join := voiceipc.Join{Loopback: route.Loopback, Processing: processing}
+	// By voice: the daemon has no push-to-talk key to offer yet.
+	join := voiceipc.Join{Loopback: route.Loopback, Processing: processing,
+		Input: voiceipc.Input{Mode: voiceipc.InputVoice}}
 	if err := w.Send(voiceipc.OpJoin, join); err != nil {
 		<-w.Done()
 		fail(true, w.Exit().Devices, "%s", w.Exit().Reason)

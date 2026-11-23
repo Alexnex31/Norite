@@ -75,7 +75,7 @@ const (
 	// times the queue's depth. A sender further behind than that renders from the oldest it still holds.
 	refFrames = 16
 	// voiceProbability is the probability from RNNoise past which a frame is a voice, for RFC 6464's V flag.
-	// M35's voice detection reads the same signal, and adds the hysteresis this does not.
+	// M35's gate opens at it, and keeps the hysteresis this does not (gate.go).
 	voiceProbability = 0.5
 	// closeWithin bounds closing the audio, so the connection's goodbye still fits in the worker's 2 s
 	// after it: half a second here, then GracefulClose's one.
@@ -117,9 +117,22 @@ type media struct {
 	// turning echo cancellation off was never taken up (M34's Mac pass).
 	frame, remadeAt uint64
 	remade          bool
+	// chainFrames counts the frames the chain in use has processed, so the gate knows RNNoise's warm-up from
+	// its judgment (M35).
+	chainFrames int
+	// gate decides which frames are sent, and lead holds the ones it kept back last, for an opening to send
+	// ahead of itself; leadN is how many it holds, the newest last (M35, gate.go).
+	gate  gate
+	lead  [leadFrames]leadFrame
+	leadN int
+	// seq and twseq number the packets sent, and talking is whether the last frame was sent, so the next
+	// after a gap starts a talk-spurt.
+	seq, twseq uint16
+	talking    bool
+	out        []byte
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
-	// queue lost before send took them.
-	skipped, dropped atomic.Int64
+	// queue lost before send took them; gated those the gate kept back (M35).
+	skipped, dropped, gated atomic.Int64
 	// The bitrate and the loss the encoder is set to, send's alone, and what the bitrate was over the
 	// frames sent, for the close's log line.
 	bitrate, lossPercent    int
@@ -295,6 +308,13 @@ func (m *media) attach(tr remote) {
 	m.receive(tr.tr, audioLevelID(tr.rcv.GetParameters().HeaderExtensions), sl)
 }
 
+// leadFrame is a frame the gate kept back, processed, with its place and whether it held a voice.
+type leadFrame struct {
+	pcm   [audio.FrameSamples]int16
+	n     uint64
+	voice bool
+}
+
 // captureFrame is a frame as the microphone delivered it, which one it was, and how many frames the
 // speakers had played when it was.
 type captureFrame struct {
@@ -336,9 +356,8 @@ func (m *media) captured(pcm []int16) {
 // found every packet late and played silence (M30 /code-review).
 func (m *media) send() {
 	defer m.sent.Done()
-	var seq, twseq uint16
-	talking, skipped, behind := false, false, 0
-	out := make([]byte, opus.MaxPacket)
+	skipped, behind := false, 0
+	m.out = make([]byte, opus.MaxPacket)
 	for {
 		var f captureFrame
 		select {
@@ -350,7 +369,11 @@ func (m *media) send() {
 		if m.s.opts.stall != nil {
 			m.s.opts.stall()
 		}
-		voice := m.process(pcm, f.played)
+		voice, judged := m.process(pcm, f.played)
+		// Every frame is decided, sent or not, so the gate's hang-over counts the frames as they came.
+		send, opened := m.gate.step(gateInput{ptt: m.s.ptt.Load(), held: m.s.held.Load(),
+			presses: m.s.presses.Load(), voice: voice, judged: judged,
+			warming: m.chain != nil && m.chainFrames <= warmFrames})
 		// Read once, so that the DSP's judgment and the skip below agree on this frame.
 		waiting := len(m.frames)
 		// Counted only while a chain runs: a backlog from before the DSP was taken up is not the DSP's.
@@ -371,52 +394,96 @@ func (m *media) send() {
 			continue
 		}
 		skipped = false
-		// Not allowed to send (M33): a server mute, or no SPEAK. The frame has been through the DSP, which
-		// stays converged, and nothing is encoded; the far end hears the gap as silence, and the next packet
-		// starts a talk-spurt.
+		// Not allowed to send (M33): a server mute, no SPEAK, or the person's own mute. The frame has been
+		// through the DSP, which stays converged, and nothing is encoded; the far end hears the gap as
+		// silence, and the next packet starts a talk-spurt. Nor is it kept for a lead-in, which would send it
+		// once the mute lifts.
 		if m.s.mayNotSend.Load() {
-			talking = false
+			m.talking = false
+			continue
+		}
+		voiced := voice >= voiceProbability || !judged
+		if !send {
+			m.keep(pcm, f.n, voiced)
+			m.gated.Add(1)
+			m.talking = false
 			continue
 		}
 		if err := m.adapt(); err != nil {
 			m.s.end(voiceipc.CutReason("the encoder could not be adjusted to the network: " + err.Error()))
 			return
 		}
-		var n int
-		err := m.clocked(&m.encoding, func() (e error) { n, e = m.enc.Encode(pcm, out); return })
-		if err != nil {
-			m.s.end(voiceipc.CutReason("the microphone's audio could not be encoded: " + err.Error()))
-			return
-		}
-		frameTS := uint32(f.n * audio.FrameSamples) //nolint:gosec // RTP's timestamp wraps, as it is meant to
-		if n <= 2 {
-			talking = false
-			continue
-		}
-		p := rtp.Packet{Header: rtp.Header{Version: 2, Marker: !talking, SequenceNumber: seq, Timestamp: frameTS},
-			Payload: out[:n]}
-		seq++
-		talking = true
-		if id := m.s.levelID(); id != 0 {
-			// Both read the frame as processed, which is what is sent: the level after AGC2.
-			if b, err := (rtp.AudioLevelExtension{Level: Level(pcm), Voice: voice}).Marshal(); err == nil {
-				_ = p.SetExtension(id, b)
+		if opened {
+			// The frames just before the opening, oldest first, if they lead up to it without a gap: a frame
+			// skipped for being behind or captured under a mute is never kept, so what is kept from before
+			// one is never sent across it.
+			for i := range m.leadN {
+				l := &m.lead[i]
+				if l.n+uint64(m.leadN-i) != f.n {
+					continue
+				}
+				if !m.emit(l.pcm[:], l.n, l.voice) {
+					return
+				}
 			}
 		}
-		// Numbered and noted as sent before a test's loss drops it, so that the feedback sees the gap, as it
-		// would a packet the network lost.
-		if id := m.s.twccID(); id != 0 {
-			_ = p.SetExtension(id, []byte{byte(twseq >> 8), byte(twseq)})
-			m.s.cc.Sent(twseq, time.Now())
-			twseq++
+		m.leadN = 0
+		if !m.emit(pcm, f.n, voiced) {
+			return
 		}
-		m.noteRate()
-		if m.lossy != nil && m.lossy() {
-			continue
-		}
-		// An error is a track not yet bound or already closed; the call's own state says which.
-		_ = m.track.WriteRTP(&p)
 	}
+}
+
+// keep holds a frame the gate kept back, for an opening to send ahead of itself.
+func (m *media) keep(pcm []int16, n uint64, voice bool) {
+	if m.leadN == leadFrames {
+		copy(m.lead[:], m.lead[1:])
+		m.leadN--
+	}
+	l := &m.lead[m.leadN]
+	copy(l.pcm[:], pcm)
+	l.n, l.voice = n, voice
+	m.leadN++
+}
+
+// emit encodes frame n and writes it to the track, unless DTX made it a packet of two bytes or fewer. It
+// reports false once the call has ended on an encoder that failed.
+func (m *media) emit(pcm []int16, n uint64, voice bool) bool {
+	var size int
+	err := m.clocked(&m.encoding, func() (e error) { size, e = m.enc.Encode(pcm, m.out); return })
+	if err != nil {
+		m.s.end(voiceipc.CutReason("the microphone's audio could not be encoded: " + err.Error()))
+		return false
+	}
+	frameTS := uint32(n * audio.FrameSamples) //nolint:gosec // RTP's timestamp wraps, as it is meant to
+	if size <= 2 {
+		m.talking = false
+		return true
+	}
+	p := rtp.Packet{Header: rtp.Header{Version: 2, Marker: !m.talking, SequenceNumber: m.seq, Timestamp: frameTS},
+		Payload: m.out[:size]}
+	m.seq++
+	m.talking = true
+	if id := m.s.levelID(); id != 0 {
+		// Both read the frame as processed, which is what is sent: the level after AGC2.
+		if b, err := (rtp.AudioLevelExtension{Level: Level(pcm), Voice: voice}).Marshal(); err == nil {
+			_ = p.SetExtension(id, b)
+		}
+	}
+	// Numbered and noted as sent before a test's loss drops it, so that the feedback sees the gap, as it
+	// would a packet the network lost.
+	if id := m.s.twccID(); id != 0 {
+		_ = p.SetExtension(id, []byte{byte(m.twseq >> 8), byte(m.twseq)})
+		m.s.cc.Sent(m.twseq, time.Now())
+		m.twseq++
+	}
+	m.noteRate()
+	if m.lossy != nil && m.lossy() {
+		return true
+	}
+	// An error is a track not yet bound or already closed; the call's own state says which.
+	_ = m.track.WriteRTP(&p)
+	return true
 }
 
 // adapt sets the encoder to the bitrate and the loss the controller asks for, when either has changed.
@@ -452,22 +519,22 @@ func (m *media) noteRate() {
 }
 
 // process runs the DSP on a captured frame in place, after rendering what the speakers had played by the
-// time it was recorded, its stamp, and reports whether the frame holds a voice. With no chain, the frame goes as it was and
-// is reported a voice, as M29 sent every frame.
+// time it was recorded, its stamp, and returns RNNoise's probability that the frame holds a voice, and
+// whether it judged at all. With no chain, the frame goes as it was and nothing judges it, which the gate
+// takes for a voice, as M29 sent every frame.
 //
 // A failed call into the chain drops it for the rest of the call (M30's plan, D1). The reference is other
 // people's decoded audio, so an input that makes the DSP fail is one a stranger can send: ending the call
 // on it would let anybody end everybody's, where this lets them switch off one caller's processing.
 // Starting it again would hand them the same lever on every frame. A call that never returns is the
 // watchdog's.
-func (m *media) process(pcm []int16, stamp uint64) bool {
+func (m *media) process(pcm []int16, stamp uint64) (voice float32, judged bool) {
 	m.takeDSP(stamp)
 	m.reconfigure(stamp)
 	if m.chain == nil {
-		return true
+		return 0, false
 	}
 	copy(m.raw[:], pcm)
-	var voice float32
 	err := m.clocked(&m.dspCall, func() error {
 		played := stamp
 		if !m.settings.EchoCancellation {
@@ -505,9 +572,10 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 		// A failure on the frame's second half leaves its first processed: half delayed and gained, half
 		// not, which would click. The frame goes as it was captured.
 		copy(pcm, m.raw[:])
-		return true
+		return 0, false
 	}
-	return voice >= voiceProbability
+	m.chainFrames++
+	return voice, true
 }
 
 // dropChain ends the chain for the rest of the call, saying why.
@@ -557,7 +625,7 @@ func (m *media) reconfigure(stamp uint64) {
 		m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
 		return
 	}
-	m.chain, m.rendered = c, stamp
+	m.chain, m.rendered, m.chainFrames = c, stamp, 0
 	m.s.ctl.reportDSP(running(want))
 }
 
@@ -598,7 +666,7 @@ func (m *media) takeDSP(stamp uint64) {
 		m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
 		return
 	}
-	m.chain, m.rendered = c, stamp
+	m.chain, m.rendered, m.chainFrames = c, stamp, 0
 	m.s.ctl.reportDSP(running(m.settings))
 }
 

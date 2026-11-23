@@ -139,7 +139,7 @@ func standin(mode string) int {
 	case "unknownop":
 		send(99, struct{}{})
 	case "daemonop":
-		send(voiceipc.OpJoin, voiceipc.Join{})
+		send(voiceipc.OpJoin, byVoice)
 	case "badstate":
 		send(voiceipc.OpState, voiceipc.State{State: "dancing"})
 	case "baddevices":
@@ -183,7 +183,7 @@ func standin(mode string) int {
 	}
 
 	// A correct worker from here, with a few modes that break it at a step. Like the real one, it takes no
-	// RIGHTS, SUBSCRIBE or PROCESSING before its ANSWER, and says the daemon broke the protocol.
+	// RIGHTS, SUBSCRIBE, PROCESSING or INPUT before its ANSWER, and says the daemon broke the protocol.
 	answered := false
 	for {
 		f, err := voiceipc.Read(in, voiceipc.MaxDaemonFrame)
@@ -204,6 +204,13 @@ func standin(mode string) int {
 				}
 				fmt.Printf("processing %t %t %t\n", j.Processing.EchoCancellation, j.Processing.NoiseSuppression,
 					j.Processing.AutoGain)
+			case "inputs":
+				// Says how the join lets the microphone through (M35), into the daemon's log.
+				var j voiceipc.Join
+				if ipc.Decode(f, &j) != nil {
+					return 9
+				}
+				fmt.Printf("input %s %t\n", j.Input.Mode, j.Input.Held)
 			case "panic":
 				panic("a decoder fed something that is not Opus")
 			case "endearly":
@@ -214,7 +221,7 @@ func standin(mode string) int {
 				continue
 			}
 			send(voiceipc.OpOffer, voiceipc.Offer{SDP: "v=0\r\nstandin\r\n"})
-		case voiceipc.OpRights, voiceipc.OpSubscribe, voiceipc.OpProcessing:
+		case voiceipc.OpRights, voiceipc.OpSubscribe, voiceipc.OpProcessing, voiceipc.OpInput:
 			if !answered {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "the daemon broke the protocol"})
 				return 1
@@ -339,6 +346,13 @@ func standin(mode string) int {
 			time.Sleep(300 * time.Millisecond)
 			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: p.Processing.EchoCancellation,
 				NoiseSuppression: p.Processing.NoiseSuppression, AutoGain: p.Processing.AutoGain})
+		case voiceipc.OpInput:
+			// Says every input it was sent, in order, into the daemon's log (M35).
+			var in voiceipc.Input
+			if ipc.Decode(f, &in) != nil || in.Check() != nil {
+				return 9
+			}
+			fmt.Printf("input %s %t\n", in.Mode, in.Held)
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue
