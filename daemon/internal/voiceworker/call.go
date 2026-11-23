@@ -198,6 +198,12 @@ func (v *Voice) Status() ipc.VoiceStatus {
 	if out.Speaking == nil {
 		out.Speaking = []string{}
 	}
+	// The input's state is changed in place, under mu, as the key reports (keyEvents, rebind): what is
+	// handed out is a copy, which the answer is encoded from outside the lock (a race -race found at M35).
+	if out.Input != nil {
+		in := *out.Input
+		out.Input = &in
+	}
 	if p.streams != nil {
 		n := *p.streams
 		out.MaxStreams = &n
