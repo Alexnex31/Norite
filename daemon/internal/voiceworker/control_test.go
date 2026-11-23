@@ -360,6 +360,30 @@ func TestAChangeOfProcessingIsAnsweredWithinItsBound(t *testing.T) {
 		AutoGain: true}, st.DSP, "what still runs")
 }
 
+// A change no report can answer is answered at once, saying what was asked: a call whose worker never said
+// what it processes, as one with no device, and one whose microphone delivers nothing, since a change is taken
+// up frame by frame. Each waited processingWithin and said the same (M34's second /code-review).
+func TestAChangeNoReportCanAnswerIsAnsweredAtOnce(t *testing.T) {
+	fast(t)
+	for _, mode := range []string{"good", "micfails"} {
+		v := standinVoice(t, mode, &selfServer{})
+		_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+		require.NoError(t, err, mode)
+		require.Eventually(t, func() bool {
+			st := v.Status()
+			if mode == "good" { // says nothing of its devices or its processing
+				return st.State == ipc.VoiceInCall && st.DSP == nil
+			}
+			return st.DSP != nil && st.Microphone != nil && st.Microphone.State == ipc.VoiceDeviceFailed
+		}, 5*time.Second, 10*time.Millisecond, "%s: %+v", mode, v.Status())
+		start := time.Now()
+		st := v.Processing(ipc.VoiceJoin{AutoGain: true})
+		require.Less(t, time.Since(start), processingWithin/2, mode)
+		require.Equal(t, &ipc.VoiceJoin{AutoGain: true}, st.Processing, mode)
+		v.Leave()
+	}
+}
+
 // A processing that failed answers a change at once: no change brings it back (M34).
 func TestAFailedProcessingAnswersAChangeAtOnce(t *testing.T) {
 	fast(t)

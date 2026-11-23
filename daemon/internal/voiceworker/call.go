@@ -330,7 +330,8 @@ func (v *Voice) Streams(n int) (ipc.VoiceStatus, error) {
 //
 // It answers once the worker says the processing asked for runs, or failed, or after processingWithin, so
 // that the answer says what the microphone goes through: answered at once, it described the processing
-// before the change, and read as the change not having taken (M34's manual pass).
+// before the change, and read as the change not having taken (M34's manual pass). It answers at once where
+// no report can come (unanswerable).
 func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 	v.mu.Lock()
 	c := v.current
@@ -349,7 +350,7 @@ func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 	defer timeout.Stop()
 	for {
 		v.mu.Lock()
-		if v.current != c || runs(v.status.DSP, p) {
+		if v.current != c || runs(v.status.DSP, p) || unanswerable(v.status) {
 			v.mu.Unlock()
 			return v.Status()
 		}
@@ -363,6 +364,15 @@ func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 			return v.Status()
 		}
 	}
+}
+
+// unanswerable is a call whose worker cannot say a change of processing took: one that never said what it
+// processes, a worker with no device, or whose microphone delivers nothing, since a change is taken up frame
+// by frame. Waiting processingWithin for it said only what was asked, two seconds late (M34's second
+// /code-review).
+func unanswerable(st ipc.VoiceStatus) bool {
+	return st.State == ipc.VoiceInCall &&
+		(st.DSP == nil || st.Microphone == nil || st.Microphone.State != ipc.VoiceDeviceOpen)
 }
 
 // runs is whether what the worker says of its processing answers a change to p: p running, or no

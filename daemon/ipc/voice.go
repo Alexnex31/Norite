@@ -39,7 +39,10 @@ const (
 	PathVoiceDeafen   = PathVoice + "/deafen"
 	PathVoiceUndeafen = PathVoice + "/undeafen"
 	// PathVoiceProcessing is POST (M34): how the person wants the microphone processed, the join's body
-	// with every switch named, for the call there is and every join after it until the sign-in ends.
+	// with every switch named, for the call there is. Without a call it changes nothing: the next join
+	// carries its own, from the client's config.toml, which the client writes. It said "every join after it
+	// until the sign-in ends", which no daemon did (M34's second /code-review): a client that turns a switch
+	// off for good writes the file as well, as `norite voice processing` does.
 	PathVoiceProcessing = PathVoice + "/processing"
 	// PathVoiceMode is POST (M35): how the call's microphone is let through, by voice or by push-to-talk and
 	// with which key, as VoiceInput names them, for the call there is. Without a call it changes nothing: the

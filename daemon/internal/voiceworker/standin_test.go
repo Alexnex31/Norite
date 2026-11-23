@@ -304,7 +304,14 @@ func standin(mode string) int {
 			if mode == "dspfails" { // a processing that failed, which stays off for the rest of the call
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed, Reason: "the chain trapped"})
 			}
-			if mode == "speaks" || mode == "dspsilent" { // who speaks, and the processing as the join asked it, once up (M34)
+			if mode == "speaks" || mode == "dspsilent" || mode == "micfails" { // who speaks, and the processing as the join asked it, once up (M34)
+				// Its devices, as a worker with some says them: in micfails, a microphone that failed, so no
+				// frame takes a change of processing up (M34's second /code-review).
+				mic := voiceipc.Device{State: voiceipc.DeviceOpen}
+				if mode == "micfails" {
+					mic = voiceipc.Device{State: voiceipc.DeviceFailed, Reason: "unplugged"}
+				}
+				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: mic, Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}})
 				send(voiceipc.OpSpeaking, voiceipc.Speaking{Users: []string{"7"}})
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: true,
 					NoiseSuppression: true, AutoGain: true})
@@ -340,7 +347,8 @@ func standin(mode string) int {
 			if ipc.Decode(f, &p) != nil {
 				return 9
 			}
-			if mode == "dspsilent" || mode == "dspfails" {
+			// With micfails no frame comes to take it up, as with a worker whose microphone failed.
+			if mode == "dspsilent" || mode == "dspfails" || mode == "micfails" {
 				continue
 			}
 			time.Sleep(300 * time.Millisecond)
