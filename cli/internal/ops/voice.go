@@ -90,13 +90,18 @@ func VoiceRights(r *ipc.VoiceRights) []string {
 }
 
 // VoiceSelf words what the person set on themselves (M34): a deafen, which mutes too, or a mute, or
-// nothing.
-func VoiceSelf(s ipc.VoiceSelf) []string {
+// nothing. Both hold from call to call, so with no call, inCall false, they are said of the next one: "nobody
+// hears you" under "Not in a voice call" read as a call going on unheard (M34's Mac pass).
+func VoiceSelf(s ipc.VoiceSelf, inCall bool) []string {
 	switch {
-	case s.Deaf:
+	case s.Deaf && inCall:
 		return []string{"You deafened yourself: you hear nobody, and nobody hears you"}
-	case s.Mute:
+	case s.Deaf:
+		return []string{"You deafened yourself: your next call starts deafened, and `norite voice undeafen` undoes it"}
+	case s.Mute && inCall:
 		return []string{"You muted yourself: nobody hears you"}
+	case s.Mute:
+		return []string{"You muted yourself: your next call starts muted, and `norite voice unmute` undoes it"}
 	}
 	return nil
 }

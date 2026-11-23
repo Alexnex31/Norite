@@ -503,3 +503,19 @@ func TestTheStatusSaysTheCallsControl(t *testing.T) {
 	assert.Contains(t, r.out, "Nobody is speaking.\n")
 	assert.Contains(t, r.out, "You deafened yourself: you hear nobody, and nobody hears you.\n")
 }
+
+// With no call, what the person set on themselves is said of the next call, which it holds for: "nobody
+// hears you" under "Not in a voice call" read as a call going on unheard (M34's Mac pass).
+func TestWithNoCallTheSelfSwitchesAreSaidOfTheNextCall(t *testing.T) {
+	d := &fakeDaemon{status: ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true,
+		Self: ipc.VoiceSelf{Mute: true}}}
+	r := norite(t, d, false, "status")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n"+
+		"You muted yourself: your next call starts muted, and `norite voice unmute` undoes it.\n", r.out)
+	d.status.Self = ipc.VoiceSelf{Mute: true, Deaf: true}
+	r = norite(t, d, false, "status")
+	require.NoError(t, r.err)
+	assert.Equal(t, "Not in a voice call.\n"+
+		"You deafened yourself: your next call starts deafened, and `norite voice undeafen` undoes it.\n", r.out)
+}

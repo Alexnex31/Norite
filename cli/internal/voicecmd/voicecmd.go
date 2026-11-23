@@ -529,7 +529,7 @@ func (v view) Text(t *output.Text) {
 			t.Line("Speaking now: %s.", ids(v.Speaking))
 		}
 	}
-	for _, line := range ops.VoiceSelf(v.Self) {
+	for _, line := range ops.VoiceSelf(v.Self, v.State != ipc.VoiceIdle) {
 		t.Line("%s.", line)
 	}
 	if len(v.LocalMutes) > 0 {
