@@ -127,14 +127,42 @@ type Coordinator struct {
 	// AfterCommit hooks raced, leaving the channel's viewers on the older (M34's /code-review). The lock is
 	// held from before the write until its event is published. Every writer of a call's row is the process
 	// holding the call, so a lock of the process's orders them all.
-	rows [64]sync.Mutex
+	//
+	// One lock per connection, there while somebody holds or waits for it, under rowsMu. A join holds its
+	// own across its wait for the channel's advisory lock, and a stripe of 64 shared with other calls made
+	// their leaves, updates and re-checks wait on another channel's contention (M34's second /code-review).
+	rowsMu sync.Mutex
+	rows   map[snowflake.ID]*rowMutex
+}
+
+// rowMutex is one connection's lock, and how many hold it or wait for it.
+type rowMutex struct {
+	mu    sync.Mutex
+	users int
 }
 
 // rowLock is the lock of conn's row, which runs fn: a write of it and the publish of its event.
 func (c *Coordinator) rowLock(conn snowflake.ID, fn func()) {
-	m := &c.rows[uint64(conn)%uint64(len(c.rows))]
-	m.Lock()
-	defer m.Unlock()
+	c.rowsMu.Lock()
+	if c.rows == nil {
+		c.rows = map[snowflake.ID]*rowMutex{}
+	}
+	l := c.rows[conn]
+	if l == nil {
+		l = &rowMutex{}
+		c.rows[conn] = l
+	}
+	l.users++
+	c.rowsMu.Unlock()
+	defer func() {
+		c.rowsMu.Lock()
+		if l.users--; l.users == 0 {
+			delete(c.rows, conn)
+		}
+		c.rowsMu.Unlock()
+	}()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	fn()
 }
 
