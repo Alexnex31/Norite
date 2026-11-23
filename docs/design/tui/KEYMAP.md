@@ -71,14 +71,16 @@ filter, `C-c z` reverting an unsaved settings section — it keeps the global ch
 | `C-c m` | toggle mic | global |
 | `C-c d` | toggle deafen | global |
 | `C-c V` | promote in-call strip to full voice view (`4b` → `4a`) | global |
-| `C-space` (hold) | push to talk | global |
+| `C-space` | push to talk: held where the terminal reports releases, toggled where it does not | global |
 
-> **`C-space` (hold) is not deliverable as drawn**
-> ([ADR 0034](../../adr/0034-mic-permission-and-global-hotkey.md), M25). A terminal reports no key release
-> unless it speaks the kitty keyboard protocol with event types, so "hold" arrives as a press and then
-> autorepeat. `C-space` is NUL in most terminals, and the input-source switch on macOS. Push-to-talk's real
-> path is the daemon's OS-wide hotkey (M35). What this row becomes in the terminal, release events where the
-> terminal has them and a toggle where it does not, is M35's and M44's to settle.
+> **Push-to-talk's real path is the daemon's OS-wide key** ([ADR
+> 0034](../../adr/0034-mic-permission-and-global-hotkey.md), built at M35): `voice.push_to_talk_key`,
+> `ctrl+shift+space` by default, which works whatever program is in front. `C-space` is the terminal's own,
+> settled at M35 and built with M44's dispatcher. A terminal reports no key release unless it speaks the kitty
+> keyboard protocol with event types, so where it does, `C-space` is held as the key is; where it does not, a
+> press starts talking and the next press stops, and the status bar says which the terminal gave. `C-space` is
+> NUL in most terminals and the input-source switch on macOS, so the row is rebindable like any other. It
+> reaches the daemon as the OS key's state does, never as a second gate.
 
 ## Client & trust
 | Chord | Action | Scope |

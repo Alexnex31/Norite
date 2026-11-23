@@ -1911,11 +1911,12 @@ And on the client config and the daemon's own requests, from M21:
   status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
   not be read, a check is already under way, or the instance has not been heard from. It takes no body and
   carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
-  instance (ledger). Five exceptions, each sent only after a request that says nothing has shown the daemon
+  instance (ledger). Six exceptions, each sent only after a request that says nothing has shown the daemon
   knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), the voice join's
-  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly, and since M34 the user id in
+  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly, since M34 the user id in
   `/@daemon/voice/local-mute/{user}` and `local-unmute/{user}`, the number in `/@daemon/voice/streams/{n}`
-  and the body of `/@daemon/voice/processing`, which `norite voice` sends only after `GET /@daemon/voice`.
+  and the body of `/@daemon/voice/processing`, and since M35 the body of `/@daemon/voice/mode`, which carries
+  the push-to-talk key; `norite voice` sends each only after `GET /@daemon/voice`.
   `relay.Target` refuses the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is
   `daemonclient.Local`, `LocalWith` for a body, and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,

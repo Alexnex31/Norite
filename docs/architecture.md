@@ -2511,6 +2511,14 @@ around whoever is transmitting) plus two **separate** actions (each its own keyb
   It is held only during a call, and only once a session exists. `golang.design/x/hotkey`, named here until
   M25, needs cgo the daemon does not have.
 
+  Both are one gate in the worker, on what is sent (M35). By voice it reads RNNoise's probability: open at
+  0.5, kept open down to 0.3, shut 300 ms after the last frame that kept it, the two frames before an
+  opening sent ahead of it, and a chain's first four frames, RNNoise warming up, ignored. With no chain to
+  judge it is open. By push-to-talk the daemon tells it when the key goes down and up, and it stays open
+  200 ms after. A shut gate encodes nothing, which is also what stops AEC3's residue being sent while
+  somebody else speaks (M31). The mode and the key are `voice.input_mode` and `voice.push_to_talk_key`,
+  carried in the join and changed by `norite voice mode`.
+
 **Auto-rejoin**: on daemon crash/restart mid-call, the daemon respawns the worker and rejoins using the
 persisted "last active voice channel" breadcrumb (§3) — the one exception to otherwise-ephemeral daemon
 state. The client auto-update mechanism (§11) defers applying an update while a voice session is active, so

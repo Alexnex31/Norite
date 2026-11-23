@@ -2824,6 +2824,12 @@ of this section.
   as `norite licenses`. It lands here rather than in its own milestone because it is a help surface and
   this is the milestone that builds them; M20a already carries the plain-text form (ADR 0032, AGPL §5(d)).
 
+  **`C-space`, push-to-talk in the terminal, settled at M35** (KEYMAP): held where the terminal reports key
+  releases (the kitty keyboard protocol's event types), toggled where it does not, the status bar saying
+  which. It reaches the daemon as the OS-wide key's state does, through a request beside `/@daemon/voice/mode`
+  that this milestone adds, and sets nothing the key's gate does not (M35's worker gate). The OS-wide key
+  stays the primary path.
+
   Done when: the documented default set is wired, a remap in `[tui.keys]` takes effect without a rebuild,
   `C-h` lists what is actually bound rather than a hardcoded table, and `C-c ?` shows a revision that
   resolves in the repository the same screen names.
