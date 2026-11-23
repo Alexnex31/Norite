@@ -175,6 +175,9 @@ type call struct {
 	boundKey string
 	unbind   func()
 	bindGen  int
+	// bindAgain is a key asked for again after it could not be had, under Voice.mu: rebind binds it anew
+	// though it is the key bound.
+	bindAgain bool
 }
 
 // NewVoice builds the daemon's voice calls. Nothing runs until a join.
@@ -382,9 +385,15 @@ func (v *Voice) Input(in ipc.VoiceInput) ipc.VoiceStatus {
 	if c != nil {
 		c.input = in
 		next := &ipc.VoiceInputStatus{Mode: in.Mode, Key: in.Key}
-		// The same key, already bound, keeps what became of it, which rebind then leaves alone.
+		// The same key, already bound, keeps what became of it, which rebind then leaves alone; unless it
+		// could not be had, when asking again is how somebody who freed it tries again (M35's manual pass:
+		// another program held it at the join, let it go, and push-to-talk asked again changed nothing).
 		if was := v.status.Input; in.Mode == ipc.VoiceInputPushToTalk && was != nil && c.boundKey == in.Key {
-			next.Hotkey, next.Reason, next.Trigger, next.Held = was.Hotkey, was.Reason, was.Trigger, was.Held
+			if was.Hotkey == ipc.VoiceHotkeyUnavailable {
+				c.bindAgain = true
+			} else {
+				next.Hotkey, next.Reason, next.Trigger, next.Held = was.Hotkey, was.Reason, was.Trigger, was.Held
+			}
 		}
 		v.status.Input = next
 	}
@@ -409,7 +418,9 @@ func (v *Voice) rebind(c *call) {
 	if v.current == c && c.input.Mode == ipc.VoiceInputPushToTalk {
 		want = c.input.Key
 	}
-	if want == c.boundKey {
+	again := c.bindAgain && want != ""
+	c.bindAgain = false
+	if want == c.boundKey && !again {
 		v.mu.Unlock()
 		return
 	}

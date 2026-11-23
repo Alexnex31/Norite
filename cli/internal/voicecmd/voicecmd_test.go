@@ -597,7 +597,8 @@ func TestTheStatusSaysWhatBecameOfTheKey(t *testing.T) {
 		{ptt(ipc.VoiceHotkeyRegistered, "", "Meta+F\x1b[2J", false), "Push-to-talk: you are heard while you hold " +
 			"Meta+F\uFFFD[2J, as the desktop bound it."},
 		{ptt(ipc.VoiceHotkeyUnavailable, "another program holds it", "", false), "Push-to-talk has no key, so " +
-			"nobody hears you: another program holds it; `norite voice mode voice` sends whenever you speak instead."},
+			"nobody hears you: another program holds it; `norite voice mode push-to-talk` tries the key again, and " +
+			"`norite voice mode voice` sends whenever you speak instead."},
 	} {
 		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")
 		require.NoError(t, r.err)

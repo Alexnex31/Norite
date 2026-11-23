@@ -139,7 +139,8 @@ func VoiceInput(in *ipc.VoiceInputStatus) []string {
 			"you until it is"
 	case in.Hotkey == ipc.VoiceHotkeyUnavailable:
 		line = withReason("Push-to-talk has no key, so nobody hears you", in.Reason) +
-			"; `norite voice mode voice` sends whenever you speak instead"
+			"; `norite voice mode push-to-talk` tries the key again, and `norite voice mode voice` sends whenever " +
+			"you speak instead"
 	default:
 		line = "Push-to-talk on " + key + ": the key is being registered"
 	}

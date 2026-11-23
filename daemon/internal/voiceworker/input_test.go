@@ -201,6 +201,33 @@ func TestAModeChangeDuringACallBindsAndReleasesTheKey(t *testing.T) {
 	waitInputs(t, logged, "voice false", "push_to_talk false", "push_to_talk true", "push_to_talk false", "voice false")
 }
 
+// Push-to-talk asked for again tries a key it could not have, since its holder may have let it go (M35's
+// manual pass: Windows refused the key another program held at the join, which then let it go), and leaves
+// a key it has alone.
+func TestPushToTalkAskedAgainTriesAKeyItCouldNotHave(t *testing.T) {
+	fast(t)
+	binder := &fakeBinder{}
+	v, _ := inputVoice(t, binder)
+	_, err := v.JoinWith(context.Background(), "1", byPushToTalk("ctrl+shift+space"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(binder.all()) == 1 }, 5*time.Second, 5*time.Millisecond)
+	first := binder.all()[0]
+	first.ev.Status(hotkey.Status{State: ipc.VoiceHotkeyUnavailable, Reason: "another program holds the key"})
+
+	st := v.Input(ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+space"})
+	require.Len(t, binder.all(), 2, "the key was not tried again")
+	require.False(t, first.live(), "the binding that failed was not released first")
+	require.Equal(t, "ctrl+shift+space", binder.all()[1].key)
+	require.Equal(t, &ipc.VoiceInputStatus{Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+space",
+		Hotkey: ipc.VoiceHotkeyRegistering}, st.Input)
+
+	binder.all()[1].ev.Status(hotkey.Status{State: ipc.VoiceHotkeyRegistered})
+	st = v.Input(ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+space"})
+	require.Len(t, binder.all(), 2, "a key the call has was bound again")
+	require.True(t, binder.all()[1].live())
+	require.Equal(t, ipc.VoiceHotkeyRegistered, st.Input.Hotkey)
+}
+
 // With no key to offer, a call by push-to-talk goes on, and says why nobody hears it.
 func TestPushToTalkWithNoKeyToOfferSaysSo(t *testing.T) {
 	fast(t)
