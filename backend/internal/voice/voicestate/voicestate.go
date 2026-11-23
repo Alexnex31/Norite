@@ -23,6 +23,8 @@ type State struct {
 	Mute          bool         `json:"mute"`
 	Deaf          bool         `json:"deaf"`
 	Suppress      bool         `json:"suppress"`
+	SelfMute      bool         `json:"self_mute"`
+	SelfDeaf      bool         `json:"self_deaf"`
 	SupportsVideo bool         `json:"supports_video"`
 	JoinedAt      time.Time    `json:"joined_at"`
 }
@@ -32,8 +34,9 @@ func Of(r db.VoiceState) State {
 	return State{
 		ConnectionID: snowflake.ID(r.ConnectionID), GuildID: snowflake.ID(r.GuildID),
 		ChannelID: snowflake.ID(r.ChannelID), UserID: snowflake.ID(r.UserID),
-		Mute: r.Mute, Deaf: r.Deaf, Suppress: r.Suppress, SupportsVideo: r.SupportsVideo,
-		JoinedAt: r.CreatedAt.Time.UTC(),
+		Mute: r.Mute, Deaf: r.Deaf, Suppress: r.Suppress, SelfMute: r.SelfMute, SelfDeaf: r.SelfDeaf,
+		SupportsVideo: r.SupportsVideo,
+		JoinedAt:      r.CreatedAt.Time.UTC(),
 	}
 }
 

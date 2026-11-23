@@ -39,7 +39,7 @@ func (q *Queries) DeleteAllVoiceStates(ctx context.Context) error {
 }
 
 const deleteVoiceState = `-- name: DeleteVoiceState :one
-DELETE FROM voice_states WHERE connection_id = $1 RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at
+DELETE FROM voice_states WHERE connection_id = $1 RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf
 `
 
 // A connection's end. Returning the row, so the caller can tell the channel it was in, and no row when
@@ -59,6 +59,8 @@ func (q *Queries) DeleteVoiceState(ctx context.Context, connectionID int64) (Voi
 		&i.Suppress,
 		&i.SupportsVideo,
 		&i.CreatedAt,
+		&i.SelfMute,
+		&i.SelfDeaf,
 	)
 	return i, err
 }
@@ -107,7 +109,7 @@ func (q *Queries) GetMembersVoiceFlags(ctx context.Context, arg GetMembersVoiceF
 }
 
 const getVoiceState = `-- name: GetVoiceState :one
-SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at FROM voice_states WHERE connection_id = $1
+SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf FROM voice_states WHERE connection_id = $1
 `
 
 func (q *Queries) GetVoiceState(ctx context.Context, connectionID int64) (VoiceState, error) {
@@ -125,17 +127,20 @@ func (q *Queries) GetVoiceState(ctx context.Context, connectionID int64) (VoiceS
 		&i.Suppress,
 		&i.SupportsVideo,
 		&i.CreatedAt,
+		&i.SelfMute,
+		&i.SelfDeaf,
 	)
 	return i, err
 }
 
 const insertVoiceState = `-- name: InsertVoiceState :one
 INSERT INTO voice_states (
-  connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video
+  connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video,
+  self_mute, self_deaf
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
-RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at
+RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf
 `
 
 type InsertVoiceStateParams struct {
@@ -149,6 +154,8 @@ type InsertVoiceStateParams struct {
 	Deaf          bool
 	Suppress      bool
 	SupportsVideo bool
+	SelfMute      bool
+	SelfDeaf      bool
 }
 
 // A connection the SFU has answered, as the channel is told about it.
@@ -164,6 +171,8 @@ func (q *Queries) InsertVoiceState(ctx context.Context, arg InsertVoiceStatePara
 		arg.Deaf,
 		arg.Suppress,
 		arg.SupportsVideo,
+		arg.SelfMute,
+		arg.SelfDeaf,
 	)
 	var i VoiceState
 	err := row.Scan(
@@ -178,12 +187,14 @@ func (q *Queries) InsertVoiceState(ctx context.Context, arg InsertVoiceStatePara
 		&i.Suppress,
 		&i.SupportsVideo,
 		&i.CreatedAt,
+		&i.SelfMute,
+		&i.SelfDeaf,
 	)
 	return i, err
 }
 
 const listVoiceStatesInChannel = `-- name: ListVoiceStatesInChannel :many
-SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at FROM voice_states WHERE channel_id = $1 ORDER BY connection_id
+SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf FROM voice_states WHERE channel_id = $1 ORDER BY connection_id
 `
 
 // A channel's participants, oldest first. Bounded by the SFU's participants per room, which is what a
@@ -209,6 +220,8 @@ func (q *Queries) ListVoiceStatesInChannel(ctx context.Context, channelID int64)
 			&i.Suppress,
 			&i.SupportsVideo,
 			&i.CreatedAt,
+			&i.SelfMute,
+			&i.SelfDeaf,
 		); err != nil {
 			return nil, err
 		}
@@ -221,7 +234,7 @@ func (q *Queries) ListVoiceStatesInChannel(ctx context.Context, channelID int64)
 }
 
 const listVoiceStatesInGuild = `-- name: ListVoiceStatesInGuild :many
-SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at FROM voice_states WHERE guild_id = $1 ORDER BY connection_id
+SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf FROM voice_states WHERE guild_id = $1 ORDER BY connection_id
 `
 
 // The guild's connections, for the voice re-check. Bounded by its voice channels times the SFU's
@@ -247,6 +260,8 @@ func (q *Queries) ListVoiceStatesInGuild(ctx context.Context, guildID int64) ([]
 			&i.Suppress,
 			&i.SupportsVideo,
 			&i.CreatedAt,
+			&i.SelfMute,
+			&i.SelfDeaf,
 		); err != nil {
 			return nil, err
 		}
@@ -259,7 +274,7 @@ func (q *Queries) ListVoiceStatesInGuild(ctx context.Context, guildID int64) ([]
 }
 
 const listVoiceStatesOfDevice = `-- name: ListVoiceStatesOfDevice :many
-SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at FROM voice_states WHERE user_id = $1 AND device_id = $2
+SELECT connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf FROM voice_states WHERE user_id = $1 AND device_id = $2
 `
 
 type ListVoiceStatesOfDeviceParams struct {
@@ -289,6 +304,8 @@ func (q *Queries) ListVoiceStatesOfDevice(ctx context.Context, arg ListVoiceStat
 			&i.Suppress,
 			&i.SupportsVideo,
 			&i.CreatedAt,
+			&i.SelfMute,
+			&i.SelfDeaf,
 		); err != nil {
 			return nil, err
 		}
@@ -315,7 +332,7 @@ func (q *Queries) LockVoiceChannel(ctx context.Context, channelID int64) error {
 }
 
 const updateVoiceStateRights = `-- name: UpdateVoiceStateRights :one
-UPDATE voice_states SET mute = $2, deaf = $3, suppress = $4 WHERE connection_id = $1 RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at
+UPDATE voice_states SET mute = $2, deaf = $3, suppress = $4 WHERE connection_id = $1 RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf
 `
 
 type UpdateVoiceStateRightsParams struct {
@@ -346,6 +363,50 @@ func (q *Queries) UpdateVoiceStateRights(ctx context.Context, arg UpdateVoiceSta
 		&i.Suppress,
 		&i.SupportsVideo,
 		&i.CreatedAt,
+		&i.SelfMute,
+		&i.SelfDeaf,
+	)
+	return i, err
+}
+
+const updateVoiceStateSelf = `-- name: UpdateVoiceStateSelf :one
+UPDATE voice_states SET self_mute = $3, self_deaf = $4
+WHERE connection_id = $1 AND session_id = $2 AND (self_mute <> $3 OR self_deaf <> $4)
+RETURNING connection_id, guild_id, channel_id, user_id, session_id, device_id, mute, deaf, suppress, supports_video, created_at, self_mute, self_deaf
+`
+
+type UpdateVoiceStateSelfParams struct {
+	ConnectionID int64
+	SessionID    string
+	SelfMute     bool
+	SelfDeaf     bool
+}
+
+// What the caller set on themselves (M34). Keyed by the connection and its session both, so an update can
+// only reach the call its own session holds. No row when that call has ended, or when nothing changed, so
+// the channel is told only of a change.
+func (q *Queries) UpdateVoiceStateSelf(ctx context.Context, arg UpdateVoiceStateSelfParams) (VoiceState, error) {
+	row := q.db.QueryRow(ctx, updateVoiceStateSelf,
+		arg.ConnectionID,
+		arg.SessionID,
+		arg.SelfMute,
+		arg.SelfDeaf,
+	)
+	var i VoiceState
+	err := row.Scan(
+		&i.ConnectionID,
+		&i.GuildID,
+		&i.ChannelID,
+		&i.UserID,
+		&i.SessionID,
+		&i.DeviceID,
+		&i.Mute,
+		&i.Deaf,
+		&i.Suppress,
+		&i.SupportsVideo,
+		&i.CreatedAt,
+		&i.SelfMute,
+		&i.SelfDeaf,
 	)
 	return i, err
 }

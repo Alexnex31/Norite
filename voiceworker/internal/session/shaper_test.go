@@ -171,6 +171,13 @@ func (s *shaper) limit(rate float64) {
 	s.rate = rate
 }
 
+// deep sets how long a packet may wait before the shaper drops it.
+func (s *shaper) deep(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxQueue = d
+}
+
 // delivered is what reached the SFU of the caller's audio since the last call.
 type delivered struct {
 	kbps             float64

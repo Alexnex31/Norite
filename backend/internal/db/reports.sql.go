@@ -13,9 +13,11 @@ import (
 
 const createReport = `-- name: CreateReport :one
 
-INSERT INTO reports (id, reporter_id, target_type, target_id, guild_id, reason_category, detail, routed_to)
-VALUES ($1, $2, $3, $4, $7::bigint, $5, $8::text, $6)
-RETURNING id, reporter_id, target_type, target_id, guild_id, reason_category, detail, status, routed_to, resolved_by, created_at, resolved_at
+INSERT INTO reports (id, reporter_id, target_type, target_id, guild_id, reason_category, detail, routed_to,
+                     channel_id)
+VALUES ($1, $2, $3, $4, $7::bigint, $5, $8::text, $6,
+        $9::bigint)
+RETURNING id, reporter_id, target_type, target_id, guild_id, reason_category, detail, status, routed_to, resolved_by, created_at, resolved_at, channel_id
 `
 
 type CreateReportParams struct {
@@ -27,6 +29,7 @@ type CreateReportParams struct {
 	RoutedTo       int16
 	GuildID        *int64
 	Detail         *string
+	ChannelID      *int64
 }
 
 // Milestone M16 — filing a report, and the guild-moderator triage queue that reads it.
@@ -40,6 +43,7 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 		arg.RoutedTo,
 		arg.GuildID,
 		arg.Detail,
+		arg.ChannelID,
 	)
 	var i Report
 	err := row.Scan(
@@ -55,20 +59,23 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 		&i.ResolvedBy,
 		&i.CreatedAt,
 		&i.ResolvedAt,
+		&i.ChannelID,
 	)
 	return i, err
 }
 
 const getGuildReport = `-- name: GetGuildReport :one
 SELECT
-  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at,
+  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at, r.channel_id,
   mv.content AS target_content,
   m.is_e2e AS target_is_e2e,
   m.deleted_at AS target_deleted_at,
   m.channel_id AS target_channel_id,
-  m.author_id AS target_author_id
+  m.author_id AS target_author_id,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 LEFT JOIN messages mv ON mv.id = m.id AND NOT mv.is_e2e
 WHERE r.id = $1 AND r.guild_id = $2
 `
@@ -85,6 +92,7 @@ type GetGuildReportRow struct {
 	TargetDeletedAt pgtype.Timestamptz
 	TargetChannelID *int64
 	TargetAuthorID  *int64
+	TargetUserID    *int64
 }
 
 // One report in full: the only place this milestone returns reported content.
@@ -126,11 +134,13 @@ func (q *Queries) GetGuildReport(ctx context.Context, arg GetGuildReportParams) 
 		&i.Report.ResolvedBy,
 		&i.Report.CreatedAt,
 		&i.Report.ResolvedAt,
+		&i.Report.ChannelID,
 		&i.TargetContent,
 		&i.TargetIsE2e,
 		&i.TargetDeletedAt,
 		&i.TargetChannelID,
 		&i.TargetAuthorID,
+		&i.TargetUserID,
 	)
 	return i, err
 }
@@ -167,11 +177,13 @@ func (q *Queries) GetMessageForReport(ctx context.Context, id int64) (Message, e
 
 const listGuildReports = `-- name: ListGuildReports :many
 SELECT
-  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at,
+  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at, r.channel_id,
   m.is_e2e AS target_is_e2e,
-  m.deleted_at AS target_deleted_at
+  m.deleted_at AS target_deleted_at,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 WHERE r.guild_id = $1
   AND r.id < COALESCE($3::bigint, 9223372036854775807)
 ORDER BY r.id DESC
@@ -188,6 +200,7 @@ type ListGuildReportsRow struct {
 	Report          Report
 	TargetIsE2e     *bool
 	TargetDeletedAt pgtype.Timestamptz
+	TargetUserID    *int64
 }
 
 // The same page across every status. See above for why this is a second query rather than a filter.
@@ -213,8 +226,10 @@ func (q *Queries) ListGuildReports(ctx context.Context, arg ListGuildReportsPara
 			&i.Report.ResolvedBy,
 			&i.Report.CreatedAt,
 			&i.Report.ResolvedAt,
+			&i.Report.ChannelID,
 			&i.TargetIsE2e,
 			&i.TargetDeletedAt,
+			&i.TargetUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -228,11 +243,13 @@ func (q *Queries) ListGuildReports(ctx context.Context, arg ListGuildReportsPara
 
 const listGuildReportsByStatus = `-- name: ListGuildReportsByStatus :many
 SELECT
-  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at,
+  r.id, r.reporter_id, r.target_type, r.target_id, r.guild_id, r.reason_category, r.detail, r.status, r.routed_to, r.resolved_by, r.created_at, r.resolved_at, r.channel_id,
   m.is_e2e AS target_is_e2e,
-  m.deleted_at AS target_deleted_at
+  m.deleted_at AS target_deleted_at,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 WHERE r.guild_id = $1
   AND r.status = $2
   AND r.id < COALESCE($4::bigint, 9223372036854775807)
@@ -251,6 +268,7 @@ type ListGuildReportsByStatusRow struct {
 	Report          Report
 	TargetIsE2e     *bool
 	TargetDeletedAt pgtype.Timestamptz
+	TargetUserID    *int64
 }
 
 // One page of a guild's triage queue, filtered to a status.
@@ -322,8 +340,10 @@ func (q *Queries) ListGuildReportsByStatus(ctx context.Context, arg ListGuildRep
 			&i.Report.ResolvedBy,
 			&i.Report.CreatedAt,
 			&i.Report.ResolvedAt,
+			&i.Report.ChannelID,
 			&i.TargetIsE2e,
 			&i.TargetDeletedAt,
+			&i.TargetUserID,
 		); err != nil {
 			return nil, err
 		}
@@ -339,7 +359,7 @@ const resolveReport = `-- name: ResolveReport :one
 UPDATE reports
 SET status = $3, resolved_at = now(), resolved_by = $4
 WHERE id = $1 AND guild_id = $2 AND status = 0
-RETURNING id, reporter_id, target_type, target_id, guild_id, reason_category, detail, status, routed_to, resolved_by, created_at, resolved_at
+RETURNING id, reporter_id, target_type, target_id, guild_id, reason_category, detail, status, routed_to, resolved_by, created_at, resolved_at, channel_id
 `
 
 type ResolveReportParams struct {
@@ -376,6 +396,7 @@ func (q *Queries) ResolveReport(ctx context.Context, arg ResolveReportParams) (R
 		&i.ResolvedBy,
 		&i.CreatedAt,
 		&i.ResolvedAt,
+		&i.ChannelID,
 	)
 	return i, err
 }

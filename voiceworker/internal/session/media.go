@@ -107,6 +107,16 @@ type media struct {
 	overruns atomic.Int64
 	// noRef is set once the call will have no chain, so the speakers stop writing a reference nobody reads.
 	noRef atomic.Bool
+	// settings is which stages the chain runs, send's, and echo whether that includes the echo canceller,
+	// which the speakers read (M34: a PROCESSING makes a new chain, and never brings back one that failed).
+	settings dsp.Settings
+	echo     atomic.Bool
+	// frame counts the frames send has processed, and remadeAt is the one the chain was last made again at
+	// for a change, once remade is set: changes are taken up reconfigureFrames apart. Counted here, never off
+	// the reference's stamp, which stands still while echo cancellation is off: spaced by it, a change after
+	// turning echo cancellation off was never taken up (M34's Mac pass).
+	frame, remadeAt uint64
+	remade          bool
 	// skipped counts the frames send processed and did not encode for being behind, dropped those the
 	// queue lost before send took them.
 	skipped, dropped atomic.Int64
@@ -170,7 +180,11 @@ func (s *Session) startMedia(ctx context.Context) error {
 	// ready, so it never holds back a call's first words.
 	m := &media{s: s, codec: codec, track: s.track, lossy: s.opts.Lossy,
 		frames: make(chan captureFrame, captureBacklog), stop: make(chan struct{}), base: time.Now(),
-		capFirst: make(chan struct{}), playFirst: make(chan struct{})}
+		capFirst: make(chan struct{}), playFirst: make(chan struct{}), settings: s.ctl.wanted(s.processing)}
+	m.echo.Store(m.settings.EchoCancellation)
+	if s.dspDone != nil {
+		s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPStarting})
+	}
 	eo := opus.DefaultEncoderOptions()
 	// The channel's bitrate, as Accept clamped it (M33), which the controller never exceeds.
 	eo.Bitrate = s.bitrate
@@ -343,9 +357,10 @@ func (m *media) send() {
 		if waiting < captureQueue || m.chain == nil {
 			behind = 0
 		} else if behind++; behind >= slowDSP {
-			m.s.logf("the audio processing is slower than real time on this machine, so the rest of the call " +
-				"goes unprocessed")
-			m.dropChain()
+			why := "the audio processing is slower than real time on this machine, so the rest of the call " +
+				"goes unprocessed"
+			m.s.logf("%s", why)
+			m.dropChain(why)
 			behind = 0
 		}
 		if waiting >= captureQueue && !skipped {
@@ -447,6 +462,7 @@ func (m *media) noteRate() {
 // watchdog's.
 func (m *media) process(pcm []int16, stamp uint64) bool {
 	m.takeDSP(stamp)
+	m.reconfigure(stamp)
 	if m.chain == nil {
 		return true
 	}
@@ -454,7 +470,7 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 	var voice float32
 	err := m.clocked(&m.dspCall, func() error {
 		played := stamp
-		if !m.s.processing.EchoCancellation {
+		if !m.settings.EchoCancellation {
 			m.rendered = played // nothing reads the reference
 		} else if behind := played - m.rendered; behind > refFrames {
 			m.overruns.Add(int64(behind - refFrames)) //nolint:gosec // at most the frames played
@@ -482,9 +498,10 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 		return nil
 	})
 	if err != nil {
-		m.s.logf("%s", voiceipc.CutReason("the audio processing failed, so the rest of the call goes unprocessed: "+
-			err.Error()))
-		m.dropChain()
+		why := voiceipc.CutReason("the audio processing failed, so the rest of the call goes unprocessed: " +
+			err.Error())
+		m.s.logf("%s", why)
+		m.dropChain(why)
 		// A failure on the frame's second half leaves its first processed: half delayed and gained, half
 		// not, which would click. The frame goes as it was captured.
 		copy(pcm, m.raw[:])
@@ -493,11 +510,55 @@ func (m *media) process(pcm []int16, stamp uint64) bool {
 	return voice >= voiceProbability
 }
 
-// dropChain ends the chain for the rest of the call.
-func (m *media) dropChain() {
+// dropChain ends the chain for the rest of the call, saying why.
+func (m *media) dropChain(why string) {
 	_ = m.chain.Close()
 	m.chain = nil
 	m.noRef.Store(true)
+	m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
+}
+
+// reconfigureFrames spaces the changes of processing a call takes up: 200 ms, five a second at most.
+const reconfigureFrames = 10
+
+// reconfigure makes the chain again when the person has changed which stages process the microphone
+// (M34). The new chain starts from nothing, its echo canceller converging again from the stamp, as a call's
+// first does. A chain that failed stays off: the input that failed it is a stranger's to send again.
+func (m *media) reconfigure(stamp uint64) {
+	m.frame++
+	want := m.s.ctl.wanted(m.settings)
+	if want == m.settings {
+		return
+	}
+	// Spaced, the newest change taken up: each makes a chain and reports it, and changes sent faster than
+	// frames, from several attach clients at once, rebuilt the chain at every frame and put the worker
+	// past the daemon's fifty frames a second with their reports (M34's /code-review).
+	if m.remade && m.frame-m.remadeAt < reconfigureFrames {
+		return
+	}
+	m.remade, m.remadeAt = true, m.frame
+	m.settings = want
+	m.echo.Store(want.EchoCancellation)
+	if m.chain == nil {
+		return // not taken up yet, which takes up the new settings, or gone for good
+	}
+	_ = m.chain.Close()
+	m.chain = nil
+	var c dsp.Chain
+	err := m.clocked(&m.dspCall, func() (e error) {
+		c, e = m.module.NewChain(context.Background(), want)
+		return
+	})
+	if err != nil {
+		why := voiceipc.CutReason("the audio processing could not start again, so the rest of the call goes " +
+			"unprocessed: " + err.Error())
+		m.s.logf("%s", why)
+		m.noRef.Store(true)
+		m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
+		return
+	}
+	m.chain, m.rendered = c, stamp
+	m.s.ctl.reportDSP(running(want))
 }
 
 // takeDSP makes the chain once the module has compiled, without waiting for it. The reference starts at
@@ -515,23 +576,30 @@ func (m *media) takeDSP(stamp uint64) {
 	m.taken = true
 	m.module = m.s.dsp
 	if m.s.dspErr != nil {
-		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", m.s.dspErr)
+		why := voiceipc.CutReason("the audio processing could not start, so the microphone goes unprocessed: " +
+			m.s.dspErr.Error())
+		m.s.logf("%s", why)
 		m.noRef.Store(true)
+		m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
 		return
 	}
 	// Making the chain runs the module's own C++ constructors and dsp_new in WebAssembly, so the watchdog
 	// bounds it as it bounds every call into the instance (M30 /code-review).
 	var c dsp.Chain
 	err := m.clocked(&m.dspCall, func() (e error) {
-		c, e = m.module.NewChain(context.Background(), m.s.processing)
+		c, e = m.module.NewChain(context.Background(), m.settings)
 		return
 	})
 	if err != nil {
-		m.s.logf("the audio processing could not start, so the microphone goes unprocessed: %v", err)
+		why := voiceipc.CutReason("the audio processing could not start, so the microphone goes unprocessed: " +
+			err.Error())
+		m.s.logf("%s", why)
 		m.noRef.Store(true)
+		m.s.ctl.reportDSP(voiceipc.DSP{State: voiceipc.DSPFailed, Reason: why})
 		return
 	}
 	m.chain, m.rendered = c, stamp
+	m.s.ctl.reportDSP(running(m.settings))
 }
 
 // Level is RFC 6464's audio level of a frame: its power in -dBov, 0 the loudest and 127 silence.
@@ -586,8 +654,13 @@ func (m *media) fill(out []int16) {
 	clear(m.mix[:])
 	for _, sl := range m.slots {
 		m.next(sl)
-		for i := range audio.FrameSamples {
-			m.mix[i] += int32(sl.pcm[i])
+		// Somebody the person muted for themselves (M34) is not played: the SFU stops forwarding them within
+		// a tick of the subscribe, and what is already on its way, buffered or decoded, is decoded all the
+		// same, so the slot keeps up with whoever fills it next.
+		if src, ok := sl.buf.Sender(); !ok || !m.s.ctl.isMuted(src) {
+			for i := range audio.FrameSamples {
+				m.mix[i] += int32(sl.pcm[i])
+			}
 		}
 		sl.pcm = append(sl.pcm[:0], sl.pcm[audio.FrameSamples:]...)
 	}
@@ -601,7 +674,7 @@ func (m *media) fill(out []int16) {
 	}
 	// Nothing reads the reference with echo cancellation off, or once the call has no chain for good, so
 	// the speakers' callback is spared the copy.
-	if m.s.processing.EchoCancellation && !m.noRef.Load() {
+	if m.echo.Load() && !m.noRef.Load() {
 		m.ref.put(out)
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/guilds"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
+	"github.com/Alexnex31/Norite/backend/internal/reports"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
 	"github.com/Alexnex31/Norite/backend/internal/voice"
 	"github.com/Alexnex31/Norite/backend/internal/voice/coordinator"
@@ -105,6 +106,7 @@ func (g *gatewayClient) join(channel, nonce, offer string) (string, json.RawMess
 	g.t.Helper()
 	g.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
 		"nonce": nonce, "channel_id": channel, "offer": offer, "supports_video": false,
+		"self_mute": false, "self_deaf": false,
 	})
 	return g.until(gatewayproto.EventVoiceServerUpdate, gatewayproto.EventVoiceJoinRefused)
 }
@@ -298,6 +300,37 @@ func TestAServerMuteReachesTheCallersVoiceState(t *testing.T) {
 	assert.Equal(t, f.memberID, state["user_id"])
 }
 
+// updateSpacing is the gateway's spacing of one session's updates, which this package cannot read.
+const updateSpacing = 250 * time.Millisecond
+
+// What a caller sets on themselves reaches everyone who can see the channel, and the listing a client
+// connecting later reads (M34).
+func TestASelfMuteReachesTheChannel(t *testing.T) {
+	f := newVoiceFixture(t, nil)
+	member, _ := f.joinCall(t, f.memberToken, f.channel)
+	watcher := f.connect(t, f.ownerToken)
+	set := func(mute, deaf bool) {
+		member.gw.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
+			"channel_id": f.channel, "self_mute": mute, "self_deaf": deaf,
+		})
+	}
+	set(true, false)
+	state := watcher.untilState(t, func(s map[string]any) bool { return s["self_mute"] == true })
+	assert.Equal(t, f.memberID, state["user_id"])
+	assert.Equal(t, false, state["self_deaf"])
+	assert.Equal(t, false, state["mute"], "a self mute is not a server mute")
+	// The same again is no change, and tells nobody: the next state the watcher reads is the third's. Each
+	// is sent past the spacing, so the second runs rather than being replaced by the third.
+	set(true, false)
+	time.Sleep(2 * updateSpacing)
+	set(true, true)
+	state = watcher.untilState(t, func(map[string]any) bool { return true })
+	assert.Equal(t, true, state["self_deaf"], "an update that changed nothing was announced")
+	states := f.voiceStates(t, f.ownerToken, f.channel)
+	require.Len(t, states, 1)
+	assert.Equal(t, true, states[0]["self_mute"])
+}
+
 // The end of a sign-in ends its call: the revocation drops the session, and the session's end reaches the
 // coordinator (M33's D3).
 func TestALogoutEndsTheCall(t *testing.T) {
@@ -396,9 +429,11 @@ func TestAnInstanceWithoutVoiceRefusesJoins(t *testing.T) {
 	gw.identify(f.memberToken, "dev")
 	gw.ready()
 	gw.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": nil})
+	// An update has no reply, here as anywhere: the refusal read next is the join's.
+	gw.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": "1", "self_mute": true, "self_deaf": false})
 	typ, raw := gw.join("1", "q", "v=0")
 	require.Equal(t, gatewayproto.EventVoiceJoinRefused, typ)
-	assert.Contains(t, string(raw), `"voice_disabled"`)
+	assert.JSONEq(t, `{"nonce":"q","channel_id":"1","code":"voice_disabled"}`, string(raw))
 }
 
 // The listing a client starts from sends what VoiceState declares, every field present.
@@ -426,6 +461,7 @@ func TestTheVoiceStateListingMatchesTheContract(t *testing.T) {
 // The coordinator's copy of the voice channel type is guilds', which it cannot import.
 func TestTheVoiceChannelTypeAgreesAcrossPackages(t *testing.T) {
 	require.Equal(t, guilds.ChannelGuildVoice, coordinator.ChannelGuildVoice)
+	require.Equal(t, guilds.ChannelGuildVoice, reports.ChannelGuildVoice)
 }
 
 // The bitrate's bounds are one set: what a channel accepts, what the gateway says it carries, and what the

@@ -29,7 +29,7 @@ func (refusingSignaler) Prepare(context.Context, string) (voiceworker.Route, err
 	return voiceworker.Route{}, errRefusing
 }
 
-func (refusingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+func (refusingSignaler) Join(context.Context, string, string, string, ipc.VoiceSelf) (voiceworker.Answer, error) {
 	return voiceworker.Answer{}, errRefusing
 }
 
@@ -57,11 +57,39 @@ func TestTheVoiceRequestsAnswerAStatus(t *testing.T) {
 	var st ipc.VoiceStatus
 	require.NoError(t, json.Unmarshal(resp.Body, &st))
 	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle,
-		Unavailable: "voice calls arrive in a later version of Norite"}, st)
+		Unavailable: "voice calls arrive in a later version of Norite", LocalMutes: []string{},
+		Speaking: []string{}}, st)
 
 	resp = l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceLeave})
 	require.Nil(t, resp.Error)
 	matchesDefinition(t, "VoiceStatus", resp.Body)
+}
+
+// What the person sets for their calls is answered with the status, held to the contract, with or without
+// a call (M34).
+func TestThePersonsSwitchesAnswerAStatus(t *testing.T) {
+	l := voiceFixture(nil, true)
+	do := func(path string, body []byte) ipc.VoiceStatus {
+		t.Helper()
+		resp := l.Do(context.Background(), ipc.Request{Method: http.MethodPost, Path: path, Body: body})
+		require.Nil(t, resp.Error, "%s", path)
+		matchesDefinition(t, "VoiceStatus", resp.Body)
+		var st ipc.VoiceStatus
+		require.NoError(t, json.Unmarshal(resp.Body, &st))
+		return st
+	}
+	require.Equal(t, ipc.VoiceSelf{Mute: true}, do(ipc.PathVoiceMute, nil).Self)
+	require.Equal(t, ipc.VoiceSelf{Mute: true, Deaf: true}, do(ipc.PathVoiceDeafen, nil).Self)
+	require.Equal(t, ipc.VoiceSelf{Mute: true}, do(ipc.PathVoiceUndeafen, nil).Self)
+	require.Equal(t, []string{"7"}, do(ipc.PathVoiceLocalMute("7"), nil).LocalMutes)
+	st := do(ipc.PathVoiceLocalMute("12"), nil)
+	require.Equal(t, []string{"12", "7"}, st.LocalMutes)
+	require.Equal(t, []string{"7"}, do(ipc.PathVoiceLocalUnmute("12"), nil).LocalMutes)
+	two := 2
+	require.Equal(t, &two, do(ipc.PathVoiceStreams(2), nil).MaxStreams)
+	require.Nil(t, do(ipc.PathVoiceStreams(0), nil).MaxStreams)
+	st = do(ipc.PathVoiceProcessing, []byte(`{"echo_cancellation":false,"noise_suppression":true,"auto_gain":true}`))
+	require.Nil(t, st.Processing, "a processing with no call changes nothing")
 }
 
 func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
@@ -77,7 +105,16 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 		{"a join that is not POST", voiceFixture(nil, true), http.MethodGet, ipc.PathVoiceJoin("1"), ipc.RelayBadRequest, ""},
 		{"a channel that is not an id", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/join/general", ipc.RelayBadRequest, ""},
 		{"no channel", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/join/", ipc.RelayBadRequest, ""},
-		{"a path that is none of them", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/mute", ipc.RelayBadRequest, ""},
+		{"a path that is none of them", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/shout", ipc.RelayBadRequest, ""},
+		{"a local mute naming no id", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/local-mute/bob", ipc.RelayBadRequest, "user id"},
+		{"a local mute naming nobody", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/local-unmute/", ipc.RelayBadRequest, "user id"},
+		{"a local mute of user zero", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("0"), ipc.RelayBadRequest, "user id"},
+		{"a local mute with a leading zero", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("07"), ipc.RelayBadRequest, "user id"},
+		{"more streams than slots", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/4", ipc.RelayBadRequest, "1 to 3"},
+		{"streams that are no number", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/-1", ipc.RelayBadRequest, "1 to 3"},
+		{"a processing naming nothing", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceProcessing, ipc.RelayBadRequest, "must name"},
+		{"a mute while signed out", voiceFixture(nil, false), http.MethodPost, ipc.PathVoiceMute, ipc.RelayConflict, "norite login"},
+		{"a local mute of oneself", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("42"), ipc.RelayConflict, "yourself"},
 		{"a release, which cannot join yet", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "arrive in a later version"},
 		{"nobody signed in", voiceFixture(refusingSignaler{}, false), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "norite login"},
 		{"a voice server that refuses", voiceFixture(refusingSignaler{}, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayFailed, "room full"},
@@ -108,7 +145,7 @@ func (c *countingSignaler) Prepare(context.Context, string) (voiceworker.Route, 
 	return voiceworker.Route{}, errRefusing
 }
 
-func (*countingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+func (*countingSignaler) Join(context.Context, string, string, string, ipc.VoiceSelf) (voiceworker.Answer, error) {
 	return voiceworker.Answer{}, errRefusing
 }
 
@@ -231,7 +268,7 @@ func (holdingSignaler) Prepare(ctx context.Context, _ string) (voiceworker.Route
 	return voiceworker.Route{}, ctx.Err()
 }
 
-func (holdingSignaler) Join(context.Context, string, string, string) (voiceworker.Answer, error) {
+func (holdingSignaler) Join(context.Context, string, string, string, ipc.VoiceSelf) (voiceworker.Answer, error) {
 	return voiceworker.Answer{}, errRefusing
 }
 
@@ -270,8 +307,8 @@ func TestASignInThatEndsEndsTheCallWithNoGateway(t *testing.T) {
 	require.NoError(t, store.Clear()) // `norite logout`
 	src.Reload()
 	require.Eventually(t, func() bool { return !calls.Busy() }, 5*time.Second, 5*time.Millisecond)
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true},
-		calls.Status())
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true,
+		LocalMutes: []string{}, Speaking: []string{}}, calls.Status())
 }
 
 // A session that has not read its store yet is pending, not signed out.
@@ -283,6 +320,9 @@ func TestASignInNotReadYetIsPending(t *testing.T) {
 	require.ErrorIs(t, err, voiceworker.ErrSignInPending)
 }
 
-func (refusingSignaler) Leave(context.Context, string)  {}
-func (*countingSignaler) Leave(context.Context, string) {}
-func (holdingSignaler) Leave(context.Context, string)   {}
+func (refusingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (refusingSignaler) Leave(context.Context, string)                                {}
+func (*countingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (*countingSignaler) Leave(context.Context, string)                               {}
+func (holdingSignaler) Update(context.Context, string, string, ipc.VoiceSelf) error   { return nil }
+func (holdingSignaler) Leave(context.Context, string)                                 {}

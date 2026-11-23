@@ -222,6 +222,9 @@ func (h *harness) joinVia(t *testing.T, room, user string, dev audio.Device, p d
 		Rights: voiceipc.Rights{Send: !opts.muted, Hear: true}}); err != nil {
 		t.Fatal(err)
 	}
+	if opts.subscribe != nil {
+		s.Subscribe(*opts.subscribe)
+	}
 	select {
 	case <-s.Ready():
 	case reason := <-s.Ended():

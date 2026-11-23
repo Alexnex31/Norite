@@ -515,6 +515,16 @@ carries the condition that would reopen it.
   for. M74 owns those types and should weigh a per-reporter open-report cap at the same time as the
   per-user filing limit its entry now carries. Also reopens if the dedupe index is ever dropped or made
   non-unique, since it is the whole of this argument.
+- **Reopened at M34, and accepted again.** M34 accepts `user` (3), from a voice channel, and the open-report
+  index gains the guild, so a user is reported once per guild. A reporter can now hold one open report
+  against every other member of every guild they are in, not only every message they can see. That is
+  bounded by the guilds they joined (100 by default, each through an invite) times those guilds' members,
+  each needing a voice channel they can see, and filed at the instance's general request rate. So it
+  still costs a reporter a membership per guild and a request per report, and one reporter puts at most
+  one open report per member into a guild's queue.
+  The answer stays M74's per-user filing limit and its per-reporter cap, whose entry already owns them.
+  **Reopens if** a guild's queue is seen flooded by one reporter's user reports before M74, or a target type
+  needing no membership at all arrives (`channel`, or a user reported from no guild).
 
 ---
 

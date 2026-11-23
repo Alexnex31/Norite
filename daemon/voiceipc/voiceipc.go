@@ -39,19 +39,25 @@ import (
 )
 
 // The ops. A worker sends HELLO first and once, then OFFER once it has a JOIN, then STATE as its call
-// changes, and from its first STATE, DEVICES as its microphone and speakers change (M32). The daemon sends
-// JOIN once, ANSWER once, RIGHTS whenever what the account may do in the call changes after the answer
-// (M33), and LEAVE when the call should end.
+// changes, and from its first STATE, DEVICES as its microphone and speakers change (M32), DSP as its audio
+// processing changes and, once ready, SPEAKING as who speaks changes (M34). The daemon sends JOIN once,
+// ANSWER once, RIGHTS whenever what the account may do in the call changes after the answer (M33),
+// SUBSCRIBE and PROCESSING whenever the person changes whom they hear or how their microphone is processed
+// (M34), and LEAVE when the call should end.
 const (
-	OpHello   gatewayproto.Opcode = 1
-	OpOffer   gatewayproto.Opcode = 2
-	OpState   gatewayproto.Opcode = 3
-	OpDevices gatewayproto.Opcode = 4
+	OpHello    gatewayproto.Opcode = 1
+	OpOffer    gatewayproto.Opcode = 2
+	OpState    gatewayproto.Opcode = 3
+	OpDevices  gatewayproto.Opcode = 4
+	OpSpeaking gatewayproto.Opcode = 5
+	OpDSP      gatewayproto.Opcode = 6
 
-	OpJoin   gatewayproto.Opcode = 10
-	OpAnswer gatewayproto.Opcode = 11
-	OpLeave  gatewayproto.Opcode = 12
-	OpRights gatewayproto.Opcode = 13
+	OpJoin       gatewayproto.Opcode = 10
+	OpAnswer     gatewayproto.Opcode = 11
+	OpLeave      gatewayproto.Opcode = 12
+	OpRights     gatewayproto.Opcode = 13
+	OpSubscribe  gatewayproto.Opcode = 14
+	OpProcessing gatewayproto.Opcode = 15
 )
 
 // Bounds. The largest frame either way is the offer or the answer, each under voiceproto.MaxOffer, which
@@ -77,6 +83,13 @@ const (
 	// server names it, so the worker clamps it to these whatever it says; zero is the worker's default.
 	MinBitrate = 16_000
 	MaxBitrate = 224_000
+
+	// MaxSpeaking bounds who a SPEAKING names, and MaxDrop whom a SUBSCRIBE drops: the SFU's own bound on a
+	// subscribe's list (voiceproto.MaxSubscribeList), a full room.
+	MaxSpeaking = voiceproto.MaxSubscribeList
+	MaxDrop     = voiceproto.MaxSubscribeList
+	// MaxSlots is the most slots a SUBSCRIBE's cap may name: the slots the worker receives on.
+	MaxSlots = 3
 )
 
 // Hello is the worker's first frame: which version it is. The daemon checks it by the attach socket's rule
@@ -135,6 +148,46 @@ type Rights struct {
 
 // Leave ends the call. It carries nothing.
 type Leave struct{}
+
+// Speaking is who the SFU says is speaking in the call now (M34), as user ids, the newest list only: the
+// worker sends at most a few a second whatever the SFU sends, since the daemon's bound on its frames would
+// otherwise be a talkative room's to break.
+type Speaking struct {
+	Users []string `json:"users"`
+}
+
+// Subscribe is whom the person does not want to hear, and how many people at once (M34): the daemon's
+// local mutes and the voice.max_streams setting, whole each time. The worker asks the SFU to forward none
+// of Drop and at most Cap of the rest, and plays nothing of Drop that is already on its way.
+type Subscribe struct {
+	Drop []string `json:"drop"`
+	// Cap is how many slots the SFU may fill, 1 to MaxSlots; nil is every slot the worker has.
+	Cap *int `json:"cap"`
+}
+
+// Processing is how the person wants the microphone processed, changed during the call (M34). The join
+// carries the first.
+type Processing struct {
+	Processing ipc.VoiceJoin `json:"processing"`
+}
+
+// DSP is what the audio processing is doing (M34), where the join's Processing is only what was asked:
+// starting while it compiles, running with the stages that process the microphone, or failed for the rest
+// of the call, Reason saying why. RNNoise runs whenever it runs, for the audio level's V flag.
+type DSP struct {
+	State            string `json:"state"`
+	Reason           string `json:"reason"`
+	EchoCancellation bool   `json:"echo_cancellation"`
+	NoiseSuppression bool   `json:"noise_suppression"`
+	AutoGain         bool   `json:"auto_gain"`
+}
+
+// The states the DSP is reported in.
+const (
+	DSPStarting = "starting"
+	DSPRunning  = "running"
+	DSPFailed   = "failed"
+)
 
 // State is what the worker's call has become.
 type State struct {
@@ -262,6 +315,61 @@ func (s State) Check() error {
 		if s.Devices.Decided {
 			return errors.New("devices that ended a call, saying it goes on")
 		}
+	}
+	return nil
+}
+
+// snowflakes reports whether every id is one: 1 to 20 digits.
+func snowflakes(ids []string) bool {
+	for _, id := range ids {
+		if id == "" || len(id) > 20 || strings.Trim(id, "0123456789") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Check refuses more users than MaxSpeaking, or one that is not an id.
+func (s Speaking) Check() error {
+	if len(s.Users) > MaxSpeaking {
+		return fmt.Errorf("%d speaking, past %d", len(s.Users), MaxSpeaking)
+	}
+	if !snowflakes(s.Users) {
+		return errors.New("a speaker that is not a user id")
+	}
+	return nil
+}
+
+// Check refuses more users than MaxDrop, one that is not an id, or a cap outside 1 to MaxSlots.
+func (s Subscribe) Check() error {
+	if len(s.Drop) > MaxDrop {
+		return fmt.Errorf("%d dropped, past %d", len(s.Drop), MaxDrop)
+	}
+	if !snowflakes(s.Drop) {
+		return errors.New("a dropped user that is not a user id")
+	}
+	if s.Cap != nil && (*s.Cap < 1 || *s.Cap > MaxSlots) {
+		return fmt.Errorf("a cap of %d slots", *s.Cap)
+	}
+	return nil
+}
+
+// Check refuses a state that is not one of the words, a reason past MaxReason, a stage running in a DSP
+// that is not, or a failure saying nothing.
+func (d DSP) Check() error {
+	switch d.State {
+	case DSPStarting, DSPRunning, DSPFailed:
+	default:
+		return fmt.Errorf("the audio processing in an unknown state %q", truncate(d.State, 32))
+	}
+	if len(d.Reason) > MaxReason {
+		return fmt.Errorf("a reason of %d bytes, past %d", len(d.Reason), MaxReason)
+	}
+	if d.State != DSPRunning && (d.EchoCancellation || d.NoiseSuppression || d.AutoGain) {
+		return fmt.Errorf("a stage processing the microphone while the processing is %s", d.State)
+	}
+	if (d.State == DSPFailed) != (d.Reason != "") {
+		return errors.New("a reason for the processing that did not fail, or none for one that did")
 	}
 	return nil
 }

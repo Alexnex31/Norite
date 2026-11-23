@@ -814,6 +814,12 @@ type ErrorErrorCode string
 
 // FileReportRequest **`routed_to` is deliberately absent.** Unknown fields are rejected rather than ignored, so sending one is a 400 — which is the stronger of the two answers and is the point.
 type FileReportRequest struct {
+	// ChannelId The voice channel a report against a user is filed from (M34): required for `user`, and a 400 for `message`, whose channel is its own.
+	//
+	//
+	// Examples: 7238829238972837423
+	ChannelId *Snowflake `json:"channel_id,omitempty"`
+
 	// Detail Optional free text from the reporter.
 	Detail *string `json:"detail,omitempty"`
 
@@ -826,7 +832,7 @@ type FileReportRequest struct {
 	// Examples: 7238829238972837423
 	TargetId Snowflake `json:"target_id"`
 
-	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	// TargetType What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, `channel` with M74.
 	TargetType ReportTargetType `json:"target_type"`
 }
 
@@ -1399,7 +1405,9 @@ type ReorderRolesRequest struct {
 //
 // **There is no reporter field, on this schema or any other on these routes.** See the listing endpoint for why: a guild moderator is never told who filed a report against them.
 type Report struct {
-	CreatedAt time.Time `json:"created_at"`
+	// ChannelId The voice channel a report against a user was filed from (M34), which is how it reached this guild. Null for a message, whose channel is its own, and once that channel is deleted.
+	ChannelId *Snowflake `json:"channel_id"`
+	CreatedAt time.Time  `json:"created_at"`
 
 	// Detail The reporter's own words, if they wrote any. At most 2000 characters.
 	Detail *string `json:"detail"`
@@ -1433,7 +1441,7 @@ type Report struct {
 	// Examples: 7238829238972837423
 	TargetId Snowflake `json:"target_id"`
 
-	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	// TargetType What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, `channel` with M74.
 	TargetType ReportTargetType `json:"target_type"`
 }
 
@@ -1445,7 +1453,7 @@ type ReportReasonCategory string
 // `under_review` is reserved for the Instance Admin queue and nothing writes it at this milestone — it is nameable as a filter, where it honestly returns nothing, and refused as an outcome.
 type ReportStatus string
 
-// ReportTargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+// ReportTargetType What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, `channel` with M74.
 type ReportTargetType string
 
 // ResolveReportRequest defines model for ResolveReportRequest.
@@ -1612,6 +1620,8 @@ type TokenPairTokenType string
 //
 // Written out in full rather than composed over Report with `allOf`. That is not verbosity for its own sake — `allOf` branches validate independently, so a branch carrying `additionalProperties: false` rejects the properties its sibling adds, which is exactly how MintedApiToken shipped a schema no successful response could satisfy.
 type TriageReport struct {
+	// ChannelId The voice channel a report against a user was filed from (M34), which is how it reached this guild. Null for a message, whose channel is its own, and once that channel is deleted.
+	ChannelId *Snowflake `json:"channel_id"`
 	CreatedAt time.Time  `json:"created_at"`
 	Detail    *string    `json:"detail"`
 	GuildId   *Snowflake `json:"guild_id"`
@@ -1644,12 +1654,14 @@ type TriageReport struct {
 	// TargetIsE2e Three states rather than two. False for an ordinary target; true for one whose content is end-to-end encrypted and therefore never returned; **null when the target no longer resolves at all**. Collapsing the last into false would report a vanished target as readable.
 	TargetIsE2e *bool `json:"target_is_e2e"`
 
-	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	// TargetType What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, `channel` with M74.
 	TargetType ReportTargetType `json:"target_type"`
 }
 
 // TriageReportDetail One report with the reported message attached. The only schema in this milestone carrying content.
 type TriageReportDetail struct {
+	// ChannelId The voice channel a report against a user was filed from (M34), which is how it reached this guild. Null for a message, whose channel is its own, and once that channel is deleted.
+	ChannelId *Snowflake `json:"channel_id"`
 	CreatedAt time.Time  `json:"created_at"`
 	Detail    *string    `json:"detail"`
 	GuildId   *Snowflake `json:"guild_id"`
@@ -1683,7 +1695,7 @@ type TriageReportDetail struct {
 	TargetId    Snowflake `json:"target_id"`
 	TargetIsE2e *bool     `json:"target_is_e2e"`
 
-	// TargetType What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+	// TargetType What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are reserved, stored as distinct values so a later milestone does not have to renumber, and refused at the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61, `channel` with M74.
 	TargetType ReportTargetType `json:"target_type"`
 }
 
@@ -1777,7 +1789,7 @@ type User struct {
 	Username string `json:"username"`
 }
 
-// VoiceState One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server.
+// VoiceState One voice connection: an account in a voice channel from one machine (M33). An account on two machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT` ends the connection on the server. `self_mute` and `self_deaf` are what the caller has set on themselves (M34), which their client applies the same way.
 type VoiceState struct {
 	// ChannelId A Snowflake ID as a decimal string. Always a string, never a JSON number — Snowflakes exceed 2^53, so numeric parsing silently loses precision (docs/adr/0003-snowflake-ids.md).
 	//
@@ -1803,6 +1815,12 @@ type VoiceState struct {
 
 	// Mute A moderator's server mute (`PATCH` on the member).
 	Mute bool `json:"mute"`
+
+	// SelfDeaf The caller has deafened themselves.
+	SelfDeaf bool `json:"self_deaf"`
+
+	// SelfMute The caller has muted themselves.
+	SelfMute bool `json:"self_mute"`
 
 	// SupportsVideo What the client said it can do. Terminal clients say false.
 	SupportsVideo bool `json:"supports_video"`

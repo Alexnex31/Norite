@@ -643,8 +643,10 @@ CREATE TABLE voice_states (                    -- M33; migration 000026 is its a
   mute boolean NOT NULL DEFAULT false, deaf boolean NOT NULL DEFAULT false,   -- as last told the channel
   suppress boolean NOT NULL DEFAULT false,       -- the account lacks SPEAK here
   supports_video boolean NOT NULL DEFAULT false,   -- client capability flag; terminal clients always false
-  created_at timestamptz NOT NULL DEFAULT now()
-);                                               -- self_mute and self_deaf are M34's, added with it
+  created_at timestamptz NOT NULL DEFAULT now(),
+  self_mute boolean NOT NULL DEFAULT false, self_deaf boolean NOT NULL DEFAULT false   -- M34 (000027): what
+                                                 --   the caller set on themselves, through op 4's update
+);
 
 CREATE TABLE audit_log_entries (
   id bigint PRIMARY KEY, guild_id bigint NULL REFERENCES guilds(id) ON DELETE CASCADE,
@@ -806,7 +808,7 @@ CREATE TABLE reports (                          -- unified: guild, instance-leve
   target_type smallint NOT NULL,   -- 0 message, 1 whisper, 2 channel, 3 user
                                    --   M16 accepts 0 only; the rest are reserved and refused at the
                                    --   boundary, since a target nothing routes is filed into a queue that
-                                   --   never shows it
+                                   --   never shows it. M34 accepts 3, from a voice channel (channel_id)
   target_id bigint NOT NULL,       -- polymorphic, so not a foreign key (M12's permission_overwrites)
   -- **M16's addition, and this block did not draw it until M16's planning.** Found by reading this DDL
   -- against that milestone's own done-when, which is a per-guild triage queue — a query the table as
@@ -824,14 +826,21 @@ CREATE TABLE reports (                          -- unified: guild, instance-leve
   resolved_by bigint NULL REFERENCES users(id),   -- M16's: the audit log is gated by a permission the
                                                   --   triage view does not require, so who closed a report
                                                   --   has to be readable without it
-  created_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz NULL
+  created_at timestamptz NOT NULL DEFAULT now(), resolved_at timestamptz NULL,
+  -- M34 (000028): the voice channel a user report was filed from, which is how it reaches a guild, since
+  -- a user has none. Kept NULL when the channel is deleted: the report stays in its guild's queue.
+  channel_id bigint NULL REFERENCES channels(id) ON DELETE SET NULL
 );
 CREATE INDEX ON reports (reporter_id);          -- M16 (the FK, measured at 89x on an account delete)
+CREATE INDEX ON reports (channel_id) WHERE channel_id IS NOT NULL;   -- M34: the FK's SET NULL on a
+                                                --   channel delete
 CREATE INDEX ON reports (resolved_by);          -- M16, same reason
 CREATE INDEX ON reports (guild_id, status, id DESC);   -- M16: the triage page. status sits in the middle
                                                        --   because the default view is one status at a time
-CREATE UNIQUE INDEX ON reports (reporter_id, target_type, target_id) WHERE status = 0;   -- M16: one open
-                                                       --   report per reporter per target, in the statement
+CREATE UNIQUE INDEX ON reports (reporter_id, target_type, target_id, guild_id) NULLS NOT DISTINCT
+  WHERE status = 0;                                    -- M16: one open report per reporter per target, in
+                                                       --   the statement; M34 adds the guild, since a user
+                                                       --   is reported in each guild apart
 CREATE INDEX ON reports (status, routed_to);    -- **M74's**, with the instance queue that reads it. M16
                                                 --   ships no query with this shape and an index whose only
                                                 --   reader is fifty-eight milestones away cannot argue
@@ -2413,8 +2422,9 @@ double-talk handling is where the older component falls behind what users expect
 **Call quality**: Opus at **128 kbps** by default since M33, per-channel configurable from 16 to 224 kbps,
 with in-band FEC and DTX enabled. 224 kbps is the most a 20 ms packet with its headers carries under the
 SFU's 256 kbps per-track bound, measured on speech. The cost of the default is downstream: twenty callers are
-about 2.5 Mbps to each listener until subscription caps it (M34). The remaining determinant is geography:
-mouth-to-ear latency is dominated by the network leg, so a user far from the SFU sees a less fluid
+about 2.5 Mbps to each listener unless the listener caps it, by hand since M34 (`norite voice streams`) and
+by itself from M36a. The remaining determinant is geography: mouth-to-ear latency is dominated by the
+network leg, so a user far from the SFU sees a less fluid
 conversation that no codec or DSP work compensates for. The coordinator's join chooses which SFU
 serves a session, so **proximity routing is a seam already in place**; v1 runs a single region deliberately.
 
@@ -3233,14 +3243,18 @@ during implementation, and must be documented plainly wherever the relevant subs
     drops past 35 ms never reads past the 20 ms the controller climbs under.
   - **The effect:** its overflow is answered only past 25% loss, as a policer's. Below that it reads as
     random loss, and the FEC is sized for it: a call on such a link stays losing about 17% (M31).
-  - **The answer:** the delivered rate, arrivals spaced wider than departures, which sees a full link at
-    any depth. M34's entry carries it.
+  - **The answer, built at M34:** the delivered rate. Pairs of packets sent back to back and both received
+    within a talk-spurt, arrivals spaced wider than departures past 1.03, read the link as full at any
+    depth, and cut on loss past 5%. On a 35 ms buffer at 64 kbit/s a real call loses 5 to 7%, against 16%
+    without it; the link test's 2 to 3% is lower, since speech's packets vary in size.
 - **A receiver's downlink adapts to nothing.**
   - **Why:** the controller is per hop. A sender follows its own uplink, and the SFU forwards every slot at
     its sender's bitrate, with no simulcast and no transcoding.
   - **The effect:** a receiver on a weak link gets up to 16 slots of up to 128 kbps by default, whatever it
     can carry.
-  - **The answer:** subscription, which is client-driven and capped (ADR 0023). M34's entry carries it.
+  - **The answer:** subscription, which is client-driven and capped (ADR 0023). Since M34 a person caps it
+    by hand (`norite voice streams 1|2|3|all`, `voice.max_streams`). A receiver that caps itself from what
+    its downlink loses is M36a's.
 - **A browser alone cannot complete an OAuth sign-in, by design.** The flow is bound to the *client* that
   started it rather than to the browser that walks through it: `/authorize` requires a `flow_challenge` and
   `/auth/oauth/exchange` requires the matching `flow_verifier` (§2). Someone who opens an authorize URL by

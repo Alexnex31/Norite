@@ -12,18 +12,25 @@ import (
 // MaxVoiceOffer bounds op 4's offer: M26's 12 KiB, which keeps the frame under the gateway's 16 KiB.
 const MaxVoiceOffer = 12 << 10
 
-// VoiceStateUpdate is op 4 (M33): a join, carrying the voice-worker's offer, or a leave, whose ChannelID is
-// nil. Decode it with DecodeVoiceStateUpdate, which tells the two apart by what the frame names rather
-// than by what a struct left empty.
+// VoiceStateUpdate is op 4 (M33): a join, carrying the voice-worker's offer, a leave, whose ChannelID is
+// nil, or since M34 an update, which names the session's call and what the caller has set on themselves.
+// Decode it with DecodeVoiceStateUpdate, which tells the three apart by what the frame names rather than by
+// what a struct left empty.
 type VoiceStateUpdate struct {
 	Nonce         string  `json:"nonce,omitempty"`
 	ChannelID     *string `json:"channel_id"`
 	Offer         string  `json:"offer,omitempty"`
 	SupportsVideo *bool   `json:"supports_video,omitempty"`
+	// SelfMute and SelfDeaf are what the caller has set on themselves (M34), named by a join and an update.
+	SelfMute *bool `json:"self_mute,omitempty"`
+	SelfDeaf *bool `json:"self_deaf,omitempty"`
 }
 
 // Leave reports whether the frame leaves the session's call.
 func (v VoiceStateUpdate) Leave() bool { return v.ChannelID == nil }
+
+// Update reports whether the frame changes the session's call rather than joining one: it names no offer.
+func (v VoiceStateUpdate) Update() bool { return v.ChannelID != nil && v.Offer == "" }
 
 var nonceShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
@@ -37,8 +44,8 @@ var digits = regexp.MustCompile(`^[0-9]{1,20}$`)
 var ErrBadVoiceStateUpdate = errors.New("gatewayproto: not a voice state update")
 
 // DecodeVoiceStateUpdate decodes op 4's d strictly, as gateway-events.schema.json shapes it: a join names
-// all four fields and a leave names channel_id alone, as null. A frame naming nothing is neither, rather
-// than a leave by omission.
+// all six fields, an update channel_id and the two self flags alone, and a leave channel_id alone, as null.
+// A frame naming nothing is none of them, rather than a leave by omission.
 func DecodeVoiceStateUpdate(raw json.RawMessage, strict func([]byte, any) error) (VoiceStateUpdate, error) {
 	var fields map[string]json.RawMessage
 	if err := strict(raw, &fields); err != nil {
@@ -57,8 +64,16 @@ func DecodeVoiceStateUpdate(raw json.RawMessage, strict func([]byte, any) error)
 		}
 		return v, nil
 	}
-	if !ValidNonce(v.Nonce) || !digits.MatchString(*v.ChannelID) || v.Offer == "" ||
-		len(v.Offer) > MaxVoiceOffer || v.SupportsVideo == nil {
+	if !digits.MatchString(*v.ChannelID) || v.SelfMute == nil || v.SelfDeaf == nil {
+		return VoiceStateUpdate{}, ErrBadVoiceStateUpdate
+	}
+	if _, named := fields["offer"]; !named {
+		if len(fields) != 3 {
+			return VoiceStateUpdate{}, ErrBadVoiceStateUpdate
+		}
+		return v, nil
+	}
+	if !ValidNonce(v.Nonce) || v.Offer == "" || len(v.Offer) > MaxVoiceOffer || v.SupportsVideo == nil {
 		return VoiceStateUpdate{}, ErrBadVoiceStateUpdate
 	}
 	return v, nil

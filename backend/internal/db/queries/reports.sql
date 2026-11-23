@@ -1,8 +1,10 @@
 -- Milestone M16 — filing a report, and the guild-moderator triage queue that reads it.
 
 -- name: CreateReport :one
-INSERT INTO reports (id, reporter_id, target_type, target_id, guild_id, reason_category, detail, routed_to)
-VALUES ($1, $2, $3, $4, sqlc.narg(guild_id)::bigint, $5, sqlc.narg(detail)::text, $6)
+INSERT INTO reports (id, reporter_id, target_type, target_id, guild_id, reason_category, detail, routed_to,
+                     channel_id)
+VALUES ($1, $2, $3, $4, sqlc.narg(guild_id)::bigint, $5, sqlc.narg(detail)::text, $6,
+        sqlc.narg(channel_id)::bigint)
 RETURNING *;
 
 -- The message a report is being filed against, deleted rows included.
@@ -64,9 +66,11 @@ SELECT * FROM messages WHERE id = $1;
 SELECT
   sqlc.embed(r),
   m.is_e2e AS target_is_e2e,
-  m.deleted_at AS target_deleted_at
+  m.deleted_at AS target_deleted_at,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 WHERE r.guild_id = $1
   AND r.status = $2
   AND r.id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
@@ -79,9 +83,11 @@ LIMIT $3;
 SELECT
   sqlc.embed(r),
   m.is_e2e AS target_is_e2e,
-  m.deleted_at AS target_deleted_at
+  m.deleted_at AS target_deleted_at,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 WHERE r.guild_id = $1
   AND r.id < COALESCE(sqlc.narg(before)::bigint, 9223372036854775807)
 ORDER BY r.id DESC
@@ -118,9 +124,11 @@ SELECT
   m.is_e2e AS target_is_e2e,
   m.deleted_at AS target_deleted_at,
   m.channel_id AS target_channel_id,
-  m.author_id AS target_author_id
+  m.author_id AS target_author_id,
+  u.id AS target_user_id
 FROM reports r
 LEFT JOIN messages m ON m.id = r.target_id AND r.target_type = 0
+LEFT JOIN users u ON u.id = r.target_id AND r.target_type = 3
 LEFT JOIN messages mv ON mv.id = m.id AND NOT mv.is_e2e
 WHERE r.id = $1 AND r.guild_id = $2;
 

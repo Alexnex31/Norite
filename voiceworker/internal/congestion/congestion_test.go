@@ -27,7 +27,10 @@ type link struct {
 	rate     float64 // bits a second on the wire; zero is unlimited
 	maxQueue time.Duration
 	loss     float64
-	rng      *rand.Rand
+	// jitter is the most a packet's arrival is late by, at random, past what the queue makes it: a
+	// loaded Wi-Fi link's, which reorders packets too.
+	jitter time.Duration
+	rng    *rand.Rand
 
 	free     time.Time // when the bucket has sent everything queued
 	seq      uint16
@@ -101,6 +104,9 @@ func (l *link) send(wire int) {
 	}
 	l.worstQueue = max(l.worstQueue, at.Sub(l.now))
 	// Five milliseconds of propagation, which the base delay absorbs.
+	if l.jitter > 0 {
+		at = at.Add(time.Duration(l.rng.Int64N(int64(l.jitter))))
+	}
 	l.inFlight = append(l.inFlight, arrival{l.seq, at.Add(5 * time.Millisecond)})
 }
 
@@ -791,6 +797,103 @@ func TestRandomLossUnderPolicedNeverReachesTheFloor(t *testing.T) {
 		l.run(30*time.Second, true)
 		if m := l.take(); m.minRate <= Floor {
 			t.Errorf("seed %d: thirty seconds at 20%% random loss took the bitrate to the floor", seed)
+		}
+	}
+}
+
+// A buffer too shallow to hold a queue is full all the same, and its arrivals say so: the packets that get
+// through leave at the link's pace, wider apart than they were sent. So its overflow is cut on, as a
+// standing queue's is, and the call settles losing little, where M31 left it losing about 17% (M34, from
+// M31's entry), whatever the draw of a few percent of random loss besides.
+func TestAShallowBufferSettlesWithLittleLoss(t *testing.T) {
+	for seed := range uint64(10) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 12)) //nolint:gosec // a test's link
+		l.rate, l.maxQueue, l.loss = 64000, 35*time.Millisecond, 0.02
+		l.run(10*time.Second, true)
+		l.take()
+		l.run(20*time.Second, true)
+		m := l.take()
+		lost := float64(m.dropped) / float64(m.sent)
+		t.Logf("seed %d: past the first 10 s, %d of %d dropped (%.1f%%), bitrate %d to %d", seed, m.dropped,
+			m.sent, 100*lost, m.minRate, m.lastRate)
+		if lost > 0.04 {
+			t.Errorf("seed %d: a 35 ms buffer at 64 kbit/s still overflows %.1f%% of what is sent", seed, 100*lost)
+		}
+		if m.minRate <= Floor {
+			t.Errorf("seed %d: a 35 ms buffer at 64 kbit/s took the bitrate to the floor", seed)
+		}
+	}
+}
+
+// Random loss on a link with room spreads nothing: those it lets through arrive as they were sent, so the
+// link is never read as full, however much is lost.
+func TestRandomLossIsNotReadAsAFullLink(t *testing.T) {
+	l := newLink(t, 64000)
+	l.loss = 0.2
+	for range 20 {
+		l.run(time.Second, true)
+		if l.c.full() {
+			t.Fatal("20% random loss on a link with room was read as a full link")
+		}
+	}
+}
+
+// Jitter on a link with room spreads a run's ends and nothing between, so it neither cuts the bitrate nor,
+// with some random loss besides, reads as a full link's overflow: 30 ms of it, losing 8%, stays near the
+// ceiling in every draw.
+func TestJitterIsNotAFullLink(t *testing.T) {
+	for seed := range uint64(10) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 13)) //nolint:gosec // a test's link
+		l.jitter, l.loss = 30*time.Millisecond, 0.08
+		l.run(30*time.Second, true)
+		if m := l.take(); m.minRate < 56000 {
+			t.Errorf("seed %d: 30 ms of jitter and 8%% loss on a link with room took the bitrate to %d", seed,
+				m.minRate)
+		}
+	}
+}
+
+// Jitter on a link with room leaves the climb free: a bitrate brought down climbs back through 30 ms of it
+// as through none.
+func TestJitterDoesNotHoldTheClimb(t *testing.T) {
+	for seed := range uint64(10) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 14)) //nolint:gosec // a test's link
+		l.jitter, l.c.rate = 30*time.Millisecond, 20000
+		l.run(20*time.Second, true)
+		if got := l.c.bitrate(); got < 56000 {
+			t.Errorf("seed %d: twenty seconds of speech through 30 ms of jitter climbed from 20000 to %d", seed, got)
+		}
+	}
+}
+
+// sentences plays speech in short sentences, each followed by a pause in DTX.
+func (l *link) sentences(d, talk, pause time.Duration) {
+	for end := l.now.Add(d); l.now.Before(end); {
+		l.run(talk, true)
+		l.run(pause, false)
+	}
+}
+
+// The spread is read within talk-spurts: a comfort-noise update 400 ms after the last, and the first word
+// after a pause, are as far apart on arrival as on departure, and counting them hid the spread of the
+// speech around them. In short sentences a shallow buffer still settles losing little.
+func TestAShallowBufferInShortSentencesSettles(t *testing.T) {
+	for seed := range uint64(10) {
+		l := newLink(t, 64000)
+		l.rng = rand.New(rand.NewPCG(seed, 15)) //nolint:gosec // a test's link
+		l.rate, l.maxQueue = 64000, 35*time.Millisecond
+		l.sentences(10*time.Second, 1200*time.Millisecond, 800*time.Millisecond)
+		l.take()
+		l.sentences(30*time.Second, 1200*time.Millisecond, 800*time.Millisecond)
+		m := l.take()
+		lost := float64(m.dropped) / float64(m.sent)
+		t.Logf("seed %d: %d of %d dropped (%.1f%%), bitrate %d to %d", seed, m.dropped, m.sent, 100*lost,
+			m.minRate, m.lastRate)
+		if lost > 0.04 {
+			t.Errorf("seed %d: in short sentences a 35 ms buffer overflows %.1f%% of what is sent", seed, 100*lost)
 		}
 	}
 }

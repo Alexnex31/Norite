@@ -203,6 +203,41 @@ func reportCommand(connect Connector) *cli.Command {
 			},
 		},
 		spec{
+			name: "user", usage: "Report somebody in a voice channel to its guild's moderators",
+			ids: []string{"user", "channel"},
+			description: "For what was said in a call, which leaves no message to report. CHANNEL is the voice\n" +
+				"channel it happened in, which is how the report reaches that guild; neither of you need still\n" +
+				"be in it. The moderators reading it are never told who filed it.\n\n" +
+				"--reason is one of " + strings.Join(reasons, ", ") + ".",
+			flags: []cli.Flag{
+				&cli.StringFlag{Name: "reason", Usage: "why: `REASON`, one of the list above (required)"},
+				&cli.StringFlag{Name: "detail", Usage: "anything the moderators should know"},
+			},
+			run: func(ctx context.Context, cmd *cli.Command, e *env) (output.Result, error) {
+				reason, err := required(cmd, "reason")
+				if err != nil {
+					return nil, err
+				}
+				if !slices.Contains(reasons, reason) {
+					return nil, clierr.Usage("--reason is one of %s", strings.Join(reasons, ", "))
+				}
+				channel := cmd.Args().Get(1)
+				body := apicontract.FileReportRequest{
+					TargetType: apicontract.ReportTargetTypeUser, TargetId: cmd.Args().Get(0), ChannelId: &channel,
+					ReasonCategory: apicontract.ReportReasonCategory(reason),
+				}
+				if cmd.IsSet("detail") {
+					d := cmd.String("detail")
+					body.Detail = &d
+				}
+				var r apicontract.Report
+				if err := e.do(ctx, http.MethodPost, "/reports", body, &r); err != nil {
+					return nil, err
+				}
+				return reportFrom(r), nil
+			},
+		},
+		spec{
 			name: "list", usage: "List a guild's reports, newest first", ids: []string{"guild"},
 			flags: []cli.Flag{limitFlag(50), beforeFlag("reports"),
 				&cli.StringFlag{Name: "status", Usage: "only reports in this `STATUS`: open, resolved or dismissed"}},

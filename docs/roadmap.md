@@ -2292,13 +2292,19 @@ of this section.
     an error mid-call (WASAPI's invalidation stops the callbacks), and `open` again if it resumes.
     Following a new default device is carried to M34.
   - **The Developer ID is not taken now** (the author's decision). It is more than a signature, and the
-    entry that takes it inherits all four parts:
+    entry that takes it inherits all five parts:
     - notarizing needs the hardened runtime;
     - under it, the microphone needs the `com.apple.security.device.audio-input` entitlement;
     - wazero's compiler writes executable memory, which needs `allow-jit` or
       `allow-unsigned-executable-memory`, or the codec fails every call;
     - the usage description goes in an `Info.plist` embedded in an `__info_plist` section, which Go's
-      linker does not write.
+      linker does not write;
+    - **from M34's Mac pass:** macOS's Local Network privacy refuses the daemon under launchd an instance
+      on the LAN (`connect: no route to host`), while the same Mac's Terminal reaches it, and switching
+      norite-daemon on under Local Network changed nothing. The `Info.plist` needs
+      `NSLocalNetworkUsageDescription`, and whether that is enough is to be seen on a Mac. Until then a LAN
+      instance on macOS needs the daemon started in a terminal, and `norite setup` says only that the
+      instance may be unreachable.
 
     No macOS runner exists, so signing would be `rcodesign` on the Linux runner. Until then the question
     comes once per daemon build, as ADR 0034 says.
@@ -2337,7 +2343,8 @@ of this section.
     - **A gotcha for the next pass:** WirePlumber keeps a moved stream's target
       (`~/.local/state/wireplumber/stream-properties`), so a pass that moves a stream undoes the move, or the
       next call opens where the last test left it.
-    - **Not walked:** macOS, on the author's Mac with the AVFoundation spike (S2); a PulseAudio server rather
+    - **Not walked:** macOS, on the author's Mac with the AVFoundation spike (S2), until M34's end, where
+      the kit's legs A to E passed (M34's entry); a PulseAudio server rather
       than PipeWire, and a desktop other than KDE; a device unplugged on real hardware.
     - **Left:** after a call ended for want of a session, `norite voice status` says the reason twice, in
       "The last call ended" and the line after it. On Windows a refusal names the desktop-apps switch
@@ -2534,6 +2541,87 @@ of this section.
   - **The call state should say what the DSP is doing, not only what was asked.** `VoiceStatus.processing`
     is the join's request; a DSP that could not start, or was dropped for a failure or for being too slow,
     is in the worker's log alone.
+
+  **As built** (planned by reading the entry against the code, with the author's choices: local mutes in
+  the daemon's memory, a reported user routed by a voice channel, the DSP's verbs on the running call and
+  the default, and all three carried items here):
+  - **Op 4 gains a third shape, the update**: the call's channel and the two self flags, with no offer and
+    no reply. Migration 27 adds `self_mute` and `self_deaf` to `voice_states`, written only when a value
+    changes, and `VOICE_STATE_UPDATE` carries them. Each is a write and an event to the channel's viewers,
+    so a session's updates are spaced 250 ms apart. One still waiting is replaced by a newer one when it is
+    the last request queued, and is never folded across a join.
+  - **The person's switches are the daemon's**, for the sign-in they were set under, and are never written
+    to disk:
+    - `norite voice mute`, `unmute`, `deafen` and `undeafen`, each idempotent. Deafening mutes too,
+      undeafening puts back the mute from before, and unmuting while deafened undeafens;
+    - `local-mute ID` and `local-unmute ID`, at most 64, in every call until the sign-in ends;
+    - `streams 1|2|3|all`, which `voice.max_streams` keeps for the next join.
+
+    The worker applies the self switches as M33's rights, less what the person set (`effective`), and the
+    voice server is told them through op 4. A local mute is the SFU's `drop` (ADR 0023) plus a skip in the
+    mix. That skip is of every sender a slot map has named, since a muted sender's packets already buffered
+    played once the SFU took it off the map: a hole found by proving the guard. It is never a report. The
+    status shows ids; names are the TUI's, from its member list (M54).
+  - **The active speaker reaches the status**: the worker reads the SFU's `slots` and `speaking` and
+    forwards the speaking list at most every 200 ms (`OpSpeaking`), under the pipe's 50 frames a second.
+  - **The DSP's verbs**: `norite voice processing --echo-cancellation/--noise-suppression/--auto-gain
+    on|off` changes the running call through `OpProcessing`, where the worker rebuilds its chain, and
+    writes `voice.*` for the next. What runs is the worker's to say (`OpDSP`, `VoiceStatus.dsp`: starting,
+    running or failed with its reason), apart from what was asked (`processing`).
+  - **A participant is reported from a voice channel**: `target_type` 3 with a `channel_id` naming a voice
+    channel, which routes the report to its guild. The filer must see the channel and the target be a guild
+    member, or it is 404; a text channel or oneself is 400. Migration 28 adds `reports.channel_id`, kept
+    NULL when the channel is deleted, and one open report per reporter per target **per guild**.
+    `norite report user USER CHANNEL`. Filing writes no audit entry, as M16's does not. It reopens the
+    ledger's entry on `reports` growing, a user target not being created behind a rate limit: re-judged
+    there, with M74's filing limit still its answer.
+  - **(a) The delivered rate**, in `congestion`: pairs of packets sent back to back and both received
+    within a talk-spurt, judged from 20 of the last 50. Past a spread of 1.03 the link is full, and it is cut
+    on loss past 5%; the bitrate climbs only at 1.02 or below. A gap that arrives negative is kept, since
+    dropping it biased the spread under jitter. On a 35 ms buffer at 64 kbit/s, a real call lost 5 to 7%,
+    against 16% without it (architecture.md §17).
+  - **(b) The downlink, by hand**: the SFU's `cap` (M26), set by `streams`. The receiver capping itself from
+    what its downlink loses is **M36a**.
+  - **(c) Following the default device** (`audio/follow.go`), on WASAPI and AudioQueue. PulseAudio moves a
+    stream itself (M32). A stream that has not called back for 1 s is opened again on the default, tried
+    every 250 ms. Since the manual pass, so is one still running once another device is the default
+    (`mover`): WASAPI's thread compares the default endpoint's id with its own, and AudioQueue asks
+    CoreAudio.
+  - **Rule 20 has nothing to check yet**: `blocks` is M70's, whose entry now carries the voice half.
+  - **The manual pass ran in two unprivileged VMs, one at a time**, against a real `norite-server`, every
+    call through TURN as at M33.
+    - **Linux:** three OS accounts in one guest, each measured at the far end:
+      - mute, deafen and their combinations, and a server mute over a self-unmute;
+      - the speaking list;
+      - a local mute surviving a rejoin;
+      - `streams 1` hearing one of two speakers (0.00 of the other, against 0.16 uncapped), and a join
+        taking the cap from the file;
+      - noise suppression turned off mid-call letting white noise through (0.83 a second, against 0);
+      - a report reaching the queue unnamed, and refused where it should be.
+    - **Windows 11:** a USB headset pulled out mid-call moved the call to the card about 2 s later, the
+      speakers on throughout.
+    - **Its findings were fixed the same day**, each fix proved by removal and walked again in the
+      Windows VM:
+      - `processing` answered with the processing from before the change, which read as the change not
+        having taken. It now answers once the worker runs it, 2 s at most, and the status says what was
+        asked when it has not taken;
+      - a headset plugged back in became Windows' default and the call stayed on the card; it now follows
+        a new default, within about 2 s;
+      - `local-mute 0` was taken; a user id is now canonical and nonzero (`ipc.IsUserID`), since `007`
+        would never have matched user 7.
+    - **macOS, on the author's Mac** (macOS 27, arm64), with M32's kit, never run before, on loopback:
+      - M32's legs A to E: the question names norite-daemon, the join does not wait on it, a refusal names
+        the setting, and leaving while it is asked opens nothing;
+      - with bob from a daemon started in Terminal, since launchd's cannot reach a LAN instance (M32's
+        entry, the Developer ID): audio both ways, echo cancellation in a real room (nothing back, against
+        0.80 of bob's own voice without it), mute, deafen, local mute, and the output following a headset
+        and back. The worker costs about a quarter of a core;
+      - it found echo cancellation turned back on mid-call never taking: the spacing of changes counted the
+        reference's frames, which stop with it off. Fixed, counting the frames processed.
+    - **Not walked:**
+      - the microphone's following: on Windows QEMU's USB audio has no microphone and Windows would not
+        unplug the HDA cards, and on the Mac no second microphone was at hand;
+      - `VOICE_STATE_UPDATE` as an attach client sees it, which no verb prints.
 - **M35 — Voice input mode**: voice-activity-detection is the default (from M30: RNNoise's voice
   probability, which runs whatever the settings and sets the audio level's V flag at 0.5, with no
   hysteresis yet); push-to-talk is a true OS-wide global hotkey registered by the daemon, per M25's
@@ -2585,6 +2673,20 @@ of this section.
   crash included, which evicts the connection at once. So a restarted daemon's rejoin is not refused by
   its previous run's call. What is left here is the breadcrumb and the respawn. Done when: killing the
   daemon process mid-call results in automatic rejoin within a few seconds of restart.
+
+  **From M34: the person's switches live in the daemon's memory**: the self mute and deafen, the local
+  mutes and the streams cap, for the sign-in they were set under. A daemon restarted mid-call loses them,
+  so a rejoin would put a person who had muted themselves back in the call heard. The breadcrumb carries
+  them with the channel, or the rejoin comes back muted; this milestone decides which, and the done-when
+  includes a muted caller rejoining muted.
+- **M36a — Voice downlink adaptation**: the receiver caps its own subscription from what its downlink
+  loses. M34 built the cap by hand (`norite voice streams`, `voice.max_streams`, the SFU's `cap` from M26),
+  and the sender's controller follows its uplink alone (architecture.md §17). Here the worker measures
+  each slot's loss and late packets in its jitter buffers, lowers its `cap` when the downlink cannot carry
+  every slot, and raises it again once it can, never past what the person set. Which slots it keeps is the
+  SFU's, by who is speaking. Done when: on a downlink shaped below what three speakers need, a listener's
+  loss falls under 5% once it has capped itself, measured at the far end, and returns to every slot within
+  a few seconds once the shaping is lifted.
 - **M37 — Voice deployment opt-out**: the Instance Admin config toggle (also added to
   `norite instance init`, extending M2/M10), voice+text channels degrade to text-only,
   voice UI is hidden entirely (not grayed out) in CLI/TUI/GUI when disabled. Done when: an instance with
@@ -2794,8 +2896,10 @@ of this section.
   with level meters, and the transport/processing/levels metric cards (codec, rtt, jitter, loss, route;
   denoise, aec, worker, device). Supersedes M34's "no visual call UI — it's a terminal", which was true
   only while there was no terminal application to draw it in. Depends on M34 for the controls and M41–M46
-  for the frame. Done when: a call renders as a strip that never hides the conversation, `C-c V` promotes it
-  to the full view, and the level meters redraw without a full repaint.
+  for the frame. **From M34:** the daemon's status names people by user id (`speaking`, `local_mutes`),
+  since it holds no guild; this view draws their names from its own member list. Done when: a call
+  renders as a strip that never hides the conversation, `C-c V` promotes it to the full view, and the level
+  meters redraw without a full repaint.
 - **M55 — TUI lifecycle and state screens** (`5a`, `5c`, `5d`): first run (the device-code path of M9, with
   the browser login of M8 shown as progress rows when a browser is available), disconnected — cached header,
   the retry banner, queued messages marked `◷` in an in-memory outbox flushed in order on reconnect — and the
@@ -3053,6 +3157,12 @@ of this section.
   DISPATCH stream, not just client rendering; a load test confirms the per-connection block-set check does not
   regress message fan-out latency; blocking removes any existing friendship; and an account export includes
   who the user blocked but not who blocked them.
+
+  **From M34: the voice half.** `VOICE_STATE_UPDATE` and `VOICE_STATE_DELETE` pass through the same
+  stage, so a blocked account's voice states are filtered with the rest. A call is another matter: the SFU
+  forwards whoever is in the room, so a blocked account in the same voice channel is heard. M34's local
+  mute (the SFU's `drop`) is the mechanism to hand it to; whether a block mutes, warns, or keeps the two
+  apart is this milestone's call.
 
   **The stage exists and is empty**: `gateway.withoutBlocked` in `internal/gateway/fanout.go`, run on every
   event after the audience check and before delivery, filtering nothing until this milestone. Two things

@@ -666,7 +666,8 @@ func TestTheReferenceIsReadOnlyForEchoCancellation(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		renders := 0
 		m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: on}},
-			chain: counting{renders: &renders}}
+			chain: counting{renders: &renders}, settings: dsp.Settings{EchoCancellation: on}}
+		m.echo.Store(on) // as startMedia sets them from the join
 		for range 10 {
 			m.fill(make([]int16, audio.FrameSamples))
 			m.process(make([]int16, audio.FrameSamples), m.ref.count())
@@ -723,7 +724,8 @@ func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		chain: pairing{mu: &mu, renders: &renders, captures: &captures, most: &most}, taken: true, enc: enc,
-		codec: keepOpen{}}
+		codec: keepOpen{}, settings: s.processing}
+	m.echo.Store(true)
 	m.sent.Add(1)
 	go m.send()
 	frame := make([]int16, audio.FrameSamples)
@@ -875,8 +877,10 @@ func TestADSPTakenUpBehindIsNotBlamedForTheBacklog(t *testing.T) {
 // chain that failed, and when the module never started.
 func TestNoChainForGoodStopsTheReference(t *testing.T) {
 	closed := false
-	m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true}},
-		chain: failingChain{closed: &closed}, taken: true}
+	echo := dsp.Settings{EchoCancellation: true}
+	m := &media{s: &Session{opts: Options{Log: io.Discard}, processing: echo},
+		chain: failingChain{closed: &closed}, taken: true, settings: echo}
+	m.echo.Store(true) // as startMedia sets them from the join
 	frame := make([]int16, audio.FrameSamples)
 	m.fill(frame)
 	m.process(frame, m.ref.count())
@@ -888,7 +892,8 @@ func TestNoChainForGoodStopsTheReference(t *testing.T) {
 	s := &Session{opts: Options{Log: io.Discard}, processing: dsp.Settings{EchoCancellation: true},
 		dspDone: make(chan struct{}), dspErr: errors.New("no module")}
 	close(s.dspDone)
-	m = &media{s: s}
+	m = &media{s: s, settings: echo}
+	m.echo.Store(true)
 	m.process(frame, m.ref.count())
 	m.fill(frame)
 	if m.ref.count() != 0 {
@@ -906,3 +911,66 @@ type tunable struct{ opus.Encoder }
 
 func (tunable) SetBitrate(int) error { return nil }
 func (tunable) SetLoss(int) error    { return nil }
+
+// countingModule makes marking chains and counts them.
+type countingModule struct {
+	dsp.Module
+	made *int
+}
+
+func (m countingModule) NewChain(context.Context, dsp.Settings) (dsp.Chain, error) {
+	*m.made++
+	return marking{}, nil
+}
+
+// Changes of processing faster than frames are taken up a few a second, the newest each time: each makes a
+// chain and reports it, and a chain made at every frame put the worker past the daemon's bound on its frames
+// (M34's /code-review). Counted, not timed.
+func TestChangesOfProcessingAreSpaced(t *testing.T) {
+	made := 0
+	s := &Session{opts: Options{Log: io.Discard}, ctl: newControl(dsp.AllOn())}
+	m := &media{s: s, module: countingModule{made: &made}, chain: marking{}, settings: dsp.AllOn()}
+	reports := 0
+	settings := []dsp.Settings{{NoiseSuppression: true}, dsp.AllOn()}
+	for stamp := range uint64(100) {
+		want := settings[stamp%2]
+		s.ctl.want.Store(&want)
+		m.reconfigure(stamp)
+		select {
+		case <-s.ctl.dspOut:
+			reports++
+		default:
+		}
+	}
+	if want := 100 / reconfigureFrames; made > want || reports > want {
+		t.Errorf("two seconds of changes at every frame made %d chains and %d reports, past %d", made, reports, want)
+	}
+	last := dsp.Settings{AutoGain: true}
+	s.ctl.want.Store(&last)
+	for stamp := uint64(100); stamp < 100+reconfigureFrames; stamp++ {
+		m.reconfigure(stamp)
+	}
+	if m.settings != last {
+		t.Errorf("the newest change was not taken up: %+v", m.settings)
+	}
+}
+
+// Echo cancellation turned off stops the reference, and its stamp with it, and a change after that is still
+// taken up (M34's Mac pass: spaced by the stamp, turning echo cancellation back on never took).
+func TestAChangeAfterEchoCancellationOffIsTakenUp(t *testing.T) {
+	made := 0
+	s := &Session{opts: Options{Log: io.Discard}, ctl: newControl(dsp.AllOn())}
+	m := &media{s: s, module: countingModule{made: &made}, chain: marking{}, settings: dsp.AllOn()}
+	const stamp = 500 // the reference stands still from here, nothing writing it
+	off := dsp.Settings{NoiseSuppression: true, AutoGain: true}
+	s.ctl.want.Store(&off)
+	m.reconfigure(stamp)
+	on := dsp.AllOn()
+	s.ctl.want.Store(&on)
+	for range 2 * reconfigureFrames {
+		m.reconfigure(stamp)
+	}
+	if m.settings != on || made != 2 {
+		t.Errorf("echo cancellation turned back on was not taken up: %+v after %d chains", m.settings, made)
+	}
+}

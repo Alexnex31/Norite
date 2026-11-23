@@ -65,6 +65,8 @@ type session struct {
 	voiceOps     []voiceOp
 	voiceRunning bool
 	voiceJoining bool
+	// voiceUpdated is when the session's last update ran, which spaces the next (M34).
+	voiceUpdated time.Time
 }
 
 type buffered struct {

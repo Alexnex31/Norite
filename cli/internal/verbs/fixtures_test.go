@@ -101,6 +101,13 @@ func apiReport(id, status string) apicontract.Report {
 	}
 }
 
+func apiUserReport(id string) apicontract.Report {
+	return apicontract.Report{
+		Id: id, GuildId: ptr("10"), TargetType: apicontract.ReportTargetTypeUser, TargetId: "2", ChannelId: ptr("40"),
+		ReasonCategory: "harassment", Status: "open", CreatedAt: at,
+	}
+}
+
 func apiTriage(id string) apicontract.TriageReport {
 	return apicontract.TriageReport{
 		Id: id, GuildId: ptr("10"), TargetType: apicontract.ReportTargetTypeMessage, TargetId: "30",

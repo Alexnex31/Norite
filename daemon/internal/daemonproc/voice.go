@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -70,6 +71,33 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
 		}
 		out, err = l.voice.Join(ctx, channel, settings)
+	case req.Path == ipc.PathVoiceMute:
+		out, err = l.voice.SetSelf(voiceworker.SelfMute)
+	case req.Path == ipc.PathVoiceUnmute:
+		out, err = l.voice.SetSelf(voiceworker.SelfUnmute)
+	case req.Path == ipc.PathVoiceDeafen:
+		out, err = l.voice.SetSelf(voiceworker.SelfDeafen)
+	case req.Path == ipc.PathVoiceUndeafen:
+		out, err = l.voice.SetSelf(voiceworker.SelfUndeafen)
+	case req.Path == ipc.PathVoiceProcessing:
+		settings, bad := ipc.DecodeVoiceProcessing(req.Body)
+		if bad != nil {
+			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
+		}
+		out = l.voice.Processing(settings)
+	case strings.HasPrefix(req.Path, ipc.PathVoice+"/local-"):
+		user, mute, ok := ipc.VoiceLocalMuteUser(req.Path)
+		if !ok {
+			return ipc.Failure(ipc.RelayBadRequest, "a local mute names a user id")
+		}
+		out, err = l.voice.LocalMute(user, mute)
+	case strings.HasPrefix(req.Path, ipc.PathVoice+"/streams/"):
+		n, ok := ipc.VoiceStreams(req.Path)
+		if !ok {
+			return ipc.Failure(ipc.RelayBadRequest, fmt.Sprintf("a call hears 1 to %d people at once, or 0 for "+
+				"every one it has room for", ipc.MaxStreams))
+		}
+		out, err = l.voice.Streams(n)
 	default:
 		return ipc.Failure(ipc.RelayBadRequest, "the daemon answers no request of its own at that path")
 	}
@@ -81,6 +109,8 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 		return ipc.Failure(ipc.RelayFailed, refused.Msg)
 	case errors.As(err, &refused):
 		return ipc.Failure(ipc.RelayConflict, refused.Msg)
+	case err != nil && !joining:
+		return ipc.Failure(ipc.RelayFailed, err.Error())
 	case err != nil:
 		// The asker went away; the join goes on, and the status says how it went.
 		return ipc.Failure(ipc.RelayFailed, "the join is still under way; ask again with `norite voice status`")

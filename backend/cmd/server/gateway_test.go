@@ -327,7 +327,34 @@ func TestEveryRefusalHasItsCloseCode(t *testing.T) {
 			c.identify(f.ownerToken, "dev")
 			c.ready()
 			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
-				"channel_id": "1", "offer": "v=0", "supports_video": false,
+				"channel_id": "1", "offer": "v=0", "supports_video": false, "self_mute": false, "self_deaf": false,
+			})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice join naming no self flags", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
+				"nonce": "a", "channel_id": "1", "offer": "v=0", "supports_video": false,
+			})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice update naming one self flag", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{"channel_id": "1", "self_mute": true})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice update carrying a nonce", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
+				"nonce": "a", "channel_id": "1", "self_mute": true, "self_deaf": false,
+			})
+		}, gatewayproto.CloseDecodeError},
+		{"a voice update with an empty offer", func(c *gatewayClient) {
+			c.identify(f.ownerToken, "dev")
+			c.ready()
+			c.send(gatewayproto.OpVoiceStateUpdate, map[string]any{
+				"nonce": "a", "channel_id": "1", "offer": "", "supports_video": false, "self_mute": true,
+				"self_deaf": false,
 			})
 		}, gatewayproto.CloseDecodeError},
 		{"a leave carrying more than a null channel", func(c *gatewayClient) {

@@ -25,14 +25,18 @@ import (
 // fakeCall is a Call whose every step the test decides.
 type fakeCall struct {
 	// mu guards what the worker hands the call: the answer, and the rights since.
-	mu     sync.Mutex
-	answer *voiceipc.Answer
-	rights []voiceipc.Rights
+	mu         sync.Mutex
+	answer     *voiceipc.Answer
+	rights     []voiceipc.Rights
+	subscribes []voiceipc.Subscribe
+	processing []voiceipc.Processing
 
 	offerErr error
 	ready    chan struct{}
 	ended    chan string
 	devices  chan voiceipc.Devices
+	speaking chan voiceipc.Speaking
+	dsp      chan voiceipc.DSP
 	closed   chan struct{}
 	// stuck makes Close block for ever, as a library stuck in C would.
 	stuck bool
@@ -44,7 +48,7 @@ type fakeCall struct {
 
 func newFakeCall() *fakeCall {
 	return &fakeCall{ready: make(chan struct{}), ended: make(chan string, 1), devices: make(chan voiceipc.Devices, 1),
-		closed: make(chan struct{})}
+		speaking: make(chan voiceipc.Speaking, 1), dsp: make(chan voiceipc.DSP, 1), closed: make(chan struct{})}
 }
 
 func (c *fakeCall) Offer(ctx context.Context) (string, error) {
@@ -70,6 +74,18 @@ func (c *fakeCall) Ended() <-chan string       { return c.ended }
 func (c *fakeCall) EndedBy() *voiceipc.Devices { return c.by }
 func (c *fakeCall) Devices() <-chan voiceipc.Devices {
 	return c.devices
+}
+func (c *fakeCall) Speaking() <-chan voiceipc.Speaking { return c.speaking }
+func (c *fakeCall) DSP() <-chan voiceipc.DSP           { return c.dsp }
+func (c *fakeCall) Subscribe(s voiceipc.Subscribe) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subscribes = append(c.subscribes, s)
+}
+func (c *fakeCall) Processing(p voiceipc.Processing) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.processing = append(c.processing, p)
 }
 func (c *fakeCall) Close() {
 	close(c.closed)
@@ -202,6 +218,55 @@ func TestTheAnswerAndTheRightsReachTheCall(t *testing.T) {
 	require.Equal(t, 96000, call.answer.Bitrate)
 	require.Equal(t, voiceipc.Rights{Send: true, Hear: true}, call.answer.Rights)
 	require.Equal(t, []voiceipc.Rights{{Send: false, Hear: true}, {Send: true, Hear: false}}, call.rights)
+}
+
+// Who is speaking and what the processing is doing reach the daemon, and whom the person mutes and how they
+// want the microphone processed reach the call, in order (M34).
+func TestTheCallsControlCrossesThePipes(t *testing.T) {
+	call := newFakeCall()
+	d := start(t, call, Options{})
+	d.joined()
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+
+	call.speaking <- voiceipc.Speaking{Users: []string{"42"}}
+	f := d.next()
+	require.Equal(t, voiceipc.OpSpeaking, f.Op)
+	var sp voiceipc.Speaking
+	require.NoError(t, ipc.Decode(f, &sp))
+	require.Equal(t, []string{"42"}, sp.Users)
+
+	call.dsp <- voiceipc.DSP{State: voiceipc.DSPRunning, NoiseSuppression: true}
+	f = d.next()
+	require.Equal(t, voiceipc.OpDSP, f.Op)
+	var dsp voiceipc.DSP
+	require.NoError(t, ipc.Decode(f, &dsp))
+	require.Equal(t, voiceipc.DSP{State: voiceipc.DSPRunning, NoiseSuppression: true}, dsp)
+
+	two := 2
+	d.send(voiceipc.OpSubscribe, voiceipc.Subscribe{Drop: []string{"42"}, Cap: &two})
+	d.send(voiceipc.OpProcessing, voiceipc.Processing{Processing: ipc.VoiceJoin{AutoGain: true}})
+	require.Eventually(t, func() bool {
+		call.mu.Lock()
+		defer call.mu.Unlock()
+		return len(call.subscribes) == 1 && len(call.processing) == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	call.mu.Lock()
+	defer call.mu.Unlock()
+	require.Equal(t, []voiceipc.Subscribe{{Drop: []string{"42"}, Cap: &two}}, call.subscribes)
+	require.Equal(t, []voiceipc.Processing{{Processing: ipc.VoiceJoin{AutoGain: true}}}, call.processing)
+}
+
+// A subscribe the protocol forbids is the daemon breaking it, and ends the worker as any such frame does.
+func TestASubscribePastItsBoundIsRefused(t *testing.T) {
+	call := newFakeCall()
+	d := start(t, call, Options{})
+	d.joined()
+	none := 0
+	d.send(voiceipc.OpSubscribe, voiceipc.Subscribe{Drop: []string{}, Cap: &none})
+	s := d.state()
+	require.Equal(t, voiceipc.StateEnded, s.State)
+	require.Equal(t, ExitProtocol, d.exit())
 }
 
 func TestACallGoesFromJoinToReadyAndEndsOnLeave(t *testing.T) {

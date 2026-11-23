@@ -423,3 +423,23 @@ func TestAMergeDecodesTheSameNumberOfTimesWhateverTheSize(t *testing.T) {
 	assert.Equal(t, small, large, "the same number of decodes for ten keys as for thousands")
 	assert.LessOrEqual(t, large, int64(6))
 }
+
+// A batch of settings is one write: all of them, or none when one is refused, so a command setting several
+// never leaves the first behind after a later one failed (M34's /code-review).
+func TestSettingSeveralKeysWritesAllOrNone(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	t.Setenv("APPDATA", cfg)
+	toggled(t, "")
+	path, err := SetAllFor(TUI, Shared, Setting{KeyVoiceEchoCancellation, Off}, Setting{KeyVoiceAutoGain, Off})
+	require.NoError(t, err)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "[shared.voice]\necho_cancellation = \"off\"\nauto_gain = \"off\"\n", string(data))
+
+	_, err = SetAllFor(TUI, Shared, Setting{KeyVoiceNoiseSuppression, Off}, Setting{KeyVoiceAutoGain, "maybe"})
+	require.Error(t, err)
+	again, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(data), string(again), "a batch with one refused setting wrote the others")
+}

@@ -4273,13 +4273,20 @@ paths:
     post:
       summary: File a report
       description: >
-        Reports something to whoever is responsible for moderating it. At this milestone that means a
-        message in a guild channel, routed to that guild's moderators.
+        Reports something to whoever is responsible for moderating it: a message in a guild channel, or
+        since M34 a user in a voice channel, each routed to that guild's moderators.
 
 
-        **`target_type` accepts only `message` today.** The other values are reserved and refused with
-        their own message, so a client learns the kind is not yet accepted rather than that it does not
-        exist. `whisper` arrives with M61 and the rest with the Instance Admin queue at M74.
+        **`target_type` accepts `message` and `user` today.** The other values are reserved and refused
+        with their own message, so a client learns the kind is not yet accepted rather than that it does
+        not exist. `whisper` arrives with M61 and `channel` with the Instance Admin queue at M74.
+
+
+        **A report against a user names the voice channel it is filed from**, as `channel_id`, which is
+        how it reaches a guild: a call leaves no message to point at. The caller must be able to see the
+        channel and the user must be a member of its guild, or the answer is 404. Neither need be in the
+        call now: the abuser leaving first is the ordinary case. A message's report names no
+        `channel_id`, its channel being its own, and reporting yourself is a 400.
 
 
         **Where a report goes is decided by the server.** There is no `routed_to` in this body and sending
@@ -4328,14 +4335,17 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: >
-            No such message, or one in a channel the caller cannot see. The two are deliberately the same
-            answer — which of them it is is exactly what the channel filter withholds.
+            No such message, or one in a channel the caller cannot see; for a user, a channel the caller
+            cannot see or a user who is not a member of its guild. Each pair is deliberately one answer —
+            which of them it is is exactly what the channel filter withholds.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: The caller already has an open report against this target.
+          description: >
+            The caller already has an open report against this target, in this guild: the same user may
+            be reported in two guilds, to two sets of moderators.
           content:
             application/json:
               schema:
@@ -6010,9 +6020,10 @@ components:
     ReportTargetType:
       type: string
       description: >
-        What a report points at. **Only `message` is accepted today**; the rest are reserved, stored as
-        distinct values so a later milestone does not have to renumber, and refused at the boundary with a
-        message saying the kind is not yet accepted. `whisper` arrives with M61, the others with M74.
+        What a report points at. **`message` and, since M34, `user` are accepted today**; the rest are
+        reserved, stored as distinct values so a later milestone does not have to renumber, and refused at
+        the boundary with a message saying the kind is not yet accepted. `whisper` arrives with M61,
+        `channel` with M74.
       enum: [message, whisper, channel, user]
 
     ReportStatus:
@@ -6040,8 +6051,8 @@ components:
 
         **There is no reporter field, on this schema or any other on these routes.** See the listing
         endpoint for why: a guild moderator is never told who filed a report against them.
-      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
-                 created_at, resolved_at]
+      required: [id, guild_id, target_type, target_id, channel_id, reason_category, detail, status,
+                 resolved_by, created_at, resolved_at]
       additionalProperties: false
       properties:
         id:
@@ -6057,6 +6068,13 @@ components:
           $ref: "#/components/schemas/ReportTargetType"
         target_id:
           $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          description: >
+            The voice channel a report against a user was filed from (M34), which is how it reached this
+            guild. Null for a message, whose channel is its own, and once that channel is deleted.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
         reason_category:
           $ref: "#/components/schemas/ReportReasonCategory"
         detail:
@@ -6091,8 +6109,8 @@ components:
         own sake — `allOf` branches validate independently, so a branch carrying
         `additionalProperties: false` rejects the properties its sibling adds, which is exactly how
         MintedApiToken shipped a schema no successful response could satisfy.
-      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
-                 created_at, resolved_at, target_is_e2e, target_deleted_at]
+      required: [id, guild_id, target_type, target_id, channel_id, reason_category, detail, status,
+                 resolved_by, created_at, resolved_at, target_is_e2e, target_deleted_at]
       additionalProperties: false
       properties:
         id:
@@ -6105,6 +6123,13 @@ components:
           $ref: "#/components/schemas/ReportTargetType"
         target_id:
           $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          description: >
+            The voice channel a report against a user was filed from (M34), which is how it reached this
+            guild. Null for a message, whose channel is its own, and once that channel is deleted.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
         reason_category:
           $ref: "#/components/schemas/ReportReasonCategory"
         detail:
@@ -6364,8 +6389,8 @@ components:
       type: object
       description: >
         One report with the reported message attached. The only schema in this milestone carrying content.
-      required: [id, guild_id, target_type, target_id, reason_category, detail, status, resolved_by,
-                 created_at, resolved_at, target_is_e2e, target_deleted_at, target_content,
+      required: [id, guild_id, target_type, target_id, channel_id, reason_category, detail, status,
+                 resolved_by, created_at, resolved_at, target_is_e2e, target_deleted_at, target_content,
                  target_channel_id, target_author_id]
       additionalProperties: false
       properties:
@@ -6379,6 +6404,13 @@ components:
           $ref: "#/components/schemas/ReportTargetType"
         target_id:
           $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          description: >
+            The voice channel a report against a user was filed from (M34), which is how it reached this
+            guild. Null for a message, whose channel is its own, and once that channel is deleted.
+          oneOf:
+            - $ref: "#/components/schemas/Snowflake"
+            - type: "null"
         reason_category:
           $ref: "#/components/schemas/ReportReasonCategory"
         detail:
@@ -6437,6 +6469,11 @@ components:
           $ref: "#/components/schemas/ReportTargetType"
         target_id:
           $ref: "#/components/schemas/Snowflake"
+        channel_id:
+          $ref: "#/components/schemas/Snowflake"
+          description: >
+            The voice channel a report against a user is filed from (M34): required for `user`, and a 400
+            for `message`, whose channel is its own.
         reason_category:
           $ref: "#/components/schemas/ReportReasonCategory"
         detail:
@@ -6495,9 +6532,11 @@ components:
         One voice connection: an account in a voice channel from one machine (M33). An account on two
         machines is two of these. `mute`, `deaf` and `suppress` are what the account may do there, and
         its client applies them: the SFU enforces none of the three, while a kick or a lost `CONNECT`
-        ends the connection on the server.
+        ends the connection on the server. `self_mute` and `self_deaf` are what the caller has set on
+        themselves (M34), which their client applies the same way.
       required:
-        [connection_id, guild_id, channel_id, user_id, mute, deaf, suppress, supports_video, joined_at]
+        [connection_id, guild_id, channel_id, user_id, mute, deaf, suppress, self_mute, self_deaf,
+         supports_video, joined_at]
       additionalProperties: false
       properties:
         connection_id:
@@ -6517,6 +6556,12 @@ components:
         suppress:
           type: boolean
           description: The account lacks `SPEAK` in this channel.
+        self_mute:
+          type: boolean
+          description: The caller has muted themselves.
+        self_deaf:
+          type: boolean
+          description: The caller has deafened themselves.
         supports_video:
           type: boolean
           description: What the client said it can do. Terminal clients say false.

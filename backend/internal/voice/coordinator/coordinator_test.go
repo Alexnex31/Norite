@@ -20,6 +20,7 @@ import (
 	"github.com/Alexnex31/Norite/backend/internal/dispatch"
 	"github.com/Alexnex31/Norite/backend/internal/platform/database"
 	"github.com/Alexnex31/Norite/backend/internal/platform/dbtest"
+	"github.com/Alexnex31/Norite/backend/internal/platform/events"
 	"github.com/Alexnex31/Norite/backend/internal/platform/ratelimit"
 	"github.com/Alexnex31/Norite/backend/internal/platform/snowflake"
 	"github.com/Alexnex31/Norite/backend/internal/roles"
@@ -117,10 +118,24 @@ func (f *fixture) offer(t *testing.T) string {
 
 func (f *fixture) join(t *testing.T, user snowflake.ID, session string, sdp string) (string, any) {
 	t.Helper()
-	ch, video := f.channel.String(), false
+	ch, no := f.channel.String(), false
 	return f.c.Join(f.ctx, user, session, "device-"+session, gatewayproto.VoiceStateUpdate{
-		Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video,
+		Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no,
 	})
+}
+
+// update sends the session's update for channel.
+func (f *fixture) update(user snowflake.ID, session string, channel snowflake.ID, mute, deaf bool) {
+	ch := channel.String()
+	f.c.Update(f.ctx, user, session, gatewayproto.VoiceStateUpdate{ChannelID: &ch, SelfMute: &mute, SelfDeaf: &deaf})
+}
+
+// selfFlags reads what the session's row says the caller set on themselves.
+func (f *fixture) selfFlags(t *testing.T, session string) (mute, deaf bool) {
+	t.Helper()
+	require.NoError(t, f.pool.QueryRow(f.ctx,
+		`SELECT self_mute, self_deaf FROM voice_states WHERE session_id = $1`, session).Scan(&mute, &deaf))
+	return mute, deaf
 }
 
 // recheck delivers a re-check of the fixture's guild and waits for it to have run.
@@ -318,9 +333,9 @@ func TestAnOlderJoinOfTheDeviceEndsNothingOfANewerOne(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeReplace = nil })
 	join := func(session, sdp string) string {
-		ch, video := f.channel.String(), false
+		ch, no := f.channel.String(), false
 		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
-			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no})
 		return event
 	}
 	old := make(chan string, 1)
@@ -353,9 +368,9 @@ func TestAJoinUnderWayOnAnotherSessionOfTheDeviceIsReplaced(t *testing.T) {
 	}
 	t.Cleanup(func() { beforeProvision = nil })
 	join := func(session, sdp string) string {
-		ch, video := f.channel.String(), false
+		ch, no := f.channel.String(), false
 		event, _ := f.c.Join(f.ctx, f.member, session, "one-device", gatewayproto.VoiceStateUpdate{
-			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &video})
+			Nonce: "n", ChannelID: &ch, Offer: sdp, SupportsVideo: &no, SelfMute: &no, SelfDeaf: &no})
 		return event
 	}
 	old := make(chan string, 1)
@@ -401,4 +416,119 @@ func TestAConnectionTheSFUClosesEndsItsCall(t *testing.T) {
 	defer f.c.mu.Unlock()
 	assert.Empty(t, f.c.calls)
 	assert.Empty(t, f.c.inGuild)
+}
+
+// An update reaches the call its own session holds and nothing else: another session's update, one for
+// another channel, and one from another account change nothing (M34).
+func TestAnUpdateReachesOnlyItsSessionsCall(t *testing.T) {
+	f := newFixture(t)
+	event, _ := f.join(t, f.member, "a", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+	event, _ = f.join(t, f.owner, "b", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+
+	f.update(f.member, "b", f.channel, true, true)
+	f.update(f.owner, "a", f.channel, true, true)
+	f.update(f.member, "a", f.ids.MustNext(), true, true)
+	for _, session := range []string{"a", "b"} {
+		mute, deaf := f.selfFlags(t, session)
+		assert.False(t, mute, session)
+		assert.False(t, deaf, session)
+	}
+
+	f.update(f.member, "a", f.channel, true, false)
+	mute, deaf := f.selfFlags(t, "a")
+	assert.True(t, mute)
+	assert.False(t, deaf)
+	mute, _ = f.selfFlags(t, "b")
+	assert.False(t, mute, "another session's call changed")
+}
+
+// heldBus records what is published, in order, and holds the first publish once hold is set, until
+// released.
+type heldBus struct {
+	hold     atomic.Bool
+	held     chan struct{}
+	release  chan struct{}
+	mu       chan struct{}
+	payloads [][]byte
+}
+
+func newHeldBus() *heldBus {
+	b := &heldBus{held: make(chan struct{}), release: make(chan struct{}), mu: make(chan struct{}, 1)}
+	b.mu <- struct{}{}
+	return b
+}
+
+func (b *heldBus) Publish(_ context.Context, _ string, payload []byte) error {
+	if b.hold.CompareAndSwap(true, false) {
+		close(b.held)
+		<-b.release
+	}
+	<-b.mu
+	b.payloads = append(b.payloads, append([]byte(nil), payload...))
+	b.mu <- struct{}{}
+	return nil
+}
+
+func (b *heldBus) Subscribe(string, func([]byte)) (events.Subscription, error) { return nil, nil }
+func (b *heldBus) Close() error                                                { return nil }
+
+func (b *heldBus) selfMutes(t *testing.T) []bool {
+	t.Helper()
+	<-b.mu
+	defer func() { b.mu <- struct{}{} }()
+	var out []bool
+	for _, p := range b.payloads {
+		var ev struct {
+			Type string `json:"type"`
+			Data struct {
+				SelfMute bool `json:"self_mute"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(p, &ev))
+		if ev.Type == gatewayproto.EventVoiceStateUpdate {
+			out = append(out, ev.Data.SelfMute)
+		}
+	}
+	return out
+}
+
+// Two writes of one call's row publish in the order they committed, so the channel's viewers end on the
+// newer (M34's /code-review): each event carries the whole row. Staged: the first write's publish is held,
+// and the second, committing behind it, must not publish first.
+func TestWritesOfACallsRowPublishInTheOrderTheyCommitted(t *testing.T) {
+	f := newFixture(t)
+	event, _ := f.join(t, f.member, "a", f.offer(t))
+	require.Equal(t, gatewayproto.EventVoiceServerUpdate, event)
+	bus := newHeldBus()
+	f.c.opts.Events = dispatch.NewPublisher(bus, nil)
+	bus.hold.Store(true)
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		f.update(f.member, "a", f.channel, true, false)
+	}()
+	select {
+	case <-bus.held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first update never published")
+	}
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		f.update(f.member, "a", f.channel, false, false)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	close(bus.release)
+	for _, done := range []chan struct{}{first, second} {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("an update never returned")
+		}
+	}
+	assert.Equal(t, []bool{true, false}, bus.selfMutes(t), "the viewers were left on the older row")
+	mute, _ := f.selfFlags(t, "a")
+	assert.False(t, mute)
 }

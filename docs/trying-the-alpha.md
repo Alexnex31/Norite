@@ -229,8 +229,11 @@ mkdir -p ~/norite-instance && cd ~/norite-instance
 
 ### Step 1 — a Postgres database
 
-Norite stores everything in PostgreSQL. It has been developed and tested against Postgres 16. It needs an
-empty database and a user that owns it; it creates its own tables on first start.
+Norite stores everything in PostgreSQL, **15 or newer**: a migration uses an index form older versions do
+not have, and on 13 or 14 the server stops at its first start with a syntax error. It has been developed and
+tested against Postgres 16. Distributions whose own package is older, Ubuntu 22.04's 14 for one, need the
+PostgreSQL project's repository or the Docker image below. It needs an empty database and a user that owns
+it; it creates its own tables on first start.
 
 - **With Docker, from a checkout of this repository**:
 

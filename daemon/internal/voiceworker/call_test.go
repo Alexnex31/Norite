@@ -29,7 +29,7 @@ type refusingServer struct {
 
 func (s *refusingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
 
-func (s *refusingServer) Join(context.Context, string, string, string) (Answer, error) {
+func (s *refusingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	s.v.mu.Lock()
 	if s.v.current != nil {
 		s.worker.Store(s.v.current.worker)
@@ -79,7 +79,7 @@ func (s *blockingServer) Prepare(ctx context.Context, _ string) (Route, error) {
 	return Route{}, ctx.Err()
 }
 
-func (s *blockingServer) Join(context.Context, string, string, string) (Answer, error) {
+func (s *blockingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{}, errors.New("unreachable")
 }
 
@@ -134,7 +134,7 @@ func (s *recordingServer) Prepare(_ context.Context, account string) (Route, err
 	return Route{}, errors.New("the voice server refused: 503")
 }
 
-func (s *recordingServer) Join(context.Context, string, string, string) (Answer, error) {
+func (s *recordingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{}, errors.New("unreachable")
 }
 
@@ -183,7 +183,7 @@ func TestTheEndOfTheSignInEndsTheCall(t *testing.T) {
 	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
 	close(ended)
 	require.Eventually(t, func() bool { return !v.Busy() }, 5*time.Second, 5*time.Millisecond)
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true}, v.Status())
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "the sign-in ended", Available: true, LocalMutes: []string{}, Speaking: []string{}}, v.Status())
 }
 
 // The join's settings reach the worker in its JOIN, each switch where the request put it (M30).
@@ -233,7 +233,7 @@ func TestALeaveWhileTheWorkerStartsIsNoCrash(t *testing.T) {
 		5*time.Second, 10*time.Millisecond, "%s", log.String())
 	require.NotContains(t, log.String(), "crashed")
 	require.NotContains(t, log.String(), `"level":"warn"`)
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true}, v.Status())
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceIdle, Reason: "left", Available: true, LocalMutes: []string{}, Speaking: []string{}}, v.Status())
 }
 
 // The leave a sign-in's end starts is that call's: by the time it runs, a join under the next sign-in may
@@ -250,7 +250,7 @@ func TestTheEndOfASignInLeavesOnlyItsOwnCall(t *testing.T) {
 	v.mu.Unlock()
 	v.leave(ended, "the sign-in ended")
 	require.True(t, v.Busy())
-	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "2", Available: true}, v.Status())
+	require.Equal(t, ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "2", Available: true, LocalMutes: []string{}, Speaking: []string{}}, v.Status())
 }
 
 // routelessServer refuses the route at once, so a join fails before any worker is started.
@@ -260,7 +260,7 @@ func (routelessServer) Prepare(context.Context, string) (Route, error) {
 	return Route{}, errors.New("the voice server refused: 503")
 }
 
-func (routelessServer) Join(context.Context, string, string, string) (Answer, error) {
+func (routelessServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{}, errors.New("unreachable")
 }
 
@@ -298,10 +298,14 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 	require.False(t, st.EndedInCall, "a join that failed is not a call that ended")
 }
 
-func (*refusingServer) Leave(context.Context, string)  {}
-func (*blockingServer) Leave(context.Context, string)  {}
-func (*recordingServer) Leave(context.Context, string) {}
-func (routelessServer) Leave(context.Context, string)  {}
+func (*refusingServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (*refusingServer) Leave(context.Context, string)                                {}
+func (*blockingServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (*blockingServer) Leave(context.Context, string)                                {}
+func (*recordingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
+func (*recordingServer) Leave(context.Context, string)                               {}
+func (routelessServer) Update(context.Context, string, string, ipc.VoiceSelf) error  { return nil }
+func (routelessServer) Leave(context.Context, string)                                {}
 
 // orderingServer records what it is asked, in order. A join waits for its context when hold is set; the
 // first leave waits for release when slowLeave is set; every join is refused.
@@ -327,7 +331,7 @@ func (s *orderingServer) seen() []string {
 
 func (s *orderingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
 
-func (s *orderingServer) Join(ctx context.Context, _, _, _ string) (Answer, error) {
+func (s *orderingServer) Join(ctx context.Context, _, _, _ string, _ ipc.VoiceSelf) (Answer, error) {
 	s.note("join")
 	if s.joined != nil {
 		select {
@@ -342,6 +346,7 @@ func (s *orderingServer) Join(ctx context.Context, _, _, _ string) (Answer, erro
 	return Answer{}, errors.New("the voice server refused: 409 room full")
 }
 
+func (s *orderingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
 func (s *orderingServer) Leave(context.Context, string) {
 	s.mu.Lock()
 	slow := s.slowLeave
