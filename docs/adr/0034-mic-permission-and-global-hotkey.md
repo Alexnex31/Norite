@@ -273,6 +273,13 @@ id is chosen at M35.
       Homebrew cask on Linux does not, and the status names the missing file.
     - Where the session is comes from the user manager's environment (`org.freedesktop.systemd1.Manager`),
       over the daemon's own, which a daemon started before the login never had.
+    - A shortcut the desktop already binds to a key is taken from `ListShortcuts`, and `BindShortcuts` is
+      asked only when none is listed. Plasma 6.3's `BindShortcuts` opens System Settings at every call, which
+      the manual pass saw at every join; its `CreateSession` loads what the component holds. Walked on
+      Plasma 6.3 alone. A portal the bus could not start names the bus's error. Only the registry's own
+      failure is a missing `.desktop` file.
+    - Push-to-talk asked again during a call tries a key it could not have, which another program may have
+      let go since.
     - The X grab covers CapsLock and NumLock, uses the session's own Xauthority cookie, and refuses a
       display not on this machine. Tested under an Xvfb of the test's own: `-displayfd` alone picked `:0`
       beside the author's XWayland, which listens on the path and not the abstract socket.
