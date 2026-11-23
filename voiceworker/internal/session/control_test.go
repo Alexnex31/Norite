@@ -13,7 +13,10 @@ import (
 
 	"github.com/Alexnex31/Norite/backend/voiceproto"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
+	"github.com/Alexnex31/Norite/voiceworker/internal/audio"
 	"github.com/Alexnex31/Norite/voiceworker/internal/dsp"
+	"github.com/Alexnex31/Norite/voiceworker/internal/jitter"
+	"github.com/Alexnex31/Norite/voiceworker/internal/opus"
 )
 
 func speakingMsg(t *testing.T, users ...string) []byte {
@@ -131,6 +134,35 @@ func TestAMutedSenderStaysMutedOffTheMap(t *testing.T) {
 	defer c.mu.Unlock()
 	require.Len(t, c.seen, maxSources)
 	require.Len(t, c.order, maxSources)
+}
+
+// A local mute is judged by whose samples the mix plays, never by whom the slot holds now: a packet of the
+// next sender's moves the slot between the frame's decode and its mix (M34's /code-review). Staged at that
+// moment: the slot holds the unmuted sender 9 while its samples are the muted 7's, decoded before.
+func TestALocalMuteJudgesTheSamplesNotTheSlot(t *testing.T) {
+	c := newControl(dsp.AllOn())
+	defer c.stop()
+	c.onSlots(slotsMsg(t, voiceproto.SlotEntry{Slot: 0, Kind: "audio", Source: 1, User: "7", Conn: "8"},
+		voiceproto.SlotEntry{Slot: 1, Kind: "audio", Source: 2, User: "9", Conn: "10"}))
+	c.subscribe(voiceipc.Subscribe{Drop: []string{"7"}})
+	require.True(t, c.isMuted(1))
+	require.False(t, c.isMuted(2))
+
+	play := func(from uint32, holds uint32) int16 {
+		buf := jitter.New()
+		buf.Push(holds, 0, 0, []byte{0xf8, 0xff, 0xfe}, time.Now())
+		sl := &slot{buf: buf, pcm: make([]int16, audio.FrameSamples, opus.MaxDecodeSamples+audio.FrameSamples),
+			tmp: make([]int16, opus.MaxDecodeSamples), from: from, fromOK: true}
+		for i := range sl.pcm {
+			sl.pcm[i] = 1000
+		}
+		m := &media{s: &Session{ctl: c}, base: time.Now(), slots: []*slot{sl}}
+		out := make([]int16, audio.FrameSamples)
+		m.fill(out)
+		return out[0]
+	}
+	require.Equal(t, int16(0), play(1, 2), "the muted sender's samples played under the next sender's name")
+	require.Equal(t, int16(1000), play(2, 1), "the unmuted sender's samples were muted for whom the slot holds")
 }
 
 // sends records what a control sends on its data channel.

@@ -374,3 +374,21 @@ func TestAFirstLossDeepensTheBufferForFEC(t *testing.T) {
 		t.Errorf("target %d after a loss", b.Target())
 	}
 }
+
+// Each step says whose it is, read with the step: the mix judges a local mute by it (M34's /code-review).
+func TestAStepSaysWhoseItIs(t *testing.T) {
+	b := New()
+	if s := b.Next(); s.HasSender {
+		t.Errorf("a step before any packet named sender %d", s.Sender)
+	}
+	b.Done(FrameSamples)
+	push(b, 7, 10, 1000)
+	if s := b.Next(); !s.HasSender || s.Sender != 7 || s.Kind != Play {
+		t.Errorf("the first sender's step is %+v", s)
+	}
+	b.Done(FrameSamples)
+	push(b, 9, 50, 9000)
+	if s := b.Next(); !s.HasSender || s.Sender != 9 || !s.Reset {
+		t.Errorf("the next sender's first step is %+v", s)
+	}
+}

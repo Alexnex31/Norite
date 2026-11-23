@@ -163,11 +163,15 @@ type media struct {
 }
 
 type slot struct {
-	buf  *jitter.Buffer
-	dec  opus.Decoder
-	pcm  []int16 // decoded and not yet played; at most one packet's worth past a frame
-	tmp  []int16
-	errs int
+	buf *jitter.Buffer
+	dec opus.Decoder
+	pcm []int16 // decoded and not yet played; at most one packet's worth past a frame
+	// from is whose samples pcm holds, and fromOK whether anybody's: every one of them is one sender's,
+	// since a change of sender empties it.
+	from   uint32
+	fromOK bool
+	tmp    []int16
+	errs   int
 	// resets counts the decoder's resets, one per sender the slot changed to; levels the packets that
 	// arrived with an audio level, voiced those of them whose V flag was set, and loudness the sum of their
 	// levels, in -dBov.
@@ -724,8 +728,10 @@ func (m *media) fill(out []int16) {
 		m.next(sl)
 		// Somebody the person muted for themselves (M34) is not played: the SFU stops forwarding them within
 		// a tick of the subscribe, and what is already on its way, buffered or decoded, is decoded all the
-		// same, so the slot keeps up with whoever fills it next.
-		if src, ok := sl.buf.Sender(); !ok || !m.s.ctl.isMuted(src) {
+		// same, so the slot keeps up with whoever fills it next. Judged by whose samples these are, never by
+		// whom the slot holds now, which a packet of another sender's changes between next and here (M34's
+		// /code-review: the muted sender's leftovers played under the next one's name).
+		if !sl.fromOK || !m.s.ctl.isMuted(sl.from) {
 			for i := range audio.FrameSamples {
 				m.mix[i] += int32(sl.pcm[i])
 			}
@@ -792,6 +798,7 @@ func (m *media) next(sl *slot) {
 	}
 	for len(sl.pcm) < audio.FrameSamples {
 		st := sl.buf.Next()
+		sl.from, sl.fromOK = st.Sender, st.HasSender
 		ctx := context.Background()
 		if st.Reset {
 			sl.pcm = sl.pcm[:0]
