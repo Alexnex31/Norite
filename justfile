@@ -420,7 +420,8 @@ release-dry-run:
     git cat-file -e "$rev^{commit}" || { echo "norite about: '$rev' is not a commit here" >&2; exit 1; }
     echo "norite about names $rev (stamped), a commit this repository holds"
     # Each Linux package of the client carries its three programs and the marker naming its manager, which is
-    # how its daemon names that manager's command instead of installing a release itself (ADR 0035 §4).
+    # how its daemon names that manager's command instead of installing a release itself (ADR 0035 §4), and
+    # since M35 the .desktop file that names Norite to the GlobalShortcuts portal (ADR 0034 §5).
     # bsdtar reads a .deb, an .rpm and a pacman package alike; a .deb's files are one archive further in.
     # Each format spells a member's name differently (./usr, /usr, usr), so the name is taken from the
     # listing rather than guessed.
@@ -431,14 +432,15 @@ release-dry-run:
             *) files() { bsdtar "$1" -f "$pkg" "${@:2}"; }; want=pacman ;;
         esac
         list=$(files -t)
-        for f in usr/bin/norite usr/bin/norite-daemon usr/bin/norite-voice usr/lib/norite/packaged-by; do
+        for f in usr/bin/norite usr/bin/norite-daemon usr/bin/norite-voice usr/lib/norite/packaged-by \
+            usr/share/applications/io.github.alexnex31.Norite.desktop; do
             grep -qE "^\.?/?$f\$" <<<"$list" || { echo "$pkg is missing $f" >&2; exit 1; }
         done
         marker=$(grep -E '^\.?/?usr/lib/norite/packaged-by$' <<<"$list")
         said=$(files -xO "$marker" 2>/dev/null)
         [[ "$said" == "$want" ]] || { echo "$pkg says it was packaged by '$said', not $want" >&2; exit 1; }
     done
-    echo "each client package carries its three programs and names its manager"
+    echo "each client package carries its three programs, names its manager, and names Norite to the portal"
 
 # Fail if any hand-written Go file is missing its two-line SPDX header (rule 24, ADR 0032).
 #

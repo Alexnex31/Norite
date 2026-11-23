@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Norite
+Comment=Voice and text chat. This entry names Norite to the desktop, for push-to-talk's shortcut.
+Exec=norite
+Terminal=true
+NoDisplay=true
+Categories=Network;Chat;
