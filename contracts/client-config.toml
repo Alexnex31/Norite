@@ -142,6 +142,31 @@ portable = true
 consumer = "M34"
 live = true
 
+# How a call's microphone is let through (M35), applied at the next join and by `norite voice mode` at once:
+# by voice, whatever the noise suppressor takes for a voice, or by push-to-talk, while the key is down. The
+# key is held only while a call by push-to-talk lasts, OS-wide: modifiers among ctrl, alt, shift and super,
+# then a letter, a digit, space or f1 to f24. On Linux's portal the desktop asks once, and the person may
+# bind another; on macOS it needs ctrl or super (Control or Command).
+
+[[key]]
+name = "voice.input_mode"
+section = "shared"
+type = "enum"
+values = ["voice", "push_to_talk"]
+default = "voice"
+portable = true
+consumer = "M35"
+live = true
+
+[[key]]
+name = "voice.push_to_talk_key"
+section = "shared"
+type = "string"
+default = "ctrl+shift+space"
+portable = true
+consumer = "M35"
+live = true
+
 # --- Reserved: the format is settled here, and nothing reads these until the milestone named. ---
 
 [[key]]

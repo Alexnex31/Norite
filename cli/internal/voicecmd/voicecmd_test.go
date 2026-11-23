@@ -83,7 +83,8 @@ func norite(t *testing.T, daemon *fakeDaemon, asJSON bool, args ...string) ran {
 
 // allOn is a config.toml that says nothing about voice.
 func allOn() (Read, []string, error) {
-	return Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}}, nil, nil
+	return Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
+		Input: ipc.DefaultVoiceInput()}, nil, nil
 }
 
 func noriteWith(t *testing.T, daemon *fakeDaemon, settings Settings, asJSON bool, args ...string) ran {
@@ -118,6 +119,8 @@ func TestEachCommandAsksItsOwnRequestAndPrintsTheContract(t *testing.T) {
 		// The join asks how voice stands first, and sends the channel only to a daemon that answered.
 		{[]string{"join", "1234"}, []string{"GET " + ipc.PathVoice, "POST " + ipc.PathVoiceJoin("1234")}},
 		{[]string{"leave"}, []string{"POST " + ipc.PathVoiceLeave}},
+		// With no call, the mode is written for the next join and the daemon is told nothing more.
+		{[]string{"mode", "push-to-talk"}, []string{"GET " + ipc.PathVoice}},
 	}
 	for _, tc := range cases {
 		d := &fakeDaemon{status: available()}
@@ -162,14 +165,14 @@ func TestAJoinThisDaemonCannotMakeIsRefusedBeforeTheChannelIsSent(t *testing.T) 
 // ledger's entry on the prefix, reopened at M30).
 func TestTheSettingsAreSentOnlyWithTheChannel(t *testing.T) {
 	off := func() (Read, []string, error) {
-		return Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: false, AutoGain: false}},
-			nil, nil
+		return Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: false, AutoGain: false},
+			Input: ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+f9"}}, nil, nil
 	}
 	d := &fakeDaemon{status: available()}
 	r := noriteWith(t, d, off, false, "join", "1234")
 	require.NoError(t, r.err)
-	assert.Equal(t, []string{"null", `{"echo_cancellation":true,"noise_suppression":false,"auto_gain":false}`},
-		d.bodies)
+	assert.Equal(t, []string{"null", `{"echo_cancellation":true,"noise_suppression":false,"auto_gain":false,` +
+		`"input_mode":"push_to_talk","push_to_talk_key":"ctrl+f9"}`}, d.bodies)
 
 	older := &fakeDaemon{older: true}
 	require.Error(t, noriteWith(t, older, off, false, "join", "1234").err)
@@ -206,8 +209,8 @@ func TestWhatTheFileGotWrongAboutVoiceIsSaid(t *testing.T) {
 	require.NoError(t, err)
 	body, warnings, err := settingsOf(cfg, "config.toml")
 	require.NoError(t, err)
-	assert.Equal(t, Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}},
-		body)
+	assert.Equal(t, Read{Processing: ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
+		Input: ipc.DefaultVoiceInput()}, body)
 	assert.Equal(t, []string{
 		`config.toml: shared.voice.auto_gain: must be one of "on" or "off"; so automatic gain is on`,
 		"config.toml: shared.voice.echo_cancelation: not a key this version of Norite knows; it changes nothing",
@@ -448,6 +451,8 @@ func TestThePersonsCommandsRefuseWhatIsNotTheirs(t *testing.T) {
 		{"local-mute"}, {"local-mute", "bob"}, {"local-mute", "0"}, {"local-unmute", "000"}, {"local-unmute", "7", "8"}, {"mute", "7"},
 		{"streams"}, {"streams", "4"}, {"streams", "0"}, {"streams", "two"},
 		{"processing"}, {"processing", "--auto-gain", "maybe"},
+		{"mode"}, {"mode", "push_to_talk"}, {"mode", "voice", "now"}, {"mode", "push-to-talk", "--key", "a"},
+		{"mode", "push-to-talk", "--key", "ctrl+enter"},
 	} {
 		written = &writes{}
 		d := &fakeDaemon{status: available()}
@@ -518,4 +523,85 @@ func TestWithNoCallTheSelfSwitchesAreSaidOfTheNextCall(t *testing.T) {
 	require.NoError(t, r.err)
 	assert.Equal(t, "Not in a voice call.\n"+
 		"You deafened yourself: your next call starts deafened, and `norite voice undeafen` undoes it.\n", r.out)
+}
+
+// A change of mode during a call writes the file and sends the call the mode with the key the file holds,
+// or the one --key names, written its one way and saved beside the mode in one write.
+func TestAModeChangeReachesTheCall(t *testing.T) {
+	inCall := ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true}
+	written = &writes{}
+	d := &fakeDaemon{status: inCall}
+	keyed := func() (Read, []string, error) {
+		return Read{Processing: ipc.VoiceAllOn(), Input: ipc.VoiceInput{Mode: ipc.VoiceInputVoice, Key: "ctrl+f9"}},
+			nil, nil
+	}
+	r := noriteWith(t, d, keyed, false, "mode", "push-to-talk")
+	require.NoError(t, r.err)
+	assert.Equal(t, []string{"GET " + ipc.PathVoice, "POST " + ipc.PathVoiceMode}, d.asked)
+	assert.Equal(t, `{"input_mode":"push_to_talk","push_to_talk_key":"ctrl+f9"}`, d.bodies[1])
+	assert.Equal(t, []string{"voice.input_mode=push_to_talk"}, written.got)
+
+	written = &writes{}
+	d = &fakeDaemon{status: inCall}
+	require.NoError(t, noriteWith(t, d, keyed, false, "mode", "push-to-talk", "--key", "Shift+Alt+P").err)
+	assert.Equal(t, `{"input_mode":"push_to_talk","push_to_talk_key":"alt+shift+p"}`, d.bodies[1])
+	assert.Equal(t, []string{"voice.input_mode=push_to_talk", "voice.push_to_talk_key=alt+shift+p"}, written.got)
+	assert.Equal(t, 1, written.calls, "the mode and the key were not written together, all or none")
+
+	written = &writes{}
+	d = &fakeDaemon{status: inCall}
+	require.NoError(t, noriteWith(t, d, keyed, false, "mode", "voice").err)
+	assert.Equal(t, `{"input_mode":"voice","push_to_talk_key":"ctrl+f9"}`, d.bodies[1])
+	assert.Equal(t, []string{"voice.input_mode=voice"}, written.got)
+}
+
+// The file's mode and key go with the join, and a key the daemon would refuse is said, the default holding.
+func TestTheJoinReadsTheInputFromTheFile(t *testing.T) {
+	cfg, err := config.Parse([]byte("[shared.voice]\ninput_mode = \"push_to_talk\"\npush_to_talk_key = \"Shift+Ctrl+P\"\n"),
+		config.TUI)
+	require.NoError(t, err)
+	got, warnings, err := settingsOf(cfg, "config.toml")
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+	assert.Equal(t, ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+p"}, got.Input)
+
+	cfg, err = config.Parse([]byte("[shared.voice]\ninput_mode = \"hold\"\npush_to_talk_key = \"p\"\n"), config.TUI)
+	require.NoError(t, err)
+	got, warnings, err = settingsOf(cfg, "config.toml")
+	require.NoError(t, err)
+	assert.Equal(t, ipc.DefaultVoiceInput(), got.Input)
+	assert.Equal(t, []string{
+		`config.toml: shared.voice.input_mode: must be one of "voice" or "push_to_talk"; so you are heard ` +
+			"whenever you speak",
+		"config.toml: voice.push_to_talk_key: a push-to-talk key other than a function key needs ctrl, alt or " +
+			"super, or typing would hold it, as in ctrl+shift+space; so push-to-talk holds ctrl+shift+space",
+	}, warnings)
+}
+
+// What became of the push-to-talk key is said, the desktop's words cleaned, and so is a key that is down.
+func TestTheStatusSaysWhatBecameOfTheKey(t *testing.T) {
+	ptt := func(hotkey, reason, trigger string, held bool) ipc.VoiceStatus {
+		return ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true, Input: &ipc.VoiceInputStatus{
+			Mode: ipc.VoiceInputPushToTalk, Key: "ctrl+shift+space", Hotkey: hotkey, Reason: reason,
+			Trigger: trigger, Held: held}}
+	}
+	for _, tc := range []struct {
+		st   ipc.VoiceStatus
+		line string
+	}{
+		{ptt(ipc.VoiceHotkeyRegistering, "", "", false), "Push-to-talk on ctrl+shift+space: the key is being registered."},
+		{ptt(ipc.VoiceHotkeyWaiting, "", "", false), "Push-to-talk on ctrl+shift+space: the desktop is asking you " +
+			"to confirm the shortcut, and nobody hears you until it is."},
+		{ptt(ipc.VoiceHotkeyRegistered, "", "", true), "Push-to-talk: you are heard while you hold ctrl+shift+space.\n" +
+			"The key is down: you are talking."},
+		{ptt(ipc.VoiceHotkeyRegistered, "", "Meta+F\x1b[2J", false), "Push-to-talk: you are heard while you hold " +
+			"Meta+F\uFFFD[2J, as the desktop bound it."},
+		{ptt(ipc.VoiceHotkeyUnavailable, "another program holds it", "", false), "Push-to-talk has no key, so " +
+			"nobody hears you: another program holds it; `norite voice mode voice` sends whenever you speak instead."},
+	} {
+		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")
+		require.NoError(t, r.err)
+		assert.Contains(t, r.out, tc.line+"\n")
+		assert.NotContains(t, r.out, "\x1b")
+	}
 }

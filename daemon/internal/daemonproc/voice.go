@@ -70,7 +70,7 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 		if bad != nil {
 			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
 		}
-		out, err = l.voice.Join(ctx, channel, settings)
+		out, err = l.voice.JoinWith(ctx, channel, settings)
 	case req.Path == ipc.PathVoiceMute:
 		out, err = l.voice.SetSelf(voiceworker.SelfMute)
 	case req.Path == ipc.PathVoiceUnmute:
@@ -85,6 +85,12 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
 		}
 		out = l.voice.Processing(settings)
+	case req.Path == ipc.PathVoiceMode:
+		input, bad := ipc.DecodeVoiceMode(req.Body)
+		if bad != nil {
+			return ipc.Failure(ipc.RelayBadRequest, bad.Error())
+		}
+		out = l.voice.Input(input)
 	case strings.HasPrefix(req.Path, ipc.PathVoice+"/local-"):
 		user, mute, ok := ipc.VoiceLocalMuteUser(req.Path)
 		if !ok {

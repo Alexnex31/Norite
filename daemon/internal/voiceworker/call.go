@@ -14,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/Alexnex31/Norite/daemon/internal/hotkey"
 	"github.com/Alexnex31/Norite/daemon/ipc"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
@@ -33,6 +34,8 @@ type VoiceOptions struct {
 	// Changed is told the status each time it changes. It must not block.
 	Changed func(ipc.VoiceStatus)
 	Log     zerolog.Logger
+	// Hotkey registers push-to-talk's key while a call by push-to-talk lasts (M35); nil has none to offer.
+	Hotkey hotkey.Binder
 
 	// Args and Env are the worker's, for a stand-in (Options). Tests only.
 	Args, Env []string
@@ -157,6 +160,21 @@ type call struct {
 	dspChanged chan struct{}
 	// sendMu orders what push sends, so that the last push sends the latest state.
 	sendMu sync.Mutex
+
+	// How the microphone is let through (M35), under Voice.mu: input as asked, held whether the key is down
+	// and presses how many times it went down, and sentInput and sentPresses what the worker was last told.
+	input       ipc.VoiceInput
+	held        bool
+	presses     uint64
+	sentInput   voiceipc.Input
+	sentPresses uint64
+	// The key's binding: boundKey is the key bound, "" for none, unbind what releases it, and bindGen the
+	// binding's number, which a report from a binding since released does not carry. All three under
+	// Voice.mu, and changed only by rebind, which bindMu orders.
+	bindMu   sync.Mutex
+	boundKey string
+	unbind   func()
+	bindGen  int
 }
 
 // NewVoice builds the daemon's voice calls. Nothing runs until a join.
@@ -348,6 +366,111 @@ func runs(d *ipc.VoiceDSP, p ipc.VoiceJoin) bool {
 		d.NoiseSuppression == p.NoiseSuppression && d.AutoGain == p.AutoGain
 }
 
+// Input changes how the call's microphone is let through (M35): by voice, or by push-to-talk with key.
+// Without a call it changes nothing: the next join brings its own, from the client's config.toml, which the
+// client writes. Push-to-talk's key is registered from here and never waited for: the status says what
+// became of it.
+func (v *Voice) Input(in ipc.VoiceInput) ipc.VoiceStatus {
+	v.mu.Lock()
+	c := v.current
+	if c != nil {
+		c.input = in
+		next := &ipc.VoiceInputStatus{Mode: in.Mode, Key: in.Key}
+		// The same key, already bound, keeps what became of it, which rebind then leaves alone.
+		if was := v.status.Input; in.Mode == ipc.VoiceInputPushToTalk && was != nil && c.boundKey == in.Key {
+			next.Hotkey, next.Reason, next.Trigger, next.Held = was.Hotkey, was.Reason, was.Trigger, was.Held
+		}
+		v.status.Input = next
+	}
+	v.mu.Unlock()
+	if c == nil {
+		return v.Status()
+	}
+	v.publish()
+	v.rebind(c)
+	v.push(c)
+	return v.Status()
+}
+
+// rebind makes c's key binding what c asks for now: its key while it is the call and by push-to-talk,
+// none otherwise. A key that goes takes its being down with it. The binder is never asked under Voice.mu,
+// since a binding's reports take it.
+func (v *Voice) rebind(c *call) {
+	c.bindMu.Lock()
+	defer c.bindMu.Unlock()
+	v.mu.Lock()
+	want := ""
+	if v.current == c && c.input.Mode == ipc.VoiceInputPushToTalk {
+		want = c.input.Key
+	}
+	if want == c.boundKey {
+		v.mu.Unlock()
+		return
+	}
+	c.bindGen++
+	gen, stop := c.bindGen, c.unbind
+	c.unbind, c.boundKey, c.held = nil, "", false
+	if st := v.status.Input; v.current == c && st != nil {
+		st.Held = false
+		st.Hotkey, st.Reason, st.Trigger = "", "", ""
+		if want != "" {
+			st.Hotkey = ipc.VoiceHotkeyRegistering
+		}
+	}
+	v.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	var next func()
+	if want != "" {
+		binder := v.opts.Hotkey
+		if binder == nil {
+			binder = hotkey.Unavailable("this daemon has no push-to-talk key to offer")
+		}
+		next = binder.Bind(want, v.keyEvents(c, gen))
+	}
+	v.mu.Lock()
+	c.unbind, c.boundKey = next, want
+	v.mu.Unlock()
+	v.publish()
+	v.push(c)
+}
+
+// keyEvents is what binding gen of c's key reports to: what became of the key, and the key going down and
+// up, kept in the status and sent to the worker while gen is still c's binding and c the call.
+func (v *Voice) keyEvents(c *call, gen int) hotkey.Events {
+	current := func() bool { return v.current == c && c.bindGen == gen && v.status.Input != nil }
+	return hotkey.Events{
+		Status: func(st hotkey.Status) {
+			v.mu.Lock()
+			if !current() {
+				v.mu.Unlock()
+				return
+			}
+			in := v.status.Input
+			// The OS's words, and on the portal the desktop's, are a stranger's (rule 19).
+			in.Hotkey, in.Reason, in.Trigger = st.State, reason(st.Reason), reason(st.Trigger)
+			v.mu.Unlock()
+			v.publish()
+		},
+		Held: func(down bool) {
+			v.mu.Lock()
+			if !current() || c.held == down {
+				v.mu.Unlock()
+				return
+			}
+			if down {
+				c.presses++
+			}
+			c.held = down
+			v.status.Input.Held = down
+			v.mu.Unlock()
+			v.push(c)
+			v.publish()
+		},
+	}
+}
+
 // Busy is a call joined or joining: no moment for the updater to restart the daemon (M24).
 func (v *Voice) Busy() bool {
 	v.mu.Lock()
@@ -378,8 +501,15 @@ type Refusal struct {
 func (r *Refusal) Error() string { return r.Msg }
 
 // Join joins channel, ending any call first, and returns once the call is up or has failed. The worker
-// processes the microphone as processing says.
+// processes the microphone as processing says, and lets it through by voice.
 func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJoin) (ipc.VoiceStatus, error) {
+	return v.JoinWith(ctx, channel, ipc.VoiceJoinRequest{VoiceJoin: processing, VoiceInput: ipc.DefaultVoiceInput()})
+}
+
+// JoinWith is Join with the whole of a join's body: the processing, and how the microphone is let through,
+// by voice or by push-to-talk with its key (M35).
+func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinRequest) (ipc.VoiceStatus, error) {
+	processing := req.VoiceJoin
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
 	}
@@ -406,7 +536,7 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{}),
-		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{})}
+		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}), input: req.VoiceInput}
 	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
@@ -430,6 +560,7 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 	v.status.EndedInCall = false
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	v.status.Speaking, v.status.DSP = nil, nil
+	v.status.Input = &ipc.VoiceInputStatus{Mode: req.Mode, Key: req.Key}
 	v.mu.Unlock()
 	v.publish()
 
@@ -447,7 +578,13 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 // run is one call, from the worker's start to its reaping. It reports the join's outcome on result once.
 func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- error) {
 	defer close(c.finished)
+	// The key goes before the call is said to be over, which is when a leave returns: another program may
+	// have it back the moment the person is out of the call. The call is no longer the current one by then,
+	// so rebind releases whatever it had.
+	defer v.rebind(c)
 	defer c.cancel()
+	// Registered as the call starts, a session existing (ADR 0034 §4), and never waited for.
+	v.rebind(c)
 	log := v.opts.Log.With().Str("channel", c.channel).Logger()
 
 	var w *Worker
@@ -501,6 +638,10 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	c.worker = w
 	processing := c.processing
 	c.sentProcessing = processing
+	// How the microphone is let through as the worker starts: by voice, or by push-to-talk with the key up,
+	// whatever it is now, since nothing reaches the worker before its answer, and push sends it then.
+	input := voiceipc.Input{Mode: c.input.Mode}
+	c.sentInput, c.sentPresses = input, c.presses
 	v.mu.Unlock()
 	if v.started != nil {
 		v.started()
@@ -514,9 +655,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}()
 
-	// By voice: the daemon has no push-to-talk key to offer yet.
-	join := voiceipc.Join{Loopback: route.Loopback, Processing: processing,
-		Input: voiceipc.Input{Mode: voiceipc.InputVoice}}
+	join := voiceipc.Join{Loopback: route.Loopback, Processing: processing, Input: input}
 	if err := w.Send(voiceipc.OpJoin, join); err != nil {
 		<-w.Done()
 		fail(true, w.Exit().Devices, "%s", w.Exit().Reason)
@@ -793,7 +932,11 @@ func (v *Voice) push(c *call) {
 	newRights, newSub := rights != c.sentRights, !sameSubscribe(sub, c.sentSub)
 	processing, newProcessing := c.processing, c.processing != c.sentProcessing
 	self, newSelf := p.self, p.self != c.sentSelf || c.selfUnsent
+	input := voiceipc.Input{Mode: c.input.Mode, Held: c.input.Mode == ipc.VoiceInputPushToTalk && c.held}
+	newInput, pressed := input != c.sentInput || c.presses != c.sentPresses, c.presses != c.sentPresses
+	wasHeld := c.sentInput.Held
 	c.sentRights, c.sentSub, c.sentProcessing, c.sentSelf = rights, sub, processing, self
+	c.sentInput, c.sentPresses = input, c.presses
 	v.mu.Unlock()
 	// A worker gone already ends the call by its events; a send it misses changes nothing.
 	if newRights {
@@ -804,6 +947,18 @@ func (v *Voice) push(c *call) {
 	}
 	if newProcessing {
 		_ = w.Send(voiceipc.OpProcessing, voiceipc.Processing{Processing: processing})
+	}
+	if newInput {
+		// A press already released by the time this push read the key still went down, and the worker,
+		// which counts each time the key goes down, is told it did: one let go at once is a word cut to
+		// nothing otherwise, and M25 saw the portal deliver a press and its release at one instant.
+		if pressed && !input.Held && input.Mode == voiceipc.InputPushToTalk {
+			if wasHeld {
+				_ = w.Send(voiceipc.OpInput, voiceipc.Input{Mode: input.Mode})
+			}
+			_ = w.Send(voiceipc.OpInput, voiceipc.Input{Mode: input.Mode, Held: true})
+		}
+		_ = w.Send(voiceipc.OpInput, input)
 	}
 	if newSelf {
 		ctx, cancel := context.WithTimeout(context.Background(), signalLeaveWithin)
@@ -870,7 +1025,7 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
-	v.status.Speaking, v.status.DSP = nil, nil
+	v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
 	if by != nil {
 		v.status.Microphone, v.status.Speakers = statusDevices(*by)
 	}
@@ -929,7 +1084,7 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", why, nil
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
-	v.status.Speaking, v.status.DSP = nil, nil
+	v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
 	w := c.worker
 	v.mu.Unlock()
 	v.publish()

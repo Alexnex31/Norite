@@ -684,8 +684,8 @@
     },
     "VoiceStatus": {
       "type": "object",
-      "description": "The body of a 200 answer to every request under /@daemon/voice (M28): GET /@daemon/voice, POST /@daemon/voice/join/{channel} and POST /@daemon/voice/leave, and since M34 POST /@daemon/voice/mute, /unmute, /deafen, /undeafen, /local-mute/{user}, /local-unmute/{user}, /streams/{n} (0 to 3) and /processing. Only the join and /processing take a body, a VoiceJoin (M30), which /processing requires whole. A local mute or a streams request carries an id or a number in its path, and is sent only to a daemon that answered GET /@daemon/voice, as the join is. The join's path carries a channel id and its body the user's settings, so a client asks GET /@daemon/voice first and sends either only to a daemon that answered it: a daemon older than these requests relays the path to its instance (docs/security-ledger.md). Trust tier: the attach socket's alone; the port for scripts serves nothing under /@daemon/. /processing answers once the voice worker says the processing asked for runs, or that it failed, or after 2 s, when dsp still says what runs. A join answers once the call is up; one refused for a reason the daemon understood (signed out, not available in this build) answers the relay's conflict error, and one that was tried and failed (the voice worker, the voice server) answers failed, each with the reason.",
-      "required": ["state", "channel", "reason", "ended_in_call", "available", "unavailable", "processing", "microphone", "speakers", "rights", "self", "local_mutes", "max_streams", "speaking", "dsp"],
+      "description": "The body of a 200 answer to every request under /@daemon/voice (M28): GET /@daemon/voice, POST /@daemon/voice/join/{channel} and POST /@daemon/voice/leave, and since M34 POST /@daemon/voice/mute, /unmute, /deafen, /undeafen, /local-mute/{user}, /local-unmute/{user}, /streams/{n} (0 to 3) and /processing, and since M35 POST /@daemon/voice/mode. Only the join, /processing and /mode take a body: a VoiceJoin (M30, its input half M35), a VoiceProcessing and a VoiceMode. /mode carries the key the person holds to talk, which is theirs: the sixth thing of the user's a request under /@daemon/ carries, sent only to a daemon that answered GET /@daemon/voice, as the processing is. A local mute or a streams request carries an id or a number in its path, and is sent only to a daemon that answered GET /@daemon/voice, as the join is. The join's path carries a channel id and its body the user's settings, so a client asks GET /@daemon/voice first and sends either only to a daemon that answered it: a daemon older than these requests relays the path to its instance (docs/security-ledger.md). Trust tier: the attach socket's alone; the port for scripts serves nothing under /@daemon/. /processing answers once the voice worker says the processing asked for runs, or that it failed, or after 2 s, when dsp still says what runs. A join answers once the call is up; one refused for a reason the daemon understood (signed out, not available in this build) answers the relay's conflict error, and one that was tried and failed (the voice worker, the voice server) answers failed, each with the reason.",
+      "required": ["state", "channel", "reason", "ended_in_call", "available", "unavailable", "processing", "microphone", "speakers", "rights", "self", "local_mutes", "max_streams", "speaking", "dsp", "input"],
       "additionalProperties": false,
       "properties": {
         "state": { "enum": ["idle", "joining", "in_call"], "description": "idle is no call; joining is a join under way; in_call is connected, the voice server having said ready." },
@@ -702,19 +702,59 @@
         "local_mutes": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" }, "description": "Whom the person muted for themselves alone (M34), sorted: the voice server sends this call nothing of them. Never a report. Lasts until the sign-in ends." },
         "max_streams": { "type": ["integer", "null"], "minimum": 1, "maximum": 3, "description": "How many people the person hears at once (M34), or null for every one the call has room for." },
         "speaking": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[0-9]{1,20}$" }, "description": "Who the voice server says is speaking now (M34), as user ids, local mutes included; empty with no call. A few changes a second at most." },
-        "dsp": { "oneOf": [{ "type": "null" }, { "type": "object", "required": ["state", "reason", "echo_cancellation", "noise_suppression", "auto_gain"], "additionalProperties": false, "properties": { "state": { "enum": ["starting", "running", "failed"], "description": "starting while the processing compiles; running with the stages below processing the microphone; failed for the rest of the call." }, "reason": { "type": "string", "maxLength": 256, "description": "Why it failed, the voice worker's words, sanitized; empty otherwise." }, "echo_cancellation": { "type": "boolean" }, "noise_suppression": { "type": "boolean" }, "auto_gain": { "type": "boolean" } } }], "description": "What the call's audio processing is doing (M34), where processing is what was asked; null with no call and before the worker has said." }
+        "dsp": { "oneOf": [{ "type": "null" }, { "type": "object", "required": ["state", "reason", "echo_cancellation", "noise_suppression", "auto_gain"], "additionalProperties": false, "properties": { "state": { "enum": ["starting", "running", "failed"], "description": "starting while the processing compiles; running with the stages below processing the microphone; failed for the rest of the call." }, "reason": { "type": "string", "maxLength": 256, "description": "Why it failed, the voice worker's words, sanitized; empty otherwise." }, "echo_cancellation": { "type": "boolean" }, "noise_suppression": { "type": "boolean" }, "auto_gain": { "type": "boolean" } } }], "description": "What the call's audio processing is doing (M34), where processing is what was asked; null with no call and before the worker has said." },
+        "input": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/VoiceInputStatus" }], "description": "How the call's microphone is let through (M35), while there is a call; null when there is none." }
       }
     },
     "VoiceDevice": {"type": "object", "description": "One of a call's devices (M32, ADR 0034 §1). The client words each state for its OS, a refusal's setting included.", "required": ["state", "reason"], "additionalProperties": false, "properties": {"state": {"enum": ["opening", "open", "asking", "refused", "no_device", "no_session", "failed"], "description": "opening: being opened, or opened and not yet delivering. open: delivering audio. asking: macOS is asking the person whether norite-daemon may use it. refused: the OS or the person refused it. no_device: there is none to use. no_session: the account is not logged in at the machine, whoever else is, so nothing it runs may use a device (Linux). failed: anything else. The client words each for its OS, a refusal's setting included (ADR 0034 §1)."}, "reason": {"type": "string", "maxLength": 256, "description": "The voice worker's words on what went wrong, or empty. Sanitized."}}},
     "VoiceJoin": {
       "type": "object",
-      "description": "The body of POST /@daemon/voice/join/{channel} (M30): which of the call's audio processing runs on the microphone, as the client read its config.toml (voice.echo_cancellation, voice.noise_suppression and voice.auto_gain). Decoded strictly: all three named, nothing else. No body, or null, is all three on. Sent only after GET /@daemon/voice answered, as the channel id is (docs/security-ledger.md). Trust tier (rule 16): the attach socket's alone, as for every request under /@daemon/voice; the port for scripts serves nothing under /@daemon/ (relay.ScriptTarget refuses the path), so a body sent there reaches nothing. Turning noise suppression off discards RNNoise's output and keeps its voice probability, which the audio level's V flag follows.",
-      "required": ["echo_cancellation", "noise_suppression", "auto_gain"],
+      "description": "The body of POST /@daemon/voice/join/{channel} (M30): which of the call's audio processing runs on the microphone, and since M35 how it is let through, as the client read its config.toml (voice.echo_cancellation, voice.noise_suppression, voice.auto_gain, voice.input_mode and voice.push_to_talk_key). Decoded strictly: all five named, nothing else. No body, or null, is all three switches on and input by voice, with the default key. Sent only after GET /@daemon/voice answered, as the channel id is (docs/security-ledger.md). Trust tier (rule 16): the attach socket's alone, as for every request under /@daemon/voice; the port for scripts serves nothing under /@daemon/ (relay.ScriptTarget refuses the path), so a body sent there reaches nothing. Turning noise suppression off discards RNNoise's output and keeps its voice probability, which the audio level's V flag follows.",
+      "required": ["echo_cancellation", "noise_suppression", "auto_gain", "input_mode", "push_to_talk_key"],
       "additionalProperties": false,
       "properties": {
         "echo_cancellation": { "type": "boolean", "description": "AEC3, with its high-pass filter, against what the speakers played." },
         "noise_suppression": { "type": "boolean", "description": "RNNoise's output replaces the microphone's." },
-        "auto_gain": { "type": "boolean", "description": "AGC2's adaptive digital gain. Never the OS microphone's volume." }
+        "auto_gain": { "type": "boolean", "description": "AGC2's adaptive digital gain. Never the OS microphone's volume." },
+        "input_mode": { "$ref": "#/$defs/VoiceInputMode" },
+        "push_to_talk_key": { "$ref": "#/$defs/PushToTalkKey" }
+      }
+    },
+    "VoiceProcessing": {
+      "type": "object",
+      "description": "The body of POST /@daemon/voice/processing (M34): the three switches of a VoiceJoin, all named, nothing else. No body is refused, since a change that names nothing changes nothing.",
+      "required": ["echo_cancellation", "noise_suppression", "auto_gain"],
+      "additionalProperties": false,
+      "properties": {
+        "echo_cancellation": { "type": "boolean" },
+        "noise_suppression": { "type": "boolean" },
+        "auto_gain": { "type": "boolean" }
+      }
+    },
+    "VoiceMode": {
+      "type": "object",
+      "description": "The body of POST /@daemon/voice/mode (M35): how the call's microphone is let through, both named, nothing else. Without a call it changes nothing; the client writes config.toml for the next join. Push-to-talk's key is registered by the daemon, OS-wide, while the call lasts, and released at its end (ADR 0034 §3).",
+      "required": ["input_mode", "push_to_talk_key"],
+      "additionalProperties": false,
+      "properties": {
+        "input_mode": { "$ref": "#/$defs/VoiceInputMode" },
+        "push_to_talk_key": { "$ref": "#/$defs/PushToTalkKey" }
+      }
+    },
+    "VoiceInputMode": { "enum": ["voice", "push_to_talk"], "description": "voice: what RNNoise takes for a voice is sent, with a hang-over and the two frames before an opening. push_to_talk: what is said while the key is down, and 200 ms after its release." },
+    "PushToTalkKey": { "type": "string", "maxLength": 64, "pattern": "^((ctrl|alt|shift|super)\\+)*([a-z0-9]|space|f([1-9]|1[0-9]|2[0-4]))$", "description": "The key held to talk, as config.toml's voice.push_to_talk_key writes it: modifiers among ctrl, alt, shift and super, in that order and each once, then a letter, a digit, space or f1 to f24; one other than a function key needs ctrl, alt or super. The daemon writes it that one way before comparing it (ipc.CanonicalKey), and refuses one it cannot." },
+    "VoiceInputStatus": {
+      "type": "object",
+      "description": "How a call's microphone is let through (M35): the mode and the key as asked, and by push-to-talk what became of the key and whether it is down.",
+      "required": ["mode", "key", "hotkey", "reason", "trigger", "held"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/VoiceInputMode" },
+        "key": { "type": "string", "maxLength": 64, "description": "The key as asked, written the canonical way." },
+        "hotkey": { "enum": ["", "registering", "waiting", "registered", "unavailable"], "description": "Empty by voice. registering while the daemon registers it; waiting while the desktop asks the person about it (Linux's portal); registered; unavailable, reason saying why. Push-to-talk with a key unavailable sends nothing." },
+        "reason": { "type": "string", "maxLength": 256, "description": "Why the key is unavailable, the OS's or the desktop's words, sanitized; empty otherwise." },
+        "trigger": { "type": "string", "maxLength": 256, "description": "The key as the desktop says it is bound, which on Linux's portal the person chooses and may differ from key, sanitized; empty where the OS takes key as it is." },
+        "held": { "type": "boolean", "description": "Whether the key is down now." }
       }
     },
     "Stopping": {

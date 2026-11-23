@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://norite.chat/contracts/cli-json/voice.schema.json",
   "title": "norite voice --json",
-  "description": "The machine-readable output of `norite voice status`, `join` and `leave` (M28), and since M34 `mute`, `unmute`, `deafen`, `undeafen`, `local-mute`, `local-unmute`, `streams` and `processing`: how the daemon's voice call stands after the command.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. Every field is always present.\n\n`join` prints the status once the call is up; a join refused or failed prints nothing on stdout and exits 4 or 1 with the reason. `leave` prints the status after the call has ended, its worker gone.",
+  "description": "The machine-readable output of `norite voice status`, `join` and `leave` (M28), and since M34 `mute`, `unmute`, `deafen`, `undeafen`, `local-mute`, `local-unmute`, `streams` and `processing`, and since M35 `mode`: how the daemon's voice call stands after the command.\n\nVersioned source of truth (CLAUDE.md rule 15): a change to what these commands print ships with a change to this file in the same commit. Every field is always present.\n\n`join` prints the status once the call is up; a join refused or failed prints nothing on stdout and exits 4 or 1 with the reason. `leave` prints the status after the call has ended, its worker gone.",
   "$ref": "#/$defs/status",
   "$defs": {
     "status": {
@@ -23,7 +23,8 @@
         "local_mutes",
         "max_streams",
         "speaking",
-        "dsp"
+        "dsp",
+        "input"
       ],
       "properties": {
         "state": {
@@ -210,6 +211,61 @@
                 },
                 "auto_gain": {
                   "type": "boolean"
+                }
+              }
+            }
+          ]
+        },
+        "input": {
+          "description": "How the call's microphone is let through (M35), while there is a call; null when there is none.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "key",
+                "hotkey",
+                "reason",
+                "trigger",
+                "held"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "voice",
+                    "push_to_talk"
+                  ],
+                  "description": "voice: what the noise suppressor takes for a voice is sent. push_to_talk: what is said while the key is down."
+                },
+                "key": {
+                  "type": "string",
+                  "description": "The push-to-talk key as asked, as in ctrl+shift+space."
+                },
+                "hotkey": {
+                  "enum": [
+                    "",
+                    "registering",
+                    "waiting",
+                    "registered",
+                    "unavailable"
+                  ],
+                  "description": "Empty by voice. By push-to-talk: being registered, waiting for the desktop to ask the person about it, registered, or unavailable, reason saying why, when nothing is sent."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Why the key is unavailable, the OS's or the desktop's words, with what a terminal would act on escaped; empty otherwise."
+                },
+                "trigger": {
+                  "type": "string",
+                  "description": "The key as the desktop says it is bound, which on Linux's portal the person chooses, escaped as reason is; empty where the OS takes the key as asked."
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Whether the key is down now."
                 }
               }
             }

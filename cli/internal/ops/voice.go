@@ -112,3 +112,37 @@ func withReason(line, reason string) string {
 	}
 	return line + ": " + reason
 }
+
+// VoiceInput words how the call's microphone is let through (M35): by voice, or by push-to-talk and what
+// became of its key, and whether it is down. Nothing with no call. The reason and the desktop's trigger are
+// a stranger's text, which the caller cleans with the rest, as it does a device's.
+func VoiceInput(in *ipc.VoiceInputStatus) []string {
+	if in == nil {
+		return nil
+	}
+	if in.Mode != ipc.VoiceInputPushToTalk {
+		return []string{"You are heard whenever you speak; `norite voice mode push-to-talk` sends only while a key is held"}
+	}
+	key := in.Key
+	if in.Trigger != "" && in.Trigger != in.Key {
+		key = in.Trigger + ", as the desktop bound it"
+	}
+	var line string
+	switch in.Hotkey {
+	case ipc.VoiceHotkeyRegistered:
+		line = "Push-to-talk: you are heard while you hold " + key
+	case ipc.VoiceHotkeyWaiting:
+		line = "Push-to-talk on " + key + ": the desktop is asking you to confirm the shortcut, and nobody hears " +
+			"you until it is"
+	case ipc.VoiceHotkeyUnavailable:
+		line = withReason("Push-to-talk has no key, so nobody hears you", in.Reason) +
+			"; `norite voice mode voice` sends whenever you speak instead"
+	default:
+		line = "Push-to-talk on " + key + ": the key is being registered"
+	}
+	lines := []string{line}
+	if in.Held {
+		lines = append(lines, "The key is down: you are talking")
+	}
+	return lines
+}
