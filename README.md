@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
-[![Milestone](https://img.shields.io/badge/milestone-M34%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M35%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -46,7 +46,8 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 > `norite voice join` joins one, over the server (`M26`), its relay (`M27`), the call's audio on your machine
 > (`M29`), its noise suppression and echo cancellation (`M30`), a bitrate that follows your connection (`M31`)
 > and word of what your microphone and speakers are doing (`M32`). Since `M34`, `norite voice` mutes and
-> deafens you, and more. A screen for the call comes later. The client shows one channel at a time, in
+> deafens you, and more, and since `M35` you talk by voice detection or by a push-to-talk key. A screen for
+> the call comes later. The client shows one channel at a time, in
 > plain text, and no third party has reviewed the code. The full scope is multi-year work — [Status](#status) says exactly what exists.
 
 ---
@@ -70,25 +71,20 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 
 ## Status
 
-**Foundation, auth, the permission core, messages, guild-level reports, the moderation read over a
-message's edit history, a guild's opt-in message recording, message tagging, the real-time gateway and the
-daemon that holds it, the command-line verbs over all of it, the first client two people can talk in,
-the settings file the clients share, a local port for scripts and bots, the daemon as a service you can
-stop, inspect and read the log of, and a client that keeps itself up to date, are done — `M0` through
-`M24`, which completes Phase D. Phase E, voice, has begun, and its first ten milestones are done too:
-`M25`, a finding rather than code, which settles on each OS who opens the microphone and how push-to-talk is
-held; `M26`, the server that carries a call's audio between its participants; `M27`, the relay that
-lets a participant whose network refuses UDP reach it; `M28`, the separate program on your machine that
-holds a call, which the daemon starts and stops; `M29`, the call's audio in that program, from your
-microphone to the others' speakers on Linux, Windows and macOS; `M30`, which cancels the echo of your
-speakers, suppresses the noise around you and evens out your level; `M31`, which lowers the bitrate
-your voice is sent at when your connection cannot carry it, and raises it again when it can; `M32`,
-which says when your microphone or speakers cannot be used, and which setting gives them back; `M33`,
-with which a client joins a call over its connection to the instance, which starts the server and the
-relay by default, and tells the people who can see a voice channel who is in it, though no client draws
-that yet; and `M34`, with which you mute and deafen yourself, mute somebody for yourself alone, hear fewer
-people at once, change your microphone's processing during a call, see who is speaking, and report
-somebody from a voice channel.**
+**Norite is at milestone `M35` of 125: text chat works end to end, and voice calls have just arrived.**
+
+- **What works today:** accounts with two-factor, guilds with roles and per-channel permissions, real-time
+  messages in a terminal client, moderation (audit log, reports, edit history), scripting with `--json`,
+  and a client that updates itself. Since Phase E, voice: `norite voice join` puts you in a call, with
+  noise suppression, echo cancellation, mute and deafen, and you are heard when you speak or while you
+  hold a push-to-talk key.
+- **What comes next:** the end of Phase E (`M36` to `M37a`: rejoining a call after a restart, adapting
+  to a weak downlink, an instance's choice to run without voice, and a Snap package), then presence and
+  the full-screen terminal client (Phase F), then DMs, search, the native GUI and the rest of the
+  [roadmap](docs/roadmap.md).
+- **How stable it is:** pre-1.0. Releases follow [Semantic Versioning](docs/adr/0033-semver-release-progression.md),
+  any `0.x` release may break compatibility with the one before, and no third party has reviewed the code
+  yet.
 
 <details>
 <summary><b>What exists today, milestone by milestone</b></summary>
@@ -115,7 +111,7 @@ somebody from a voice channel.**
 | `M15` | Messages — send, read, edit and delete, with a cursor-paginated backlog, an edit history written in the same transaction as the edit, and a moderator's deletion audited where an author's own is deliberately not |
 | `M16` | Guild-level reports — anyone who can see a message can report it, moderators triage and close a queue of them, closing is audited and filing deliberately is not, and the reporter's identity is never shown to the moderators of the guild being reported |
 | `M16a` | Message edit history — a moderator reads every version a message had before the one it has now, an author reads their own, and the response carries what it says today because nothing else in the API will tell them |
-| `M16b` | Opt-in message recording — a guild's owner can have every message create, edit and delete kept in a log of its own, off by default, readable only by a permission granted to nobody until somebody grants it, with both flips of the switch recorded in the ordinary audit log and the setting visible to every member of the guild |
+| `M16b` | Opt-in message recording — a guild's owner can have every message create, edit and delete kept in a log of its own, off by default, readable only by a permission granted to nobody until somebody grants it, with both flips of the switch recorded in the ordinary audit log and the setting visible to every member of the guild. No client draws that setting until `M62a`, so for now only the API shows members that a guild records |
 | `M17` | Message tagging — a guild-wide vocabulary of labels that follow a message across channels, split into shared tags a moderator curates and private ones visible to nobody but the member who made them |
 | `M18` | The real-time gateway — a WebSocket that pushes every guild, channel, role, member and message change to the members allowed to see it, decided per event against the database rather than remembered; resuming after a disconnect without losing anything; signing out closes the connection, on every path that signs out; and the same across several servers over Redis |
 | `M19` | The daemon as gateway client — the background daemon holds the account's live connection by itself, with nothing attached to it; keeps its sign-in renewed by the server's clock, so a machine whose clock is hours out stays signed in; keeps recent messages in memory, bounded; notices `norite login` and `norite logout` the moment they happen; and treats the server it talks to as a stranger's, sanitizing every name it is sent |
@@ -135,53 +131,9 @@ somebody from a voice channel.**
 | `M32` | Your microphone and speakers, said plainly — the voice program reports whether each is on, waiting on your OS's question, refused, absent, or unusable because you are not logged in at the machine, and `norite voice` says so, naming the setting that gives the microphone back on Windows and macOS; on Linux, where nothing refuses and a stream with nobody logged in quietly plays to nowhere, the voice program asks where its stream went and asks the login manager why. One of the two failing leaves you listening or speaking; both failing as you join end the call and say why. Joining a real call still arrives with `M33` |
 | `M33` | Joining a call for real — `norite voice join` asks the instance over the connection the daemon already holds, and the instance checks you may connect to that channel, makes room for you on its voice server and answers with what your voice program needs, the relay's credential among it, so a network that refuses UDP no longer delays the join. The instance tells the people who can see the channel who is in it, though no client draws that yet. A moderator's mute or deafen, or a channel where you may not speak, is applied by your client and said in `norite voice status`; a kick or a lost right to connect ends the call, saying why. Calls run at 128 kbps unless the channel says otherwise, and an instance runs voice by default |
 | `M34` | Controlling a call — `norite voice mute`, `unmute`, `deafen` and `undeafen`, which the people in the channel see; `local-mute` someone so that you alone stop hearing them, which reports nothing; `streams 1`, `2` or `3` to hear at most that many people at once on a weak connection; `processing` to turn echo cancellation, noise suppression or automatic gain on or off during the call; and `norite voice status` saying who is speaking and what your microphone's processing is actually doing. `norite report user` reports somebody from a voice channel to its moderators, since a call leaves no message to report. Your voice program also lowers its bitrate on a connection whose buffer is too shallow to show a queue, and a call follows your default device on Windows and macOS when you unplug a headset or plug one in |
+| `M35` | How you are heard — by default your microphone sends only while you speak, so a silent participant sends nothing even while the others talk; or, with `norite voice mode push-to-talk`, only while you hold a key, Ctrl+Shift+Space unless you choose another, which works whatever program is in front: on Windows, on Linux through the desktop's shortcut portal or on X11, and on macOS, with no permission to grant. The key is held only while the call lasts, and `norite voice status` says what became of it |
 
 </details>
-
-Registering an address that already has an account is indistinguishable from registering a new one, and
-an address is confirmed by email before its account can be used.
-
-**The honest threshold was always when two people can hold a text conversation, and `M20a` is where it was
-crossed.** The client is deliberately small — a home screen and one channel at a time, plain text, no voice —
-and everything under it is the real thing rather than a demo.
-What `M12` through `M14` built is the permission model those conversations happen inside and the record of who
-changed it; `M15` is the conversation itself, `M16` is how it gets moderated, `M16a` is what a moderator reads
-when the message was edited after it was reported, and `M16b` is what a guild can choose to keep. The client
-draws the conversation; the rest is reachable through `norite`'s verbs. `M41` through `M43` replace the client
-with the full frame the [TUI screens](docs/design/tui/) specify.
-
-One consequence of `M16b` is worth stating plainly rather than leaving in the changelog: a guild whose
-owner switches recording on keeps every message sent in it, including edits and deletions, and the
-member-facing screen that would tell people so is `M62a`. Until then the setting is readable through the
-API by anyone in the guild, and the first client does not draw it.
-
-> [!NOTE]
-> **On releases.** Norite uses [Semantic Versioning](https://semver.org/).
->
-> **When versions are cut:**
-> - **[`v0.1.0`](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0)** is out, cut from `M24` at the
->   end of Phase D: the first that is not a pre-release, and the first client that keeps itself up to date.
-> - **[`v0.1.0-alpha`](https://github.com/Alexnex31/Norite/releases/tag/v0.1.0-alpha)** came before it,
->   cut from `M20a`, the first usable client.
-> - **A MINOR version** follows at the end of each feature phase after that: `v0.2.0`, `v0.3.0`, and so on.
-> - **`v1.0.0`** comes only after every milestone is done and a release-candidate stage has reviewed and
->   tested the whole thing. `1.0.0` means the planned scope exists.
->
-> **What a `0.x` release promises: nothing about stability.** Anyone may self-host any tagged version.
-> Before `1.0.0` there is no support commitment, any MINOR version may break compatibility with the one
-> before it, there is no guaranteed migration path between them, and no third party has reviewed the code.
->
-> **The public flagship is not open yet.** It stays closed to non-developer accounts until the feature set
-> is well advanced and its Kubernetes deployment is ready. Until then the author's test instance takes
-> testers by invite: email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for one.
->
-> The status badge above says `pre-1.0`, and will until `v1.0.0` ships. See
-> [ADR 0033](docs/adr/0033-semver-release-progression.md).
-
-[`docs/roadmap.md`](docs/roadmap.md) is the dependency-ordered sequence, `M0` through `M125`, each with a
-checkable "done when" condition. Read it as a long-term critical path, not a near-term promise.
-
----
 
 ## How Norite is put together
 
