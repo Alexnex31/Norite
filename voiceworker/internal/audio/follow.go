@@ -6,6 +6,7 @@ package audio
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +47,15 @@ type mover interface {
 func moved(c io.Closer) bool {
 	m, ok := c.(mover)
 	return ok && m.Moved()
+}
+
+// noteDefault is a stream's poll of the default device, for an OS whose question must be asked on the
+// stream's own thread (WASAPI): whether the default, now when ok, is another than opened, the one the stream
+// opened on, replacing what the last poll said. A default that changed and changed back is the stream's
+// own again, and following it then reopened the device the call was on (M34's second /code-review). An
+// opened device not known, or no default to name, is no move.
+func noteDefault(moved *atomic.Bool, opened, now string, ok bool) {
+	moved.Store(ok && opened != "" && now != opened)
 }
 
 // follow opens a stream with open, and opens it again whenever it stops calling back or another device is

@@ -264,3 +264,30 @@ func TestClosingAFollowedStreamClosesItOnce(t *testing.T) {
 		t.Errorf("a stream was opened after the close: %d opens", n)
 	}
 }
+
+// A stream's poll of the default says what the default is now, never what it once was: one made the default
+// and gone again within a poll leaves the stream unmoved, so the call is not reopened on the device it is on
+// (M34's second /code-review: WASAPI latched it).
+func TestAPollOfTheDefaultSaysWhatItIsNow(t *testing.T) {
+	var moved atomic.Bool
+	for _, step := range []struct {
+		now  string
+		ok   bool
+		want bool
+	}{
+		{"speakers", true, false},
+		{"headset", true, true},
+		{"speakers", true, false}, // the headset went again
+		{"", false, false},        // no default to name
+		{"headset", true, true},
+	} {
+		noteDefault(&moved, "speakers", step.now, step.ok)
+		if moved.Load() != step.want {
+			t.Fatalf("with the default %q (named %t), moved is %t", step.now, step.ok, moved.Load())
+		}
+	}
+	noteDefault(&moved, "", "headset", true)
+	if moved.Load() {
+		t.Error("a stream that knows not what it opened on was said to have moved")
+	}
+}
