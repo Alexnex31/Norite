@@ -1660,6 +1660,9 @@ when a cap is removed.
 
 **Stopping**: a signal, or `POST /@daemon/stop` on the attach socket (M23), which stops the daemon exactly
 as SIGTERM does. `norite daemon stop` and `restart` ask the socket first and the service manager second.
+Since M36, `stop` and `uninstall` leave a voice call before they ask, with the leave request any client
+sends, so a daemon stopped on purpose joins no call again; `restart` does not, and the stop request itself
+keeps the call's breadcrumb as a signal does (§6).
 The request exists because on Windows the service manager's stop is a kill, and a kill between a
 refresh's answer and its write-back leaves a spent token on disk. It is first-party tier only: the
 automation port refuses every `/@daemon/` path.
@@ -1879,7 +1882,8 @@ semantics). RESUME does **not** rebuild it, which this sentence claimed until M1
 session id lives in the process that dies, so a restarted daemon identifies afresh and starts with empty
 scrollback, refilled over REST as clients open channels. RESUME covers a dropped *connection*, inside the
 server's thirty-second resume window, and nothing else. The one deliberate exception is a "last active voice
-channel" breadcrumb, persisted so voice can auto-rejoin after a crash (§6). **Read state is a separate,
+channel" breadcrumb, persisted so voice can auto-rejoin after a crash (§6): `state.json`'s `voice_call`
+since M36, which exists only while a call is up or being joined again. **Read state is a separate,
 durable concern**: `channel_read_states` (§2) is Postgres-backed and synced via its own gateway dispatch
 event — a channel is marked read automatically when the client's viewport reaches the latest message,
 debounced, so opening any client on any machine shows accurate unread state.
@@ -1940,13 +1944,13 @@ it, so it needs nothing of the socket's version rule. Each client reads the file
 a client attached to no daemon reads once at start.
 
 A **second, daemon-owned state file** (`state.json` in the state directory, `0600`) holds anything
-daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb, and
-the same-machine config-toggle setting below — never hand-edited, never included in export. The daemon is
-its only writer, and that is the compiler's to hold: reading is `daemon/statefile`, which a client imports
-to learn which config file is its own with or without a daemon running, and writing is
-`daemon/internal/statefile`, which nothing outside the daemon module can import. The file is versioned,
-a newer format is refused rather than half-read, and a write puts back every field it did not
-understand, so an older daemon does not drop what a newer one stored.
+daemon-written-only: plugin capability grants + pinned `.wasm` hashes (§8), the voice-channel breadcrumb
+(`voice_call`, M36, §6), and the same-machine config-toggle setting below — never hand-edited, never
+included in export. The daemon is its only writer, and that is the compiler's to hold: reading is
+`daemon/statefile`, which a client imports to learn which config file is its own with or without a daemon
+running, and writing is `daemon/internal/statefile`, which nothing outside the daemon module can import.
+The file is versioned, a newer format is refused rather than half-read, and a write puts back every field
+it did not understand, so an older daemon does not drop what a newer one stored.
 
 **Themes are files, and files are untrusted.** A theme lives at `~/.config/norite/themes/<name>.toml` and
 is selected by name from `[tui]`; a few ship built in. The default maps the token roles onto the terminal's
@@ -2522,7 +2526,25 @@ around whoever is transmitting) plus two **separate** actions (each its own keyb
 **Auto-rejoin**: on daemon crash/restart mid-call, the daemon respawns the worker and rejoins using the
 persisted "last active voice channel" breadcrumb (§3) — the one exception to otherwise-ephemeral daemon
 state. The client auto-update mechanism (§11) defers applying an update while a voice session is active, so
-it never forces a mid-call daemon restart.
+it never forces a mid-call daemon restart. As built at M36 (`daemon/internal/voiceworker/rejoin.go`):
+- **Three losses are rejoined, and nothing else**: the daemon gone (at its next start), the worker crashed
+  (at once), and the gateway session lost (once a new one is live, which the gateway client reports after
+  READY marks the connection live). The person's leave, the sign-in's end, a refused join, a call lost before
+  it was up, and every end the instance or the worker gave a reason for are not undone.
+- **The breadcrumb is the call as it was**: instance, account, channel, the processing and the input, and
+  the person's switches (M34), so a muted caller rejoins muted. It names its instance and account, and a
+  daemon signed in to another discards it. It holds no credential. One goroutine writes it, latest state
+  only, while the call is up, its stamp every 15 s. Read back it is foreign and decoded strictly, every field
+  held as a join request is; one that fails is discarded whole.
+- **A rejoin opens the microphone unasked, so it is bounded twice**: nothing past 60 s since the call was
+  last known up, on the wall clock, which a suspend does not stop; and three attempts, each counted on disk
+  before it is made, so a rejoin that crashes the daemon stops. A rejoin is an ordinary op 4 join, authorized
+  afresh, and an instance's refusal for good gives up at once.
+- **The person wins**: a join or a leave cancels a pending rejoin, and `VoiceStatus.rejoin` says one is under
+  way, or has happened, until then.
+- **Restarts differ by OS**: systemd restarts a crashed daemon after 5 s, and launchd at once, or 30 s after
+  a start that crashed sooner (`ThrottleInterval`). The Windows logon task never does, since conhost exits 0
+  whatever the daemon did (M23), so there the rejoin follows only a start within the minute.
 
 **Video/screen-share (deferred, seamed now)**: owned directly by the GUI/web client — a second, separate
 WebRTC connection to the SFU, never through the daemon. The voice-join payload carries `supports_video: bool`

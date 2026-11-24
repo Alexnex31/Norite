@@ -2318,3 +2318,33 @@ carries the condition that would reopen it.
 - **Reopens if**: the worker gains a way to dial that is not the agent's, or a request it sends to a TURN
   server carries anything a service on a LAN would act on.
 
+
+## M36 — Voice auto-rejoin
+
+### A program of the account can write a breadcrumb that joins a call
+- **Raised**: M36, planning
+- **Verdict**: not a vulnerability
+- **Why**: `state.json`'s `voice_call` is in the `0700` state directory, and a daemon starting within a
+  minute of the stamp it names joins that channel, microphone open. Whatever can write the file runs as the
+  account and can already do the same through `/@daemon/voice/join` on the attach socket, which is the
+  account's own tier (rule 16; "Any local client can start voice workers as fast as it can ask"). The file
+  carries no authority of its own: the join goes to the instance the daemon is signed in to, under its
+  sign-in, and is authorized afresh by the coordinator (rule 1), and a breadcrumb naming another instance
+  or account is discarded. It is read as foreign, decoded strictly and held to what a join request is held
+  to (`statefile.VoiceCall.Check`), so it can make the daemon join nothing a client could not.
+- **Reopens if**: the breadcrumb comes to name an instance or account the daemon would otherwise not use,
+  carry a credential, or be read by anything that does not hold it to a join request's checks; or the state
+  directory becomes writable by anybody but the account.
+
+### A rejoin opens the microphone without anybody asking
+- **Raised**: M36, planning
+- **Verdict**: accepted risk
+- **Why**: a call lost to a crash, a restart or a lost session is joined again with nobody at the keyboard
+  saying so, which is the milestone. What bounds it is age and count: nothing is joined past 60 s since the
+  call was last known up, on the wall clock so a suspend counts (`voiceworker.fresh`), and at most three
+  attempts, counted on disk before each (`ipc.MaxVoiceRejoins`). The person's own leave, `norite daemon
+  stop` and `uninstall` (which leave first), the sign-in's end and every end the instance chose clear it,
+  and the status says a rejoin is under way. The person's switches come back with it, so a muted caller is
+  not heard. A logoff followed by another login within the minute rejoins, as a restart does.
+- **Reopens if**: the bound grows past what a service manager's restart needs, a rejoin follows an end the
+  instance or the person chose, or a rejoin starts without the status saying so.

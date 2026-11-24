@@ -597,6 +597,10 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **A test faster than the bound it tests sees only the coalescing** (M34). Updates sent quicker than their
   250 ms spacing folded into one before the spacing ran, and a test of the spacing passed with it removed.
   Pace the input to the bound, and drain what comes out as it comes.
+- **A guard is proved only from the state it guards** (M36). Two guards on how a call ends, one for an end
+  the worker gave a reason for and one for a session lost before the call was up, survived their removal:
+  no test had a call up when the end came, so both paths ended it anyway. When an end is handled by how far
+  the thing got, each test reaches that point first.
 - **A test's silence is not a device's** (M29). Digital silence hid the comfort noise that real quiet
   makes DTX send, and every talk-spurt played 440 ms late. Feed a test the signal the device delivers.
 - **A test of what is sent is not a test of what is heard** (M30). A sender too slow for real time encoded
@@ -668,6 +672,9 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   read every sentence a person will see against the real program (M19, M22, M28). An answer sent once a
   change is asked for, before the program it asks has made it, describes the state before (M34's
   `processing`, M35's `voice mode --key`).
+- **A hook is placed by what follows it, not by the event's name** (M36). `NewSession` fires on a fresh
+  session before the connection is live, so that the previous call goes first, and a rejoin started there
+  was refused. Before using a hook to start work, read where in its sequence it runs and what is true yet.
 - **A service's definition applies to whatever it comes to spawn** (M35). M3 made the LaunchAgent
   `Background` for a process nobody waited on, M28 gave it a real-time child at the same priority, and
   nothing asked again until a busy Mac ended a call. When a process gains a new kind of work, reread what
@@ -2223,7 +2230,8 @@ And on the voice-worker, from M28:
 - **A crash is a closed pipe the daemon did not ask for, or an exit that is not 0**, logged with the last
   twenty lines. Every worker is reaped; one asked to leave, or that closed its pipe and stayed, is killed
   after 3 s. **The worker exits when its control pipe closes**, from a goroutine that does nothing else.
-- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater, and `Leave` returns once
+- **One call at a time** (`Voice`): a join leaves first, `Busy` feeds the updater (a rejoin waiting counts,
+  since M36), and `Leave` returns once
   the worker is reaped. Each call ends with the sign-in it was joined under, through the session's own
   `Ended` channel and never the gateway connection's end, which a sign-out made while the instance is
   unreachable does not reach; a join that read a sign-in since ended is refused. The SFU is reached through
@@ -2548,8 +2556,8 @@ And on the voice control surface, from M34:
 
 - **What the person sets is the daemon's, per sign-in, in memory** (`voiceworker.prefs`): the self mute and
   deafen, the local mutes and the stream cap. It is set with or without a call, sent with each join, and
-  forgotten when the sign-in ends; a different sign-in starts from nothing. Never on disk until M36 decides
-  what a rejoin carries.
+  forgotten when the sign-in ends; a different sign-in starts from nothing. On disk only inside M36's
+  breadcrumb, while a call is up or being joined again.
 - **`push` sends the worker and the voice server only what changed**, ordered by `call.sendMu`, and nothing
   before the worker has its answer (`call.answered`), which carries the instance's raw rights. An update the
   gateway could not send is sent again every `selfRetryEvery` while the call lasts. The worker sends the SFU
@@ -2615,6 +2623,39 @@ And on how the microphone is let through, from M35 (ADR 0034 §2–§5):
   never `-displayfd`, which took `:0` beside the author's XWayland. The portal's fake runs on a private
   D-Bus whose configuration names no service directory. A manual pass holds a key with QEMU's `sendkey`,
   which delivers one with a hold time about 4 s late.
+
+And on rejoining a call, from M36:
+
+- **Three losses are rejoined, and a new one is a decision** (`voiceworker/rejoin.go`): the daemon gone
+  (`Voice.Resume` at start), the worker crashed (`Exit.Crashed`) and the gateway session lost
+  (`Answer.Lost`). Every other end is somebody's choice and clears the breadcrumb; a new way for a call to end
+  says which it is. An end the instance gave a reason for is never rejoined, or a rejoin undoes moderation.
+- **A rejoin is a join**: through `Voice.join`, op 4, authorized afresh. `InstanceRefusal.Final` decides what
+  gives up at once; a new refusal code is a row there. The person's own join or leave cancels a pending
+  rejoin before anything else (`cancelRejoin`), and an attempt checks it is still the rejoin under
+  `Voice.mu` before it is counted.
+- **The breadcrumb is `state.json`'s `voice_call` (`daemon/statefile.VoiceCall`)**, written by the keeper
+  goroutine, latest only, never under `Voice.mu` or on a call's loop; a clear is written at once, and `Close`
+  keeps it, which is what makes a stop rejoin. It holds no credential: a new field is an id, a switch or a
+  key name, and `breadcrumbHoldsNoSecret` reads the file a real call wrote. Its own `UnmarshalJSON` never
+  fails the file, refuses the whole breadcrumb on one bad field (`Refused`), and holds each field as a join
+  request is (`Check`). A field added goes in `Check`, `Equal`, `Clone` and the hostile-file table.
+- **`State` is compared with `Equal`, never `==`**, since the breadcrumb holds a slice. A field added to
+  `State` goes in `Equal`.
+- **Two bounds, both on purpose**: `rejoinWithin` (60 s) since the stamp, on the wall clock (`wallNow`)
+  either way, and `ipc.MaxVoiceRejoins` attempts counted on disk before each. Raising either is the ledger's
+  "A rejoin opens the microphone" entry reopening.
+- **What wakes a rejoin waiting for the instance is `gatewayclient.Options.Online`**, called after `live` is
+  set on READY. `NewSession` runs before a join can be sent, on purpose, so the predecessor's call goes
+  first.
+- **`norite daemon stop` and `uninstall` leave first** (`daemonctl.socketLeave`), and the stop request is
+  unchanged, which keeps the ledger's stop entry closed. Anything new that stops the daemon on the person's
+  behalf leaves first too; anything that restarts it does not.
+- **Testing:** `rejoin_test.go`'s crumbs fake and `rejoinFast`; the stand-in's `crashlater` and `crashonce`
+  modes (`NORITE_VOICE_STANDIN_MARK`). End to end, `voice_rejoin_e2e_test.go` builds the three programs and
+  runs them on temporary homes against `serveInstance`, with a session bus that does not exist so no keyring
+  is touched, and kills only the PID it started. It never reaches a real service manager: `norite daemon
+  stop` is tested against `answerLeave` in `daemonctl`.
 
 And on the first run, from the `easier-setup` branch:
 
