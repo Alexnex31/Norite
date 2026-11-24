@@ -284,7 +284,10 @@ id is chosen at M35.
       display not on this machine. Tested under an Xvfb of the test's own: `-displayfd` alone picked `:0`
       beside the author's XWayland, which listens on the path and not the abstract socket.
     - macOS's application loop starts only at the first key wanted, and only inside a WindowServer session;
-      the daemon's `main` gives its main thread to it from the start (`hotkey.ServeMainThread`).
+      the daemon's `main` gives its main thread to it from the start (`hotkey.ServeMainThread`). Walked from
+      the LaunchAgent on macOS 27, with nothing asked but the microphone.
+    - The LaunchAgent is `Interactive`, no longer M3's `Background`: the worker is its child and runs at its
+      priority, and a busy Mac held the audio processing past its watchdog, which ended a call.
 - **The terminal cannot do push-to-talk by itself.** KEYMAP's `C-space (hold)` assumes a release event,
   and a terminal reports none without the kitty keyboard protocol's event types. `C-space` is also NUL in
   most terminals, and the input-source switch on macOS. In-terminal push-to-talk is M35's and M44's to
