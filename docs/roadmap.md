@@ -2810,6 +2810,19 @@ of this section.
     - **Not walked:** a Windows logoff followed by a login within the minute; macOS, by the author's choice.
     - **Seen, and not M36's:** `norite daemon stop` says nothing of the call it leaves; on Linux a daemon
       stopped by a signal stays listed in its channel until the SFU gives up on ICE (16 s), as since M28.
+  - **`/code-review high` on the whole branch** found seven things, all fixed and proved by removal:
+    - a person's join that waited its turn, or a leave that had read the call, lost a race with a call lost
+      in between, and the rejoin went back to the old call;
+    - a local mute or a stream cap set while a restarted daemon waited was made to empty switches, so a
+      muted caller came back heard, and was not written to disk;
+    - a logout and a login as the same account within the minute rejoined, unmuted: a rejoin is now the
+      sign-in's it was lost under;
+    - a status with no call kept the last attempt's processing;
+    - a worker the daemon killed for breaking the protocol was started again;
+    - a breadcrumb the state file's lock refused stayed, and joined a left call at the next start; a failed
+      write is tried again until it is done.
+
+    Kept at the author's word: the stamp written every 15 s during a call (D2).
 - **M36a — Voice downlink adaptation**: the receiver caps its own subscription from what its downlink
   loses. M34 built the cap by hand (`norite voice streams`, `voice.max_streams`, the SFU's `cap` from M26),
   and the sender's controller follows its uplink alone (architecture.md §17). Here the worker measures

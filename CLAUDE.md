@@ -576,6 +576,11 @@ agent never creates a `v*` tag or bumps a version.**
   - a network cut ended the call for good, ICE having given up;
   - an instance's restart did too, the coordinator ending each call with a reason.
 
+  Its `/code-review` found seven things, all fixed: a person's join or leave losing a race with a call
+  lost, a change during a restarted daemon's wait unmuting the caller and not written, a rejoin outliving a
+  sign-out, a status with no call keeping its processing, a worker the daemon killed started again, and a
+  removal the state file refused left on disk.
+
 ## What keeps coming back
 
 The milestones' lessons, kept as rules once their stories were cut: each name says where it was learned, and
@@ -2650,14 +2655,21 @@ And on rejoining a call, from M36:
   (`Coordinator.Ended`). A new eviction with a reason is a call never joined again.
 - **A rejoin is a join**: through `Voice.join`, op 4, authorized afresh. `InstanceRefusal.Final` decides what
   gives up at once; a new refusal code is a row there. The person's own join or leave cancels a pending
-  rejoin before anything else (`cancelRejoin`), and an attempt checks it is still the rejoin under
-  `Voice.mu` before it is counted.
+  rejoin before anything else (`cancelRejoin`), and again where it can lose a race with a call lost: the
+  join under the lock it sets the call under, the leave for a rejoin made of the call it read (`from`). An
+  attempt checks it is still the rejoin under `Voice.mu` before it is counted. A rejoin is the sign-in's it
+  was lost under (`signedIn`), so a sign-out ends it whoever signs in next, and a worker the daemon killed
+  (`Exit.Killed`) is the daemon's decision, never rejoined.
+- **A change while a rejoin waits is made to the breadcrumb**: from its switches when the daemon started
+  again holds none, and written at once, since `note` writes only a call that is up.
 - **The breadcrumb is `state.json`'s `voice_call` (`daemon/statefile.VoiceCall`)**, written by the keeper
   goroutine, latest only, never under `Voice.mu` or on a call's loop; a clear is written at once, and `Close`
-  keeps it, which is what makes a stop rejoin. It holds no credential: a new field is an id, a switch or a
-  key name, and `breadcrumbHoldsNoSecret` reads the file a real call wrote. Its own `UnmarshalJSON` never
-  fails the file, refuses the whole breadcrumb on one bad field (`Refused`), and holds each field as a join
-  request is (`Check`). A field added goes in `Check`, `Equal`, `Clone` and the hostile-file table.
+  keeps it, which is what makes a stop rejoin. A write that fails is tried again every `saveRetry` until one
+  is done, or a left call's breadcrumb would outlive the leave. It holds no credential: a new field is an
+  id, a switch or a key name, and `breadcrumbHoldsNoSecret` reads the file a real call wrote. Its own
+  `UnmarshalJSON` never fails the file, refuses the whole breadcrumb on one bad field (`Refused`), and holds
+  each field as a join request is (`Check`). A field added goes in `Check`, `Equal`, `Clone` and the
+  hostile-file table.
 - **`State` is compared with `Equal`, never `==`**, since the breadcrumb holds a slice. A field added to
   `State` goes in `Equal`.
 - **Two bounds, both on purpose**: `rejoinWithin` (60 s) since the stamp, on the wall clock (`wallNow`)
