@@ -189,6 +189,33 @@ leave_receipt() {
     fi
 }
 
+# desktop_entry writes the .desktop file Linux's GlobalShortcuts portal needs before it will name Norite,
+# for push-to-talk's key (ADR 0034 §5): an unsandboxed program names itself by an app id, and the portal
+# knows only ids a .desktop file is installed for. Written when this run sets the daemon up, which is the
+# account's own install, as the receipt is. It is packaging/io.github.alexnex31.Norite.desktop, which the
+# packages install, and a test holds the two equal. NoDisplay keeps it out of every menu.
+app_id=io.github.alexnex31.Norite
+applications_dir() { printf '%s/applications' "${XDG_DATA_HOME:-$HOME/.local/share}"; }
+desktop_entry() {
+    [ "$os" = linux ] || return 0
+    dir=$(applications_dir)
+    if ! mkdir -p "$dir" || ! cat >"$dir/.$app_id.desktop.new.$$" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=Norite
+Comment=Voice and text chat. This entry names Norite to the desktop, for push-to-talk's shortcut.
+Exec=norite
+Terminal=true
+NoDisplay=true
+Categories=Network;Chat;
+DESKTOP
+    then
+        warn "could not write $dir/$app_id.desktop; push-to-talk on a Wayland desktop needs it."
+        return 0
+    fi
+    mv -f "$dir/.$app_id.desktop.new.$$" "$dir/$app_id.desktop"
+}
+
 on_path() {
     case ":$PATH:" in
         *":$bin_dir:"*) return 0 ;;
@@ -272,6 +299,7 @@ uninstall() {
     "$norite" daemon uninstall >/dev/null 2>&1 || true
     "$norite" update receipt --forget --bin-dir "$bin_dir" >/dev/null 2>&1 || true
     rm -f "$bin_dir/norite" "$bin_dir/norite-daemon" "$bin_dir/norite-voice"
+    [ "$os" = linux ] && rm -f "$(applications_dir)/$app_id.desktop"
     say "Removed. The daemon's state directory is left in place; delete it for a clean slate:"
     case "$os" in
         darwin) say "  ~/Library/Application Support/Norite" ;;
@@ -373,6 +401,7 @@ main() {
     "$norite" --help >/dev/null 2>&1 || die "$norite was installed but does not run on this machine"
     say "norite$([ -f "$bin_dir/norite-voice" ] && printf ', norite-voice'), norite-daemon$([ "$with_server" = 1 ] && printf ', norite-server')"
     leave_receipt
+    [ "$daemon" = 1 ] && desktop_entry
 
     [ "$daemon" = 1 ] && setup_daemon
     [ "$account" = 1 ] && setup_account

@@ -29,6 +29,10 @@ type selfServer struct {
 	joined  []ipc.VoiceSelf
 	updates []ipc.VoiceSelf
 	down    bool
+	// resumed is the call's Answer.Resumed, nil for none; block, when set, holds every update until it is
+	// closed or the update's context ends, as a gateway write into a connection going bad does.
+	resumed chan struct{}
+	block   chan struct{}
 }
 
 func (*selfServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
@@ -36,9 +40,19 @@ func (s *selfServer) Join(_ context.Context, _, _, _ string, self ipc.VoiceSelf)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.joined = append(s.joined, self)
-	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}}, nil
+	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}, Resumed: s.resumed}, nil
 }
-func (s *selfServer) Update(_ context.Context, _, _ string, self ipc.VoiceSelf) error {
+func (s *selfServer) Update(ctx context.Context, _, _ string, self ipc.VoiceSelf) error {
+	s.mu.Lock()
+	block := s.block
+	s.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.down {
@@ -115,6 +129,64 @@ func TestASelfUpdateMadeWhileTheGatewayIsDownIsSentOnceItIsBack(t *testing.T) {
 		_, updates := srv.seen()
 		return len(updates) == 1 && updates[0] == ipc.VoiceSelf{Mute: true, Deaf: true}
 	}, 5*time.Second, 10*time.Millisecond, "the deafen never reached the voice server")
+}
+
+// The person's flags are sent again when the session the call was signaled on resumes: a write the lost
+// connection took returned without reaching the instance, nothing replays it, and everybody else would see
+// the old flags for the rest of the call (M34's /code-review).
+func TestTheSelfFlagsAreSentAgainAfterAResume(t *testing.T) {
+	fast(t)
+	srv := &selfServer{resumed: make(chan struct{}, 1)}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	_, err = v.SetSelf(SelfMute)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, updates := srv.seen()
+		return len(updates) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+	srv.resumed <- struct{}{}
+	require.Eventually(t, func() bool {
+		_, updates := srv.seen()
+		return len(updates) == 2
+	}, 5*time.Second, 10*time.Millisecond, "the mute was not sent again after the resume")
+	_, updates := srv.seen()
+	require.Equal(t, []ipc.VoiceSelf{{Mute: true}, {Mute: true}}, updates)
+}
+
+// A self update the gateway holds, as a write into a connection going bad does for up to signalLeaveWithin,
+// holds nothing else: the switch answers and the worker is told (M34's /code-review: push sent it inline,
+// from the call's event loop and, since M35, from the key's thread).
+func TestASelfUpdateTheGatewayHoldsHoldsNothingElse(t *testing.T) {
+	fast(t)
+	srv := &selfServer{block: make(chan struct{})}
+	v := standinVoice(t, "good", srv)
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	quick := func(what string, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f()
+		}()
+		require.NoError(t, within(time.Second, done), "%s waited on the gateway", what)
+	}
+	quick("a mute", func() { _, _ = v.SetSelf(SelfMute) })
+	quick("an unmute", func() { _, _ = v.SetSelf(SelfUnmute) })
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.Microphone != nil && st.Microphone.Reason == "send=true hear=true"
+	}, 5*time.Second, 10*time.Millisecond, "the worker was not told: %+v", v.Status())
+	_, updates := srv.seen()
+	require.Empty(t, updates)
+
+	close(srv.block)
+	require.Eventually(t, func() bool {
+		_, updates := srv.seen()
+		return len(updates) > 0 && updates[len(updates)-1] == ipc.VoiceSelf{}
+	}, 5*time.Second, 10*time.Millisecond, "the latest flags never reached the voice server")
 }
 
 // A daemon whose credential store did not open answers what the person sets with why it cannot, and does
@@ -286,6 +358,30 @@ func TestAChangeOfProcessingIsAnsweredWithinItsBound(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(start), processingWithin)
 	require.Equal(t, &ipc.VoiceDSP{State: ipc.VoiceDSPRunning, EchoCancellation: true, NoiseSuppression: true,
 		AutoGain: true}, st.DSP, "what still runs")
+}
+
+// A change no report can answer is answered at once, saying what was asked: a call whose worker never said
+// what it processes, as one with no device, and one whose microphone delivers nothing, since a change is taken
+// up frame by frame. Each waited processingWithin and said the same (M34's second /code-review).
+func TestAChangeNoReportCanAnswerIsAnsweredAtOnce(t *testing.T) {
+	fast(t)
+	for _, mode := range []string{"good", "micfails"} {
+		v := standinVoice(t, mode, &selfServer{})
+		_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+		require.NoError(t, err, mode)
+		require.Eventually(t, func() bool {
+			st := v.Status()
+			if mode == "good" { // says nothing of its devices or its processing
+				return st.State == ipc.VoiceInCall && st.DSP == nil
+			}
+			return st.DSP != nil && st.Microphone != nil && st.Microphone.State == ipc.VoiceDeviceFailed
+		}, 5*time.Second, 10*time.Millisecond, "%s: %+v", mode, v.Status())
+		start := time.Now()
+		st := v.Processing(ipc.VoiceJoin{AutoGain: true})
+		require.Less(t, time.Since(start), processingWithin/2, mode)
+		require.Equal(t, &ipc.VoiceJoin{AutoGain: true}, st.Processing, mode)
+		v.Leave()
+	}
 }
 
 // A processing that failed answers a change at once: no change brings it back (M34).

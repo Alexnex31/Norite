@@ -17,6 +17,9 @@ import (
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
+// byVoice is a join as the daemon sends one by default: every field the contract requires, input by voice.
+var byVoice = voiceipc.Join{Input: voiceipc.Input{Mode: voiceipc.InputVoice}}
+
 // drain reads the worker's events until it is done, failing the test if that takes past d: a worker the
 // daemon should have killed and did not must fail here, not hang the suite.
 func drain(t *testing.T, w *Worker, d time.Duration) {
@@ -51,7 +54,7 @@ func joinStandin(t *testing.T, mode string, log *logBuffer) *Worker {
 	}
 	require.NoError(t, err)
 	t.Cleanup(func() { w.Kill("the test ended"); <-w.Done() })
-	require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{}))
+	require.NoError(t, w.Send(voiceipc.OpJoin, byVoice))
 	ev := <-w.Events()
 	require.NotNil(t, ev.Offer)
 	require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
@@ -75,7 +78,7 @@ func TestACrashIsSeenThroughTheClosedPipe(t *testing.T) {
 		"a panic": func(t *testing.T) *Worker {
 			w, err := Start(context.Background(), standinOptions(t, "panic", nil))
 			require.NoError(t, err)
-			require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{}))
+			require.NoError(t, w.Send(voiceipc.OpJoin, byVoice))
 			return w
 		},
 		"a kill": func(t *testing.T) *Worker {
@@ -109,7 +112,7 @@ func TestACallThatEndsByItselfIsNotACrash(t *testing.T) {
 	fast(t)
 	w, err := Start(context.Background(), standinOptions(t, "dropcall", nil))
 	require.NoError(t, err)
-	require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{}))
+	require.NoError(t, w.Send(voiceipc.OpJoin, byVoice))
 	<-w.Events()
 	require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
 	drain(t, w, 5*time.Second)
@@ -272,7 +275,7 @@ func TestAnEndSaidLastIsNeverACrash(t *testing.T) {
 	for range 3 {
 		w, err := Start(context.Background(), standinOptions(t, "dropcall", nil))
 		require.NoError(t, err)
-		require.NoError(t, w.Send(voiceipc.OpJoin, voiceipc.Join{}))
+		require.NoError(t, w.Send(voiceipc.OpJoin, byVoice))
 		<-w.Events()
 		require.NoError(t, w.Send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n"}))
 		// Nobody reads the events from here: the reader must still record the end.

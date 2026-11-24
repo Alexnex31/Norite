@@ -22,6 +22,9 @@ import (
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
 
+// byVoice is a join as the daemon sends one by default: every field the contract requires, input by voice.
+var byVoice = voiceipc.Join{Input: voiceipc.Input{Mode: voiceipc.InputVoice}}
+
 // fakeCall is a Call whose every step the test decides.
 type fakeCall struct {
 	// mu guards what the worker hands the call: the answer, and the rights since.
@@ -30,6 +33,7 @@ type fakeCall struct {
 	rights     []voiceipc.Rights
 	subscribes []voiceipc.Subscribe
 	processing []voiceipc.Processing
+	inputs     []voiceipc.Input
 
 	offerErr error
 	ready    chan struct{}
@@ -86,6 +90,11 @@ func (c *fakeCall) Processing(p voiceipc.Processing) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.processing = append(c.processing, p)
+}
+func (c *fakeCall) Input(in voiceipc.Input) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inputs = append(c.inputs, in)
 }
 func (c *fakeCall) Close() {
 	close(c.closed)
@@ -190,7 +199,13 @@ func (d *daemon) joined() {
 	d.t.Helper()
 	f := d.next()
 	require.Equal(d.t, voiceipc.OpHello, f.Op)
-	d.send(voiceipc.OpJoin, voiceipc.Join{})
+	d.answered()
+}
+
+// answered is joined after the hello has been read.
+func (d *daemon) answered() {
+	d.t.Helper()
+	d.send(voiceipc.OpJoin, byVoice)
 	require.Equal(d.t, voiceipc.OpOffer, d.next().Op)
 	d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\nanswer\r\n", ICEServers: []voiceipc.ICEServer{},
 		Bitrate: 96000, Rights: voiceipc.Rights{Send: true, Hear: true}})
@@ -220,8 +235,8 @@ func TestTheAnswerAndTheRightsReachTheCall(t *testing.T) {
 	require.Equal(t, []voiceipc.Rights{{Send: false, Hear: true}, {Send: true, Hear: false}}, call.rights)
 }
 
-// Who is speaking and what the processing is doing reach the daemon, and whom the person mutes and how they
-// want the microphone processed reach the call, in order (M34).
+// Who is speaking and what the processing is doing reach the daemon, and whom the person mutes, how they
+// want the microphone processed (M34) and how it is let through (M35) reach the call, in order.
 func TestTheCallsControlCrossesThePipes(t *testing.T) {
 	call := newFakeCall()
 	d := start(t, call, Options{})
@@ -246,15 +261,17 @@ func TestTheCallsControlCrossesThePipes(t *testing.T) {
 	two := 2
 	d.send(voiceipc.OpSubscribe, voiceipc.Subscribe{Drop: []string{"42"}, Cap: &two})
 	d.send(voiceipc.OpProcessing, voiceipc.Processing{Processing: ipc.VoiceJoin{AutoGain: true}})
+	d.send(voiceipc.OpInput, voiceipc.Input{Mode: voiceipc.InputPushToTalk, Held: true})
 	require.Eventually(t, func() bool {
 		call.mu.Lock()
 		defer call.mu.Unlock()
-		return len(call.subscribes) == 1 && len(call.processing) == 1
+		return len(call.subscribes) == 1 && len(call.processing) == 1 && len(call.inputs) == 1
 	}, 5*time.Second, 5*time.Millisecond)
 	call.mu.Lock()
 	defer call.mu.Unlock()
 	require.Equal(t, []voiceipc.Subscribe{{Drop: []string{"42"}, Cap: &two}}, call.subscribes)
 	require.Equal(t, []voiceipc.Processing{{Processing: ipc.VoiceJoin{AutoGain: true}}}, call.processing)
+	require.Equal(t, []voiceipc.Input{{Mode: voiceipc.InputPushToTalk, Held: true}}, call.inputs)
 }
 
 // A subscribe the protocol forbids is the daemon breaking it, and ends the worker as any such frame does.
@@ -384,7 +401,7 @@ func TestAFailedGatherEnds(t *testing.T) {
 	call.offerErr = errors.New("no network")
 	d := start(t, call, Options{})
 	require.Equal(t, voiceipc.OpHello, d.next().Op)
-	d.send(voiceipc.OpJoin, voiceipc.Join{})
+	d.send(voiceipc.OpJoin, byVoice)
 	s := d.state()
 	require.Equal(t, voiceipc.StateEnded, s.State)
 	require.Contains(t, s.Reason, "no network")
@@ -402,7 +419,7 @@ func TestTheWorkerExitsWhenItsDaemonGoes(t *testing.T) {
 		call := newFakeCall()
 		d := start(t, call, Options{})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{})
+		d.send(voiceipc.OpJoin, byVoice)
 		require.Equal(t, voiceipc.OpOffer, d.next().Op)
 		require.NoError(t, d.toW.Close())
 		require.Equal(t, ExitOK, d.exit())
@@ -446,12 +463,21 @@ func TestAFrameOutOfOrderIsRefused(t *testing.T) {
 		"a join with a field nobody declared": func(d *daemon) {
 			d.send(voiceipc.OpJoin, map[string]any{"loopback": false, "token": "x"})
 		},
+		"a join with no input mode (M35)": func(d *daemon) { d.send(voiceipc.OpJoin, voiceipc.Join{}) },
+		"an input with a mode nobody declared": func(d *daemon) {
+			d.answered()
+			d.send(voiceipc.OpInput, voiceipc.Input{Mode: "whisper"})
+		},
+		"a push-to-talk key held while the input is by voice": func(d *daemon) {
+			d.answered()
+			d.send(voiceipc.OpInput, voiceipc.Input{Mode: voiceipc.InputVoice, Held: true})
+		},
 		"a join naming servers, which the answer names since M33": func(d *daemon) {
 			d.send(voiceipc.OpJoin, map[string]any{"ice_servers": []any{}, "loopback": false,
 				"processing": voiceipc.Join{}.Processing})
 		},
 		"an answer naming too many servers": func(d *daemon) {
-			d.send(voiceipc.OpJoin, voiceipc.Join{})
+			d.send(voiceipc.OpJoin, byVoice)
 			require.Equal(t, voiceipc.OpOffer, d.next().Op)
 			many := make([]voiceipc.ICEServer, voiceipc.MaxICEServers+1)
 			for i := range many {
@@ -460,7 +486,7 @@ func TestAFrameOutOfOrderIsRefused(t *testing.T) {
 			d.send(voiceipc.OpAnswer, voiceipc.Answer{SDP: "v=0\r\n", ICEServers: many})
 		},
 		"rights before the answer": func(d *daemon) {
-			d.send(voiceipc.OpJoin, voiceipc.Join{})
+			d.send(voiceipc.OpJoin, byVoice)
 			require.Equal(t, voiceipc.OpOffer, d.next().Op)
 			d.send(voiceipc.OpRights, voiceipc.Rights{Send: true, Hear: true})
 		},
@@ -485,7 +511,7 @@ func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
 		call.slowGather = true
 		d := start(t, call, Options{Gather: time.Minute})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{})
+		d.send(voiceipc.OpJoin, byVoice)
 		started := time.Now()
 		d.send(voiceipc.OpLeave, voiceipc.Leave{})
 		require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "left"}, d.state())
@@ -497,7 +523,7 @@ func TestALeaveWhileGatheringIsAnsweredAtOnce(t *testing.T) {
 		call.slowGather = true
 		d := start(t, call, Options{Gather: time.Minute})
 		require.Equal(t, voiceipc.OpHello, d.next().Op)
-		d.send(voiceipc.OpJoin, voiceipc.Join{})
+		d.send(voiceipc.OpJoin, byVoice)
 		started := time.Now()
 		require.NoError(t, d.toW.Close())
 		require.Equal(t, ExitOK, d.exit())

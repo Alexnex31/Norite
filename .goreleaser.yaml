@@ -130,6 +130,10 @@ archives:
         dst: THIRD-PARTY-NOTICES-norite-daemon.txt
       - src: voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: THIRD-PARTY-NOTICES-norite-voice.txt
+      # The .desktop file Linux's GlobalShortcuts portal needs before it names Norite (ADR 0034 §5), which
+      # the AUR's norite-bin installs from here; read by nothing on the other OSes.
+      - src: packaging/io.github.alexnex31.Norite.desktop
+        dst: io.github.alexnex31.Norite.desktop
 
 # The tag's source as a release asset, which the AUR's source packages build from and which is AGPL's
 # Corresponding Source in the plainest form. Named apart from both archive patterns, since install.sh and
@@ -177,6 +181,9 @@ nfpms:
         dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite-daemon.txt
       - src: voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt
         dst: /usr/share/doc/norite/THIRD-PARTY-NOTICES-norite-voice.txt
+      # What names Norite to Linux's GlobalShortcuts portal, for push-to-talk's key (ADR 0034 §5).
+      - src: packaging/io.github.alexnex31.Norite.desktop
+        dst: /usr/share/applications/io.github.alexnex31.Norite.desktop
       # Debian and Fedora keep a package's licence beside its documentation; Arch keeps it apart.
       - src: LICENSE
         dst: /usr/share/doc/norite/LICENSE
@@ -267,6 +274,7 @@ aurs:
       install -Dm644 ./THIRD-PARTY-NOTICES-norite.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
       install -Dm644 ./THIRD-PARTY-NOTICES-norite-daemon.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
       install -Dm644 ./THIRD-PARTY-NOTICES-norite-voice.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-voice.txt"
+      install -Dm644 ./io.github.alexnex31.Norite.desktop "${pkgdir}/usr/share/applications/io.github.alexnex31.Norite.desktop"
       install -d "${pkgdir}/usr/lib/norite"
       printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
 
@@ -329,6 +337,7 @@ aur_sources:
       install -Dm644 ./cli/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite.txt"
       install -Dm644 ./daemon/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-daemon.txt"
       install -Dm644 ./voiceworker/internal/notices/THIRD-PARTY-NOTICES.txt "${pkgdir}/usr/share/doc/${pkgname}/THIRD-PARTY-NOTICES-norite-voice.txt"
+      install -Dm644 ./packaging/io.github.alexnex31.Norite.desktop "${pkgdir}/usr/share/applications/io.github.alexnex31.Norite.desktop"
       install -d "${pkgdir}/usr/lib/norite"
       printf 'aur\n' >"${pkgdir}/usr/lib/norite/packaged-by"
 

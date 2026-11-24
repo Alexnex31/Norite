@@ -405,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M34 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M35 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -553,6 +553,20 @@ agent never creates a `v*` tag or bumps a version.**
   The Mac found that echo cancellation turned back on mid-call never took, which its review's fix had
   caused, fixed; and that a daemon under launchd cannot reach a LAN instance (Local Network privacy),
   carried with the Developer ID.
+- **M35 — Voice input mode**: done. A gate on RNNoise's probability, the default, which also closes M31's
+  silent caller, and push-to-talk on an OS-wide key the daemon holds while the call lasts: `RegisterHotKey`,
+  the `GlobalShortcuts` portal or an X11 grab, and Carbon. It also fixed the seven findings of M34's
+  `/code-review`. Its manual pass ran on Windows 11 and KDE Plasma 6.3 in VMs and on the author's Mac, and
+  found six things, all fixed:
+  - a key freed after the join was not taken up again;
+  - `voice mode` with no call said nothing of the mode;
+  - a portal that could not start read as one that did not know Norite;
+  - Plasma 6.3 opened System Settings at every join;
+  - `voice mode --key` answered before the key was refused;
+  - the LaunchAgent's `Background` priority, which its worker inherits, let a busy Mac end a call.
+
+  An agent installed before M35 keeps `Background` until `norite daemon install` runs again, which the
+  release carrying voice must say.
 
 ## What keeps coming back
 
@@ -653,7 +667,11 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
 - **A message describes the outcome**: write it after the last step that can fail, from what happened, and
   read every sentence a person will see against the real program (M19, M22, M28). An answer sent once a
   change is asked for, before the program it asks has made it, describes the state before (M34's
-  `processing`).
+  `processing`, M35's `voice mode --key`).
+- **A service's definition applies to whatever it comes to spawn** (M35). M3 made the LaunchAgent
+  `Background` for a process nobody waited on, M28 gave it a real-time child at the same priority, and
+  nothing asked again until a busy Mac ended a call. When a process gains a new kind of work, reread what
+  its service definition says about it.
 - **Anything written for a platform nobody ran says so**, in the entry, the guide, the commit and the code
   (M23).
 
@@ -668,6 +686,11 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   VM**, or on a machine the author names, and only after asking. Never a privileged container: one ended the
   author's desktop session at M23. Check the hash of what a pass runs (M26), and where a virtual device is
   wired rather than what it was asked to be wired to (M25).
+- **A pass's step checks the state it measures, before and after** (M35). The first Mac script polled a key
+  during a call that had already ended, and its question about what TextEdit received answered for no call.
+- **A slowness put down to cost is measured where it happens, one thing varied at a time** (M35). M34 read
+  frames skipped under launchd as the DSP's cost, beside a measurement of a quarter of a core from Terminal.
+  The same programs under three process types named the cause in one run.
 
 ## Conventions, by area
 
@@ -1911,11 +1934,12 @@ And on the client config and the daemon's own requests, from M21:
   status; since M24 also `unreachable`, when the request cannot be carried out yet: the release host could
   not be read, a check is already under way, or the instance has not been heard from. It takes no body and
   carries nothing of the user's in its path, because a daemon older than the prefix relays the path to its
-  instance (ledger). Five exceptions, each sent only after a request that says nothing has shown the daemon
+  instance (ledger). Six exceptions, each sent only after a request that says nothing has shown the daemon
   knows these requests: the port number in `/@daemon/automation/enable/{port}` (M22), the voice join's
-  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly, and since M34 the user id in
+  body (M30), which `ipc.DecodeVoiceJoin` decodes strictly, since M34 the user id in
   `/@daemon/voice/local-mute/{user}` and `local-unmute/{user}`, the number in `/@daemon/voice/streams/{n}`
-  and the body of `/@daemon/voice/processing`, which `norite voice` sends only after `GET /@daemon/voice`.
+  and the body of `/@daemon/voice/processing`, and since M35 the body of `/@daemon/voice/mode`, which carries
+  the push-to-talk key; `norite voice` sends each only after `GET /@daemon/voice`.
   `relay.Target` refuses the prefix, and a test holds `openapi.yaml` to never using it. The CLI side is
   `daemonclient.Local`, `LocalWith` for a body, and `LocalRead`.
 - **`state.json` is read through `daemon/statefile` and written only through `daemon/internal/statefile`**,
@@ -2564,6 +2588,33 @@ And on the voice control surface, from M34:
   - two speakers are told apart by correlating loudness envelopes, each speaking a different passage;
   - white noise shows noise suppression;
   - QEMU's `usb-audio` on its `wav` backend is a headset to unplug, which Windows cannot refuse.
+
+And on how the microphone is let through, from M35 (ADR 0034 §2–§5):
+
+- **The gate is the worker's (`session/gate.go`) and the key the daemon's (`daemon/internal/hotkey`).** Only
+  the mode and whether the key is down cross the pipe (`OpInput`, op 16). The key never lifts a mute.
+- **A shut gate encodes nothing, and every frame still goes through the DSP**, which stays converged. With no
+  chain the gate is open, as M29 sent every frame; a chain's first `warmFrames` neither open nor hold it.
+  A change to its numbers is read against the latency budget and M31's silent-caller test.
+- **A `Binder` never waits.** `Bind` returns at once and reports from a goroutine of its own, and a key that
+  could not be had is call state. There is one binding per call, made and released by `Voice.rebind`, and a
+  report from a binding since released (`bindGen`) reaches nothing.
+- **A change of mode answers once the binding has said what became of the key**, or after `keyWithin`, when
+  it still says it is being registered. Asking again for a key that could not be had tries it again.
+- **On Linux the session is read from the user manager's environment**, never the daemon's own, which a
+  daemon started before the login never had. The portal comes first, a shortcut already bound is taken from
+  `ListShortcuts` since Plasma 6.3 opens Settings at every `BindShortcuts`, and X through XWayland is never
+  used. Only the registry's `Error.Failed` means a missing `.desktop` file.
+- **The app id `io.github.alexnex31.Norite` never changes after a release.** Its `.desktop` file is one more
+  thing the package definitions restate.
+- **On macOS the daemon's `main` gives its main thread to `hotkey.ServeMainThread`**, whose application loop
+  starts at the first key wanted, inside a WindowServer session. **The LaunchAgent is `Interactive`** because
+  the worker runs at its priority: under `Background` a busy Mac ended a call.
+- **Testing:** `fakeBinder` in `input_test.go` plays a key, and `reportingBinder` one that answers a moment
+  later. The X11 tests run an Xvfb of their own on a display picked free by path, lock and abstract name,
+  never `-displayfd`, which took `:0` beside the author's XWayland. The portal's fake runs on a private
+  D-Bus whose configuration names no service directory. A manual pass holds a key with QEMU's `sendkey`,
+  which delivers one with a hold time about 4 s late.
 
 And on the first run, from the `easier-setup` branch:
 

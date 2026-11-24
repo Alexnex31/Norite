@@ -236,6 +236,46 @@ func TestALostSessionEndsTheCallAndTheJoinUnderWay(t *testing.T) {
 	}
 }
 
+// A resumed session is told to the call signaled on it, the latest only and never blocking the read loop,
+// and to no call once it is left (M34's /code-review: a self update the lost connection took went missing).
+func TestAResumedSessionIsToldToItsCall(t *testing.T) {
+	link := &fakeLink{connected: true}
+	g := &Gateway{Link: link}
+	g.Resumed() // no call: nothing to tell
+	link.reply = func(v gatewayproto.VoiceStateUpdate) {
+		deliver(t, g, gatewayproto.EventVoiceServerUpdate, server(v.Nonce, *v.ChannelID))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	a, err := g.Join(ctx, "9", "42", "v=0\r\n", ipc.VoiceSelf{})
+	require.NoError(t, err)
+	require.NotNil(t, a.Resumed)
+	select {
+	case <-a.Resumed:
+		t.Fatal("a call was told of a resume before any")
+	default:
+	}
+	g.Resumed()
+	g.Resumed() // twice before the call reads: once, and the read loop never waits
+	select {
+	case <-a.Resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call was not told its session resumed")
+	}
+	select {
+	case <-a.Resumed:
+		t.Fatal("two resumes were told twice")
+	default:
+	}
+	g.Leave(context.Background(), "9")
+	g.Resumed()
+	select {
+	case <-a.Resumed:
+		t.Fatal("a call already left was told its session resumed")
+	default:
+	}
+}
+
 // The account's own VOICE_STATE_UPDATE can arrive before the reply it follows, since the reply goes
 // straight to the session and the update through the bus: what it says wins over the reply's rights, which
 // were read as the row was written. Another account's, or another channel's, says nothing of the call

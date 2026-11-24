@@ -532,3 +532,47 @@ func TestWritesOfACallsRowPublishInTheOrderTheyCommitted(t *testing.T) {
 	mute, _ := f.selfFlags(t, "a")
 	assert.False(t, mute)
 }
+
+// A call's row lock is its own. Holding it, as a join does across its wait for a busy channel's advisory
+// lock, holds up no other call's: a stripe of 64 made connection 65's leave wait on connection 1's join
+// (M34's second /code-review). One call's writers still wait for each other, and a lock nobody holds or
+// waits for is not kept.
+func TestARowLockHoldsUpNoOtherCall(t *testing.T) {
+	c := &Coordinator{}
+	held, release, first := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(first)
+		c.rowLock(1, func() {
+			close(held)
+			<-release
+		})
+	}()
+	<-held
+	other := make(chan struct{})
+	go c.rowLock(65, func() { close(other) })
+	select {
+	case <-other:
+	case <-time.After(5 * time.Second):
+		t.Fatal("another call's row waited on this one's")
+	}
+	same := make(chan struct{})
+	go c.rowLock(1, func() { close(same) })
+	select {
+	case <-same:
+		t.Fatal("two writers of one row ran at once")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	for _, ch := range []chan struct{}{same, first} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the row's second writer never ran")
+		}
+	}
+	require.Eventually(t, func() bool {
+		c.rowsMu.Lock()
+		defer c.rowsMu.Unlock()
+		return len(c.rows) == 0
+	}, 5*time.Second, time.Millisecond, "locks nobody holds were kept")
+}

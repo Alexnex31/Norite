@@ -43,7 +43,8 @@ import (
 // processing changes and, once ready, SPEAKING as who speaks changes (M34). The daemon sends JOIN once,
 // ANSWER once, RIGHTS whenever what the account may do in the call changes after the answer (M33),
 // SUBSCRIBE and PROCESSING whenever the person changes whom they hear or how their microphone is processed
-// (M34), and LEAVE when the call should end.
+// (M34), INPUT whenever the input mode or the push-to-talk key changes (M35), and LEAVE when the call
+// should end.
 const (
 	OpHello    gatewayproto.Opcode = 1
 	OpOffer    gatewayproto.Opcode = 2
@@ -58,6 +59,7 @@ const (
 	OpRights     gatewayproto.Opcode = 13
 	OpSubscribe  gatewayproto.Opcode = 14
 	OpProcessing gatewayproto.Opcode = 15
+	OpInput      gatewayproto.Opcode = 16
 )
 
 // Bounds. The largest frame either way is the offer or the answer, each under voiceproto.MaxOffer, which
@@ -111,6 +113,8 @@ type Join struct {
 	// audio level's V flag follows. The worker converts it to its own dsp.Settings, which has the same
 	// fields, so a field added to one and not the other does not compile.
 	Processing ipc.VoiceJoin `json:"processing"`
+	// Input is how the microphone is let through as the call starts (M35).
+	Input Input `json:"input"`
 }
 
 // ICEServer is one TURN server, as WebRTC names it.
@@ -169,6 +173,35 @@ type Subscribe struct {
 // carries the first.
 type Processing struct {
 	Processing ipc.VoiceJoin `json:"processing"`
+}
+
+// Input is how the microphone is let through (M35): by the voice it carries, RNNoise's probability
+// deciding, or by push-to-talk, the daemon's key deciding, Held while it is down. The join carries the
+// first, and INPUT each change, whole. The key itself is the daemon's: what crosses the pipe is whether
+// it is down (rule 11), and a press too short for a frame to see still opens the gate for its tail.
+type Input struct {
+	Mode string `json:"mode"`
+	Held bool   `json:"held"`
+}
+
+// The input modes, the words of voice.input_mode in config.toml.
+const (
+	InputVoice      = "voice"
+	InputPushToTalk = "push_to_talk"
+)
+
+// Check refuses a mode that is not one of the words, and a key held outside push-to-talk.
+func (i Input) Check() error {
+	switch i.Mode {
+	case InputVoice:
+		if i.Held {
+			return errors.New("the push-to-talk key held while the input is by voice")
+		}
+	case InputPushToTalk:
+	default:
+		return fmt.Errorf("an unknown input mode %q", truncate(i.Mode, 32))
+	}
+	return nil
 }
 
 // DSP is what the audio processing is doing (M34), where the join's Processing is only what was asked:

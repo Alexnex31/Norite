@@ -52,6 +52,9 @@ type Call interface {
 	// they want the microphone processed (M34), each changed during the call.
 	Subscribe(s voiceipc.Subscribe)
 	Processing(p voiceipc.Processing)
+	// Input is how the microphone is let through now (M35): the mode, and whether the push-to-talk key is
+	// down.
+	Input(in voiceipc.Input)
 	// Close ends the call. It may block, which is why the worker bounds how long it waits for it.
 	Close()
 }
@@ -225,6 +228,13 @@ func (r *run) loop(ctx context.Context) int {
 				}
 				call.Processing(p)
 				continue
+			case voiceipc.OpInput:
+				var in voiceipc.Input
+				if err := ipc.Decode(f, &in); err != nil || in.Check() != nil {
+					return r.violation(f)
+				}
+				call.Input(in)
+				continue
 			}
 			if f.Op != voiceipc.OpLeave {
 				return r.violation(f)
@@ -291,7 +301,7 @@ func (r *run) awaitJoin(ctx context.Context) (voiceipc.Join, int, bool) {
 			return voiceipc.Join{}, r.end("left"), false
 		}
 		var j voiceipc.Join
-		if f.Op != voiceipc.OpJoin || ipc.Decode(f, &j) != nil {
+		if f.Op != voiceipc.OpJoin || ipc.Decode(f, &j) != nil || j.Input.Check() != nil {
 			return j, r.violation(f), false
 		}
 		return j, 0, true

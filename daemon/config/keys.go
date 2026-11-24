@@ -75,6 +75,13 @@ const (
 	// How many people a call is heard from at once (M34), 1 to 3 or StreamsAll, read by `norite voice join`.
 	KeyVoiceMaxStreams = "voice.max_streams"
 	StreamsAll         = "all"
+
+	// How a call's microphone is let through (M35): InputVoice or InputPushToTalk, and the key held to talk,
+	// read by `norite voice join` and written by `norite voice mode`.
+	KeyVoiceInputMode     = "voice.input_mode"
+	KeyVoicePushToTalkKey = "voice.push_to_talk_key"
+	InputVoice            = "voice"
+	InputPushToTalk       = "push_to_talk"
 )
 
 var keys = []Key{
@@ -94,6 +101,10 @@ var keys = []Key{
 		Portable: true, Consumer: "M30", Live: true},
 	{Name: KeyVoiceMaxStreams, Section: Shared, Kind: KindEnum, Values: []string{StreamsAll, "1", "2", "3"},
 		Default: StreamsAll, Portable: true, Consumer: "M34", Live: true},
+	{Name: KeyVoiceInputMode, Section: Shared, Kind: KindEnum, Values: []string{InputVoice, InputPushToTalk},
+		Default: InputVoice, Portable: true, Consumer: "M35", Live: true},
+	{Name: KeyVoicePushToTalkKey, Section: Shared, Kind: KindString, Default: "ctrl+shift+space", Portable: true,
+		Consumer: "M35", Live: true},
 
 	// Reserved: the format is settled, and nothing reads these until the milestone named.
 	{Name: "theme", Section: TUI, Kind: KindString, Portable: true, Consumer: "M45"},

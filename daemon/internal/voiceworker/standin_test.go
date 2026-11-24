@@ -139,7 +139,7 @@ func standin(mode string) int {
 	case "unknownop":
 		send(99, struct{}{})
 	case "daemonop":
-		send(voiceipc.OpJoin, voiceipc.Join{})
+		send(voiceipc.OpJoin, byVoice)
 	case "badstate":
 		send(voiceipc.OpState, voiceipc.State{State: "dancing"})
 	case "baddevices":
@@ -183,7 +183,7 @@ func standin(mode string) int {
 	}
 
 	// A correct worker from here, with a few modes that break it at a step. Like the real one, it takes no
-	// RIGHTS, SUBSCRIBE or PROCESSING before its ANSWER, and says the daemon broke the protocol.
+	// RIGHTS, SUBSCRIBE, PROCESSING or INPUT before its ANSWER, and says the daemon broke the protocol.
 	answered := false
 	for {
 		f, err := voiceipc.Read(in, voiceipc.MaxDaemonFrame)
@@ -204,6 +204,13 @@ func standin(mode string) int {
 				}
 				fmt.Printf("processing %t %t %t\n", j.Processing.EchoCancellation, j.Processing.NoiseSuppression,
 					j.Processing.AutoGain)
+			case "inputs":
+				// Says how the join lets the microphone through (M35), into the daemon's log.
+				var j voiceipc.Join
+				if ipc.Decode(f, &j) != nil {
+					return 9
+				}
+				fmt.Printf("input %s %t\n", j.Input.Mode, j.Input.Held)
 			case "panic":
 				panic("a decoder fed something that is not Opus")
 			case "endearly":
@@ -214,7 +221,7 @@ func standin(mode string) int {
 				continue
 			}
 			send(voiceipc.OpOffer, voiceipc.Offer{SDP: "v=0\r\nstandin\r\n"})
-		case voiceipc.OpRights, voiceipc.OpSubscribe, voiceipc.OpProcessing:
+		case voiceipc.OpRights, voiceipc.OpSubscribe, voiceipc.OpProcessing, voiceipc.OpInput:
 			if !answered {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded, Reason: "the daemon broke the protocol"})
 				return 1
@@ -297,7 +304,14 @@ func standin(mode string) int {
 			if mode == "dspfails" { // a processing that failed, which stays off for the rest of the call
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPFailed, Reason: "the chain trapped"})
 			}
-			if mode == "speaks" || mode == "dspsilent" { // who speaks, and the processing as the join asked it, once up (M34)
+			if mode == "speaks" || mode == "dspsilent" || mode == "micfails" { // who speaks, and the processing as the join asked it, once up (M34)
+				// Its devices, as a worker with some says them: in micfails, a microphone that failed, so no
+				// frame takes a change of processing up (M34's second /code-review).
+				mic := voiceipc.Device{State: voiceipc.DeviceOpen}
+				if mode == "micfails" {
+					mic = voiceipc.Device{State: voiceipc.DeviceFailed, Reason: "unplugged"}
+				}
+				send(voiceipc.OpDevices, voiceipc.Devices{Microphone: mic, Speakers: voiceipc.Device{State: voiceipc.DeviceOpen}})
 				send(voiceipc.OpSpeaking, voiceipc.Speaking{Users: []string{"7"}})
 				send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: true,
 					NoiseSuppression: true, AutoGain: true})
@@ -333,12 +347,20 @@ func standin(mode string) int {
 			if ipc.Decode(f, &p) != nil {
 				return 9
 			}
-			if mode == "dspsilent" || mode == "dspfails" {
+			// With micfails no frame comes to take it up, as with a worker whose microphone failed.
+			if mode == "dspsilent" || mode == "dspfails" || mode == "micfails" {
 				continue
 			}
 			time.Sleep(300 * time.Millisecond)
 			send(voiceipc.OpDSP, voiceipc.DSP{State: voiceipc.DSPRunning, EchoCancellation: p.Processing.EchoCancellation,
 				NoiseSuppression: p.Processing.NoiseSuppression, AutoGain: p.Processing.AutoGain})
+		case voiceipc.OpInput:
+			// Says every input it was sent, in order, into the daemon's log (M35).
+			var in voiceipc.Input
+			if ipc.Decode(f, &in) != nil || in.Check() != nil {
+				return 9
+			}
+			fmt.Printf("input %s %t\n", in.Mode, in.Held)
 		case voiceipc.OpLeave:
 			if mode == "stubborn" {
 				continue

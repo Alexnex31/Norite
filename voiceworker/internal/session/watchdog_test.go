@@ -553,7 +553,7 @@ func TestADSPTooSlowForRealTimeIsDropped(t *testing.T) {
 	s := &Session{cc: testController(), ended: make(chan string, 1), opts: Options{Log: lockedWriter{&mu, &logged}}}
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
-		chain: slowChain{}, enc: enc, codec: keepOpen{}}
+		chain: slowChain{}, enc: enc, codec: keepOpen{}, chainFrames: warmFrames} // past RNNoise's warm-up (M35)
 	m.sent.Add(1)
 	go m.send()
 	tick := time.NewTicker(audio.FrameSamples * time.Second / audio.SampleRate)
@@ -724,7 +724,7 @@ func TestASenderBehindRendersOnlyUpToTheFrame(t *testing.T) {
 	enc := keeping{got: make(chan []int16, 100)}
 	m := &media{s: s, stop: make(chan struct{}), frames: make(chan captureFrame, captureBacklog), base: time.Now(),
 		chain: pairing{mu: &mu, renders: &renders, captures: &captures, most: &most}, taken: true, enc: enc,
-		codec: keepOpen{}, settings: s.processing}
+		codec: keepOpen{}, settings: s.processing, chainFrames: warmFrames} // past RNNoise's warm-up (M35)
 	m.echo.Store(true)
 	m.sent.Add(1)
 	go m.send()

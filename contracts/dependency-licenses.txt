@@ -84,6 +84,7 @@ github.com/jackc/pgpassfile,https://github.com/jackc/pgpassfile/blob/v1.0.0/LICE
 github.com/jackc/pgservicefile,https://github.com/jackc/pgservicefile/blob/5a60cdf6a761/LICENSE,MIT
 github.com/jackc/pgx/v5,https://github.com/jackc/pgx/blob/v5.10.0/LICENSE,MIT
 github.com/jackc/puddle/v2,https://github.com/jackc/puddle/blob/v2.2.2/LICENSE,MIT
+github.com/jezek/xgb,https://github.com/jezek/xgb/blob/v1.3.1/LICENSE,BSD-3-Clause
 github.com/jfreymuth/pulse,https://github.com/jfreymuth/pulse/blob/v0.1.3/LICENSE,MIT
 github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.20.2/LICENSE,Apache-2.0
 github.com/klauspost/compress,https://github.com/klauspost/compress/blob/v1.20.2/LICENSE,BSD-3-Clause

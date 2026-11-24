@@ -2661,6 +2661,68 @@ of this section.
   - **This milestone's voice detection is the natural gate:** send on RNNoise's probability, or turn
     AEC3's comfort noise off. Done when a silent caller in a call with somebody speaking sends no more
     than DTX's updates, with a far end that is speech and not a tone.
+
+  **As built** (planned by reading the entry against the code and by measuring RNNoise on the signals the
+  tests use, with the author's choices: Ctrl+Shift+Space everywhere, and the app id
+  `io.github.alexnex31.Norite`):
+  - **The gate is the worker's** (`session/gate.go`). It opens at a voice probability of 0.5 and closes
+    below 0.3, holds 300 ms after the last voiced frame, and sends the 40 ms before an opening.
+    - A shut gate encodes nothing, and the far end hears the gap as DTX.
+    - A chain's first four frames are RNNoise warming up, and neither open it nor keep it open.
+    - With no chain, not yet taken up or dropped, every frame counts as a voice, as M29 sent them.
+    - By push-to-talk the key decides, with a 200 ms tail. Presses are counted, so a tap no frame saw still
+      opens the gate, and the key never lifts a mute.
+  - **M31's carried done-when holds once AEC3 has converged.** In the pass, a silent caller whose speakers
+    were looped into its microphone sent 127 packets in the first 2.6 s of the other's speech, then none for
+    27 s, DTX included.
+  - **The mode** is `voice.input_mode` and `voice.push_to_talk_key`, carried in the join's body, and
+    `norite voice mode voice|push-to-talk [--key KEY]` changes the running call through
+    `/@daemon/voice/mode`, the sixth body under the prefix. The worker hears it as `INPUT` (op 16).
+  - **The key is the daemon's** (`daemon/internal/hotkey`), held only while a call by push-to-talk lasts.
+    What became of it is call state (`input`), never a failed call, and a change of mode answers once the
+    key's fate is known, 2 s at most.
+    - Windows: `RegisterHotKey`, with `GetAsyncKeyState` polled while it is down, since Windows does not say
+      when it goes up.
+    - Linux: the `GlobalShortcuts` portal through the host registry (xdg-desktop-portal 1.19.4), taking a
+      shortcut already bound from `ListShortcuts`; otherwise a root-window grab on a local X server, never
+      XWayland.
+    - macOS: Carbon through purego, on an `NSApplication` loop the daemon's main thread runs from the first
+      key wanted.
+    - The `.desktop` file is written by `install.sh` and installed by the deb, rpm, pacman and AUR packages.
+  - **The terminal's own `C-space`** is settled in KEYMAP and M44's entry, and built there.
+  - **M34's `/code-review`, run on its merge at this branch's start**, found seven things, all fixed here:
+    a self mute lost in a dying connection, op 4 sent on the call's loop, a local mute judged by the slot
+    rather than the samples, a striped row lock held across a wait, `processing` waiting where no report
+    could come, its comment, and WASAPI's "moved" flag that never cleared.
+  - **The manual pass ran in unprivileged VMs, one at a time, against a real `norite-server`, and on the
+    author's Mac.**
+    - **Windows 11:** the key held over Notepad, which received nothing; refused to another program in a
+      call and given back at the leave.
+    - **KDE Plasma 6.3, Wayland and X11:** the portal from a daemon started before the login, and the grab
+      with NumLock and Caps Lock.
+    - **The gate, Linux:** three accounts, measured at the far end, each word's onset within ±10 ms of the
+      source.
+    - **macOS 27, arm64, from the LaunchAgent:** the key registered with nothing asked but the microphone,
+      read while held over TextEdit, which received nothing, and released at the leave; keys macOS cannot
+      take refused; `restart` and `stop` exiting 0.
+    - **It found six things, all fixed and proved by removal:**
+      - a key another program let go after the join was not taken up when asked for again;
+      - `voice mode` with no call said nothing of the mode;
+      - a portal that could not start read as one that did not know Norite;
+      - Plasma 6.3 opened System Settings at every join;
+      - `voice mode --key` answered "being registered" for a key already refused;
+      - **the LaunchAgent was `Background` since M3, and its worker runs at its priority** (4, against 31).
+        A busy Mac held the DSP past its 1 s watchdog and ended a call. Twelve 20 s calls on the same
+        programs, by voice and by push-to-talk, idle and with every core busy, skipped 21 frames and lost a
+        call under `Background`, skipped 24 under `Standard`, and none under `Interactive`, which it now is.
+    - **Not walked:**
+      - GNOME's and Hyprland's portals;
+      - a TUI and a GUI attached at once, which do not exist yet: a test holds that asking for the key the
+        call has binds nothing;
+      - a gateway resume during a self mute, and a default device changing back within one poll, by hand;
+      - the plist as `norite daemon install` now writes it: the Mac ran the same value set by hand.
+  - **Left for the release that carries voice:** an agent installed before this keeps `Background` until
+    `norite daemon install` runs again, since nothing rewrites the plist. Its notes must say so.
 - **M36 — Voice auto-rejoin**: the "last active voice channel" breadcrumb (the one exception to in-memory
   daemon state), the daemon respawns the worker and rejoins on crash/restart. The respawn is
   `daemon/internal/voiceworker`'s join (M28), and a worker that crashed is already reported as the call's
@@ -2823,6 +2885,12 @@ of this section.
   same three values `GET /api/v1/meta` serves — plus the embedded `THIRD-PARTY-NOTICES.txt` the CLI prints
   as `norite licenses`. It lands here rather than in its own milestone because it is a help surface and
   this is the milestone that builds them; M20a already carries the plain-text form (ADR 0032, AGPL §5(d)).
+
+  **`C-space`, push-to-talk in the terminal, settled at M35** (KEYMAP): held where the terminal reports key
+  releases (the kitty keyboard protocol's event types), toggled where it does not, the status bar saying
+  which. It reaches the daemon as the OS-wide key's state does, through a request beside `/@daemon/voice/mode`
+  that this milestone adds, and sets nothing the key's gate does not (M35's worker gate). The OS-wide key
+  stays the primary path.
 
   Done when: the documented default set is wired, a remap in `[tui.keys]` takes effect without a rebuild,
   `C-h` lists what is actually bound rather than a hardcoded table, and `C-c ?` shows a revision that

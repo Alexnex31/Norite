@@ -144,6 +144,24 @@ func TestLaunchdThrottlesItsRestartLoop(t *testing.T) {
 	}
 }
 
+// The voice worker is the agent's child and runs at its priority. Under Background a busy Mac held the audio
+// processing past its watchdog and ended the call, and under Standard it fell behind the microphone; only
+// Interactive lost no frame (M35's Mac pass).
+func TestLaunchdRunsAtThePriorityACallNeeds(t *testing.T) {
+	l, _, plistPath := newLaunchd(t)
+	if err := l.Install(t.Context(), "/opt/norite/norite-daemon"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	body, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("reading the plist: %v", err)
+	}
+	if !strings.Contains(string(body), "<key>ProcessType</key>\n\t<string>Interactive</string>") {
+		t.Errorf("the agent is not Interactive, so a call's audio is scheduled behind everything else:\n%s", body)
+	}
+}
+
 // `launchctl bootstrap` loads the agent and RunAtLoad runs it, so install *does* start the daemon on macOS
 // — while the command printed systemd's "to start it now" advice on every platform.
 func TestStartsOnInstallMatchesEachPlatformsBehavior(t *testing.T) {

@@ -234,9 +234,8 @@ func (l *loop) wait() bool {
 		}
 		if now := time.Now(); now.After(l.next) {
 			l.next = now.Add(followEvery)
-			if id, ok := l.at.defaultID(); ok && l.at.id != "" && id != l.at.id {
-				l.moved.Store(true)
-			}
+			id, ok := l.at.defaultID()
+			noteDefault(l.moved, l.at.id, id, ok)
 		}
 		r, _, _ := procWaitForSingle.Call(l.event, 100)
 		if uint32(r) != waitTimeout {

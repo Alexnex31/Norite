@@ -112,7 +112,8 @@ func TestTheVoiceRequestsRefuseWhatTheyCannotDo(t *testing.T) {
 		{"a local mute with a leading zero", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("07"), ipc.RelayBadRequest, "user id"},
 		{"more streams than slots", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/4", ipc.RelayBadRequest, "1 to 3"},
 		{"streams that are no number", voiceFixture(nil, true), http.MethodPost, ipc.PathVoice + "/streams/-1", ipc.RelayBadRequest, "1 to 3"},
-		{"a processing naming nothing", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceProcessing, ipc.RelayBadRequest, "must name"},
+		{"a processing naming nothing", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceProcessing, ipc.RelayBadRequest, "must be an object"},
+		{"a mode naming nothing", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceMode, ipc.RelayBadRequest, "must be an object"},
 		{"a mute while signed out", voiceFixture(nil, false), http.MethodPost, ipc.PathVoiceMute, ipc.RelayConflict, "norite login"},
 		{"a local mute of oneself", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceLocalMute("42"), ipc.RelayConflict, "yourself"},
 		{"a release, which cannot join yet", voiceFixture(nil, true), http.MethodPost, ipc.PathVoiceJoin("1"), ipc.RelayConflict, "arrive in a later version"},
@@ -149,10 +150,13 @@ func (*countingSignaler) Join(context.Context, string, string, string, ipc.Voice
 	return voiceworker.Answer{}, errRefusing
 }
 
-// The join's body is the client's settings (M30): no body is every switch on, and anything else names all
-// three and nothing more, or the join is refused before it begins. A switch left out would read as off.
+// The join's body is the client's settings (M30, M35): no body is every switch on and input by voice, and
+// anything else names all five and nothing more, or the join is refused before it begins. A switch left out
+// would read as off.
 func TestAJoinsSettingsAreDecodedStrictly(t *testing.T) {
-	for _, body := range []string{"", "null", `{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}`} {
+	const input = `,"input_mode":"voice","push_to_talk_key":"ctrl+shift+space"`
+	for _, body := range []string{"", "null", `{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true` + input + `}`,
+		`{"input_mode":"push_to_talk","push_to_talk_key":"ctrl+shift+f","echo_cancellation":true,"noise_suppression":false,"auto_gain":true}`} {
 		if body != "" && body != "null" {
 			matchesDefinition(t, "VoiceJoin", []byte(body))
 		}
@@ -172,7 +176,15 @@ func TestAJoinsSettingsAreDecodedStrictly(t *testing.T) {
 	}
 	for _, body := range []string{
 		`{"echo_cancellation":true,"noise_suppression":false}`,
-		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"mute":true}`,
+		// M30's three alone, which a join must not take for input by voice.
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"mute":true` + input + `}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"input_mode":"whisper","push_to_talk_key":"ctrl+f"}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"input_mode":"voice","push_to_talk_key":"f"}`,
+		// A key the daemon would write another way, which a client sends written that way.
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"input_mode":"voice","push_to_talk_key":"Shift+Ctrl+F"}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true,"input_mode":"voice","push_to_talk_key":true}`,
+		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":"on","input_mode":"voice","push_to_talk_key":"ctrl+f"}`,
 		`{"echo_cancellation":"on","noise_suppression":false,"auto_gain":true}`,
 		`{"echo_cancellation":true,"noise_suppression":false,"auto_gain":true} {}`,
 		`[]`, `true`,
@@ -203,7 +215,8 @@ func TestAJoinsSettingsAreTheCalls(t *testing.T) {
 	go func() {
 		defer close(done)
 		_ = l.Do(ctx, ipc.Request{Method: http.MethodPost, Path: ipc.PathVoiceJoin("1"),
-			Body: json.RawMessage(`{"echo_cancellation":false,"noise_suppression":true,"auto_gain":false}`)})
+			Body: json.RawMessage(`{"echo_cancellation":false,"noise_suppression":true,"auto_gain":false,` +
+				`"input_mode":"push_to_talk","push_to_talk_key":"ctrl+alt+f9"}`)})
 	}()
 	var st ipc.VoiceStatus
 	require.Eventually(t, func() bool {
@@ -212,6 +225,8 @@ func TestAJoinsSettingsAreTheCalls(t *testing.T) {
 		return json.Unmarshal(resp.Body, &st) == nil && st.State == ipc.VoiceJoining
 	}, 5*time.Second, 5*time.Millisecond)
 	require.Equal(t, &ipc.VoiceJoin{NoiseSuppression: true}, st.Processing)
+	require.Equal(t, ipc.VoiceInputPushToTalk, st.Input.Mode)
+	require.Equal(t, "ctrl+alt+f9", st.Input.Key)
 	l.voice.Leave()
 	cancel()
 	<-done
@@ -219,15 +234,21 @@ func TestAJoinsSettingsAreTheCalls(t *testing.T) {
 	matchesDefinition(t, "VoiceStatus", resp.Body)
 	require.NoError(t, json.Unmarshal(resp.Body, &st))
 	require.Nil(t, st.Processing)
+	require.Nil(t, st.Input)
 }
 
-// What each body decodes to: no body is every switch on, and the rest is what it says.
+// What each body decodes to: no body is every switch on and input by voice with the default key, and the
+// rest is what it says, the key written its one way.
 func TestAJoinsSettingsAreWhatTheBodySays(t *testing.T) {
-	for body, want := range map[string]ipc.VoiceJoin{
-		"":     {EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
-		"null": {EchoCancellation: true, NoiseSuppression: true, AutoGain: true},
-		` {"echo_cancellation":false,"noise_suppression":true,"auto_gain":false} `: {NoiseSuppression: true},
-		`{"echo_cancellation":false,"noise_suppression":false,"auto_gain":false}`:  {},
+	byVoice := ipc.DefaultVoiceInput()
+	allOn := ipc.VoiceJoin{EchoCancellation: true, NoiseSuppression: true, AutoGain: true}
+	for body, want := range map[string]ipc.VoiceJoinRequest{
+		"":     {VoiceJoin: allOn, VoiceInput: byVoice},
+		"null": {VoiceJoin: allOn, VoiceInput: byVoice},
+		` {"echo_cancellation":false,"noise_suppression":true,"auto_gain":false,"input_mode":"voice","push_to_talk_key":"ctrl+shift+space"} `: {
+			VoiceJoin: ipc.VoiceJoin{NoiseSuppression: true}, VoiceInput: byVoice},
+		`{"echo_cancellation":false,"noise_suppression":false,"auto_gain":false,"input_mode":"push_to_talk","push_to_talk_key":"alt+super+f12"}`: {
+			VoiceInput: ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "alt+super+f12"}},
 	} {
 		got, err := ipc.DecodeVoiceJoin(json.RawMessage(body))
 		require.NoError(t, err, body)

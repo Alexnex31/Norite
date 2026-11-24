@@ -261,6 +261,33 @@ id is chosen at M35.
 - **M35** builds §2–§5 and drops `golang.design/x/hotkey`. Its done-when gains the portal path on at
   least one Wayland desktop and the X11 path, and on macOS the Carbon path from the installed LaunchAgent,
   with no permission granted.
+  - **As built (M35):**
+    - The key is `daemon/internal/hotkey`'s, registered as a call by push-to-talk starts and released before
+      a leave returns; what became of it is call state (`input` in the status), never a failed call. The
+      worker hears only whether it is down (op 16), and a press released before any frame saw it still
+      opens the gate for its 200 ms tail.
+    - The app id is `io.github.alexnex31.Norite` (the author's choice), named through the host registry,
+      which is **xdg-desktop-portal 1.19.4** (2025-02-15): an older portal cannot be told an unsandboxed
+      program's id, and the key is unavailable there, saying why, unless the session is X's. The `.desktop`
+      file is installed by `install.sh`, the deb, rpm and pacman packages and both AUR packages; the
+      Homebrew cask on Linux does not, and the status names the missing file.
+    - Where the session is comes from the user manager's environment (`org.freedesktop.systemd1.Manager`),
+      over the daemon's own, which a daemon started before the login never had.
+    - A shortcut the desktop already binds to a key is taken from `ListShortcuts`, and `BindShortcuts` is
+      asked only when none is listed. Plasma 6.3's `BindShortcuts` opens System Settings at every call, which
+      the manual pass saw at every join; its `CreateSession` loads what the component holds. Walked on
+      Plasma 6.3 alone. A portal the bus could not start names the bus's error. Only the registry's own
+      failure is a missing `.desktop` file.
+    - Push-to-talk asked again during a call tries a key it could not have, which another program may have
+      let go since.
+    - The X grab covers CapsLock and NumLock, uses the session's own Xauthority cookie, and refuses a
+      display not on this machine. Tested under an Xvfb of the test's own: `-displayfd` alone picked `:0`
+      beside the author's XWayland, which listens on the path and not the abstract socket.
+    - macOS's application loop starts only at the first key wanted, and only inside a WindowServer session;
+      the daemon's `main` gives its main thread to it from the start (`hotkey.ServeMainThread`). Walked from
+      the LaunchAgent on macOS 27, with nothing asked but the microphone.
+    - The LaunchAgent is `Interactive`, no longer M3's `Background`: the worker is its child and runs at its
+      priority, and a busy Mac held the audio processing past its watchdog, which ended a call.
 - **The terminal cannot do push-to-talk by itself.** KEYMAP's `C-space (hold)` assumes a release event,
   and a terminal reports none without the kitty keyboard protocol's event types. `C-space` is also NUL in
   most terminals, and the input-source switch on macOS. In-terminal push-to-talk is M35's and M44's to

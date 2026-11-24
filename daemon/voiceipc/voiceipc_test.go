@@ -77,7 +77,10 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 		{"the DSP starting", OpDSP, DSP{State: DSPStarting}, true},
 		{"the DSP running", OpDSP, DSP{State: DSPRunning, EchoCancellation: true, AutoGain: true}, true},
 		{"the DSP failed", OpDSP, DSP{State: DSPFailed, Reason: strings.Repeat("r", MaxReason)}, true},
-		{"join", OpJoin, Join{Loopback: true}, false},
+		{"join", OpJoin, Join{Loopback: true, Input: Input{Mode: InputVoice}}, false},
+		{"join by push-to-talk", OpJoin, Join{Input: Input{Mode: InputPushToTalk}}, false},
+		{"input", OpInput, Input{Mode: InputPushToTalk, Held: true}, false},
+		{"input by voice", OpInput, Input{Mode: InputVoice}, false},
 		{"subscribe", OpSubscribe, Subscribe{Drop: []string{"42"}, Cap: new(2)}, false},
 		{"subscribe to everybody", OpSubscribe, Subscribe{Drop: []string{}}, false},
 		{"processing", OpProcessing, Processing{Processing: ipc.VoiceJoin{NoiseSuppression: true}}, false},
@@ -166,6 +169,16 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 		require.NoError(t, err)
 		require.Error(t, daemon.Validate(doc), name)
 	}
+	for name, in := range map[string]Input{
+		"no mode":                         {},
+		"a mode nobody declared":          {Mode: "whisper"},
+		"a key held while input by voice": {Mode: InputVoice, Held: true},
+	} {
+		require.Error(t, in.Check(), name)
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(frame(t, OpInput, in)))
+		require.NoError(t, err)
+		require.Error(t, daemon.Validate(doc), name)
+	}
 	for name, a := range map[string]Answer{"too many servers": many, "a URL past its bound": long,
 		"a credential past its bound": secret, "no answer": {ICEServers: []ICEServer{}}} {
 		require.Error(t, a.Check(), name)
@@ -235,7 +248,7 @@ func TestTheOpsAreTheContracts(t *testing.T) {
 	want := map[int]string{int(OpHello): "Hello", int(OpOffer): "Offer", int(OpState): "State",
 		int(OpDevices): "Devices", int(OpJoin): "Join", int(OpAnswer): "Answer", int(OpLeave): "Leave",
 		int(OpRights): "RightsFrame", int(OpSpeaking): "SpeakingFrame", int(OpDSP): "DSPFrame",
-		int(OpSubscribe): "SubscribeFrame", int(OpProcessing): "ProcessingFrame"}
+		int(OpSubscribe): "SubscribeFrame", int(OpProcessing): "ProcessingFrame", int(OpInput): "InputFrame"}
 	require.Equal(t, want, got)
 }
 

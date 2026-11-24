@@ -68,6 +68,10 @@ type Step struct {
 	// Reset is set on the first step after the slot changed sender: the decoder holds the previous one's
 	// state, and must forget it before decoding anything. A slot's first sender asks for none.
 	Reset bool
+	// Sender is whose step it is, read under the lock the step is taken under, and HasSender false before
+	// any packet: what the step decodes to is theirs, whoever fills the slot by the time it plays.
+	Sender    uint32
+	HasSender bool
 }
 
 type entry struct {
@@ -276,6 +280,13 @@ func (b *Buffer) buffered() int {
 func (b *Buffer) Next() Step {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	st := b.step()
+	st.Sender, st.HasSender = b.sender, b.haveSender
+	return st
+}
+
+// step is Next under the buffer's lock.
+func (b *Buffer) step() Step {
 	reset := b.reset
 	b.reset = false
 	b.pending = true

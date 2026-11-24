@@ -61,7 +61,8 @@ func TestEntriesListEveryKeyAndAnyOverride(t *testing.T) {
 		"shared.clock=default", "tui.colors.accent=default", "tui.colors.warn=default",
 		"tui.colors.danger=default", "tui.colors.dim=default", "tui.colors.bright=default",
 		"shared.voice.echo_cancellation=default", "shared.voice.noise_suppression=default",
-		"shared.voice.auto_gain=default", "shared.voice.max_streams=default",
+		"shared.voice.auto_gain=default", "shared.voice.max_streams=default", "shared.voice.input_mode=default",
+		"shared.voice.push_to_talk_key=default",
 		"tui.theme=unset", "tui.keys=unset", "tui.layout=unset", "tui.clock=file",
 	}, names)
 }

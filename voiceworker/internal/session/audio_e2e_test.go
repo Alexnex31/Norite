@@ -367,8 +367,8 @@ func mediaOf(s *Session) *media {
 	return s.media
 }
 
-// gate is a Source that plays a tone only between two frame numbers.
-func gate(from, to int, src func(int, []int16)) func(int, []int16) {
+// between is a Source that plays a tone only between two frame numbers.
+func between(from, to int, src func(int, []int16)) func(int, []int16) {
 	return func(i int, f []int16) {
 		if i < from || i >= to {
 			clear(f)
@@ -388,14 +388,16 @@ func TestASlotThatChangesSenderResetsItsDecoder(t *testing.T) {
 	h := startHarness(t)
 	listener := &audiotest.Device{}
 	sl := h.join(t, "1", "9", listener, Options{})
-	for i, hz := range []float64{300, 500, 700} {
+	// Tones RNNoise takes for a voice, by a margin, so the gate lets them through (M35's step 0: 700 Hz and
+	// 1100 Hz, which this test used before, read as a voice a quarter of the time and never).
+	for i, hz := range []float64{300, 500, 600} {
 		end := 1 << 30
 		if i == 2 {
 			end = 150 // three seconds, then silence
 		}
-		h.join(t, "1", fmt.Sprint(i+1), &audiotest.Device{Source: gate(0, end, audiotest.Tone(hz, 6000))}, Options{})
+		h.join(t, "1", fmt.Sprint(i+1), &audiotest.Device{Source: between(0, end, audiotest.Tone(hz, 6000))}, Options{})
 	}
-	h.join(t, "1", "4", &audiotest.Device{Source: gate(200, 1<<30, audiotest.Tone(1100, 6000))}, Options{})
+	h.join(t, "1", "4", &audiotest.Device{Source: between(200, 1<<30, audiotest.Tone(400, 6000))}, Options{})
 	time.Sleep(8 * time.Second)
 	m := mediaOf(sl)
 	m.mu.Lock()
@@ -410,7 +412,7 @@ func TestASlotThatChangesSenderResetsItsDecoder(t *testing.T) {
 		t.Errorf("the slots carried %d senders and reset %d times, want 4 and 1", senders, resets)
 	}
 	heard, _ := listener.Heard()
-	if p := tonePower(heard[len(heard)-2*audio.SampleRate:], 1100); p < 0.15 {
+	if p := tonePower(heard[len(heard)-2*audio.SampleRate:], 400); p < 0.15 {
 		t.Errorf("the newcomer is %.2f of the last two seconds", p)
 	}
 }
@@ -452,7 +454,9 @@ func TestACallRelayedAndLossyIsStillHeard(t *testing.T) {
 	}
 }
 
-// clicks is a microphone that is quiet but for a click every period: a 5 ms burst, loud. It notes when
+// clicks is a microphone that is quiet but for a click every period: a 10 ms burst at 500 Hz, loud, which
+// RNNoise takes for a voice by a margin (0.92 to 1, where M29's 5 ms at 1 kHz read 0.50, M35's step 0), so
+// each click opens the gate as a word's onset does, its lead-in and all. It notes when
 // each click was captured, which is when its frame left the device. Quiet is not digital silence: a real
 // microphone, and PipeWire's dither on a virtual one, leave a sample or two of noise, which keeps Opus's
 // DTX sending a comfort-noise update every 400 ms or so. Digital silence sends none, and hid a jitter
@@ -475,8 +479,8 @@ func (c *clicks) source(i int, f []int16) {
 	if i%c.period != c.period/2 {
 		return
 	}
-	for k := range audio.SampleRate / 200 {
-		f[c.at+k] = int16(20000 * math.Sin(2*math.Pi*1000*float64(k)/audio.SampleRate))
+	for k := range min(audio.SampleRate/100, len(f)-c.at) {
+		f[c.at+k] = int16(20000 * math.Sin(2*math.Pi*500*float64(k)/audio.SampleRate))
 	}
 	c.mu.Lock()
 	c.sent = append(c.sent, time.Now().Add(-time.Duration(audio.FrameSamples-c.at)*time.Second/audio.SampleRate))

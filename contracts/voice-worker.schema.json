@@ -40,7 +40,7 @@
       ]
     },
     "DaemonFrame": {
-      "description": "What the daemon sends: Join once after Hello, Answer once after Offer, Rights whenever what the account may do changes after that, Subscribe and Processing whenever the person changes whom they hear or how their microphone is processed (M34), Leave when the call should end.",
+      "description": "What the daemon sends: Join once after Hello, Answer once after Offer, Rights whenever what the account may do changes after that, Subscribe and Processing whenever the person changes whom they hear or how their microphone is processed (M34), Input whenever the input mode or the push-to-talk key changes (M35), Leave when the call should end.",
       "oneOf": [
         {
           "$ref": "#/$defs/Join"
@@ -56,6 +56,9 @@
         },
         {
           "$ref": "#/$defs/ProcessingFrame"
+        },
+        {
+          "$ref": "#/$defs/InputFrame"
         },
         {
           "$ref": "#/$defs/Leave"
@@ -323,7 +326,8 @@
           "type": "object",
           "required": [
             "loopback",
-            "processing"
+            "processing",
+            "input"
           ],
           "additionalProperties": false,
           "properties": {
@@ -333,6 +337,9 @@
             },
             "processing": {
               "$ref": "#/$defs/Processing"
+            },
+            "input": {
+              "$ref": "#/$defs/Input"
             }
           }
         },
@@ -758,6 +765,66 @@
       "properties": {
         "processing": {
           "$ref": "#/$defs/Processing"
+        }
+      }
+    },
+    "InputFrame": {
+      "type": "object",
+      "description": "op 16 (M35): how the microphone is let through, changed during the call: the mode, or the push-to-talk key going down or up. Sent after the answer, any number of times.",
+      "required": [
+        "op",
+        "d",
+        "s",
+        "t"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": 16
+        },
+        "d": {
+          "$ref": "#/$defs/Input"
+        },
+        "s": {
+          "type": "null"
+        },
+        "t": {
+          "type": "null"
+        }
+      }
+    },
+    "Input": {
+      "type": "object",
+      "description": "How the microphone is let through (M35): by the voice it carries, or by push-to-talk, held while the daemon's key is down. The key itself never crosses the pipe.",
+      "required": [
+        "mode",
+        "held"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "voice",
+            "push_to_talk"
+          ]
+        },
+        "held": {
+          "type": "boolean",
+          "description": "Whether the push-to-talk key is down; always false by voice."
+        }
+      },
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "voice"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "held": {
+            "const": false
+          }
         }
       }
     }
