@@ -113,13 +113,20 @@ func PathVoiceJoin(channel string) string { return pathVoiceJoin + channel }
 // digits, as every id the CLI puts in a path is.
 func VoiceJoinChannel(path string) (string, bool) {
 	ch, ok := strings.CutPrefix(path, pathVoiceJoin)
-	if !ok || ch == "" || len(ch) > 20 {
-		return "", false
-	}
-	if _, err := strconv.ParseUint(ch, 10, 64); err != nil {
+	if !ok || !IsChannelID(ch) {
 		return "", false
 	}
 	return ch, true
+}
+
+// IsChannelID is whether s is a channel id as a join's path carries one: digits, at most twenty, an unsigned
+// 64-bit number. The breadcrumb's channel is held to it as the path is (M36).
+func IsChannelID(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
 }
 
 // VoiceJoin is which of the DSP's components process the microphone (M30), as the client's config.toml
@@ -285,9 +292,9 @@ func (in *VoiceInput) fields() map[string]field {
 	return map[string]field{"input_mode": {s: &in.Mode}, "push_to_talk_key": {s: &in.Key}}
 }
 
-// check refuses a mode that is not one of the words, and a key not written the one way CanonicalKey writes
+// Check refuses a mode that is not one of the words, and a key not written the one way CanonicalKey writes
 // it: a client writes it so before sending, and a key compared as text is the same key only spelled once.
-func (in *VoiceInput) check() error {
+func (in *VoiceInput) Check() error {
 	if in.Mode != VoiceInputVoice && in.Mode != VoiceInputPushToTalk {
 		return fmt.Errorf("the input mode is %s or %s", VoiceInputVoice, VoiceInputPushToTalk)
 	}
@@ -317,7 +324,7 @@ func DecodeVoiceJoin(body json.RawMessage) (VoiceJoinRequest, error) {
 			"noise_suppression and auto_gain, each true or false, and input_mode and push_to_talk_key, each " +
 			"once, and nothing else")
 	}
-	if err := out.check(); err != nil {
+	if err := out.Check(); err != nil {
 		return VoiceJoinRequest{}, err
 	}
 	return out, nil
@@ -341,7 +348,7 @@ func DecodeVoiceMode(body json.RawMessage) (VoiceInput, error) {
 		return VoiceInput{}, errors.New("the input must be an object naming input_mode and push_to_talk_key, " +
 			"each once, and nothing else")
 	}
-	if err := out.check(); err != nil {
+	if err := out.Check(); err != nil {
 		return VoiceInput{}, err
 	}
 	return out, nil
