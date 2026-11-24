@@ -59,6 +59,10 @@ func (fb *fakeBinding) live() bool {
 // inputVoice is a Voice whose worker says each input it is sent into the log, and whose keys are binder's.
 func inputVoice(t *testing.T, binder hotkey.Binder) (*Voice, *logBuffer) {
 	t.Helper()
+	// A fake binding says nothing until its test makes it, and a change of mode waits this long to hear.
+	was := keyWithin
+	t.Cleanup(func() { keyWithin = was })
+	keyWithin = 50 * time.Millisecond
 	logged := &logBuffer{}
 	o := standinOptions(t, "inputs", nil)
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: &selfServer{}, Env: o.Env,
@@ -226,6 +230,66 @@ func TestPushToTalkAskedAgainTriesAKeyItCouldNotHave(t *testing.T) {
 	require.Len(t, binder.all(), 2, "a key the call has was bound again")
 	require.True(t, binder.all()[1].live())
 	require.Equal(t, ipc.VoiceHotkeyRegistered, st.Input.Hotkey)
+}
+
+// reportingBinder is a binder whose every key says state from its own goroutine a moment after it is bound,
+// as a real one does.
+type reportingBinder struct{ state, why string }
+
+func (b reportingBinder) Bind(_ string, ev hotkey.Events) func() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(30 * time.Millisecond)
+		ev.Status(hotkey.Status{State: b.state, Reason: b.why})
+	}()
+	return func() { <-done }
+}
+
+// A change of mode answers with what became of the key, which an OS says in a moment, and a person reading
+// it is told of a refusal there (M35's Mac pass: `--key alt+p` read as being registered, with exit 0). One
+// that says nothing is answered after keyWithin as still being registered.
+func TestAModeChangeAnswersWithWhatBecameOfTheKey(t *testing.T) {
+	fast(t)
+	for _, c := range []struct{ state, why string }{
+		{ipc.VoiceHotkeyUnavailable, "on macOS the key needs ctrl or super, Control or Command"},
+		{ipc.VoiceHotkeyWaiting, ""},
+		{ipc.VoiceHotkeyRegistered, ""},
+	} {
+		v, _ := inputVoice(t, reportingBinder{c.state, c.why})
+		keyWithin = 10 * time.Second
+		_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+		require.NoError(t, err)
+
+		answer := make(chan ipc.VoiceStatus, 1)
+		start := time.Now()
+		go func() { answer <- v.Input(ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "alt+p"}) }()
+		select {
+		case st := <-answer:
+			require.Less(t, time.Since(start), keyWithin/2, c.state)
+			require.Equal(t, &ipc.VoiceInputStatus{Mode: ipc.VoiceInputPushToTalk, Key: "alt+p", Hotkey: c.state,
+				Reason: c.why}, st.Input)
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s: the change of mode never answered", c.state)
+		}
+		v.Leave()
+	}
+
+	binder := &fakeBinder{}
+	v, _ := inputVoice(t, binder)
+	keyWithin = 300 * time.Millisecond
+	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	answer := make(chan ipc.VoiceStatus, 1)
+	start := time.Now()
+	go func() { answer <- v.Input(ipc.VoiceInput{Mode: ipc.VoiceInputPushToTalk, Key: "alt+p"}) }()
+	select {
+	case st := <-answer:
+		require.GreaterOrEqual(t, time.Since(start), keyWithin, "it did not wait to hear of the key")
+		require.Equal(t, ipc.VoiceHotkeyRegistering, st.Input.Hotkey)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a key that says nothing held the change of mode past its bound")
+	}
 }
 
 // With no key to offer, a call by push-to-talk goes on, and says why nobody hears it.

@@ -733,7 +733,7 @@
     },
     "VoiceMode": {
       "type": "object",
-      "description": "The body of POST /@daemon/voice/mode (M35): how the call's microphone is let through, both named, nothing else. Without a call it changes nothing; the client writes config.toml for the next join. Push-to-talk's key is registered by the daemon, OS-wide, while the call lasts, and released at its end (ADR 0034 §3).",
+      "description": "The body of POST /@daemon/voice/mode (M35): how the call's microphone is let through, both named, nothing else. Without a call it changes nothing; the client writes config.toml for the next join. Push-to-talk's key is registered by the daemon, OS-wide, while the call lasts, and released at its end (ADR 0034 §3). In a call, the answer comes once the daemon knows what became of the key, or after 2 s, when input.hotkey still says registering.",
       "required": ["input_mode", "push_to_talk_key"],
       "additionalProperties": false,
       "properties": {

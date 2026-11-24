@@ -59,6 +59,9 @@ var (
 	// processingWithin bounds how long a change of processing waits for the worker to say it runs (M34's
 	// manual pass): the chain is rebuilt in a moment, and past this the answer says what runs still.
 	processingWithin = 2 * time.Second
+	// keyWithin bounds how long a change of mode waits to hear what became of the key (M35's Mac pass): an OS
+	// answers in a moment, and past this the answer says it is still being registered.
+	keyWithin = 2 * time.Second
 	// selfRetryEvery spaces the sending again of an update the voice server did not take (M34's
 	// /code-review): a gateway connection resuming is back within seconds.
 	selfRetryEvery = time.Second
@@ -181,6 +184,9 @@ type call struct {
 	// bindAgain is a key asked for again after it could not be had, under Voice.mu: rebind binds it anew
 	// though it is the key bound.
 	bindAgain bool
+	// keyChanged is closed, and replaced, each time a binding says what became of the key, under Voice.mu:
+	// what a change of mode waits on.
+	keyChanged chan struct{}
 }
 
 // NewVoice builds the daemon's voice calls. Nothing runs until a join.
@@ -390,8 +396,11 @@ func runs(d *ipc.VoiceDSP, p ipc.VoiceJoin) bool {
 
 // Input changes how the call's microphone is let through (M35): by voice, or by push-to-talk with key.
 // Without a call it changes nothing: the next join brings its own, from the client's config.toml, which the
-// client writes. Push-to-talk's key is registered from here and never waited for: the status says what
-// became of it.
+// client writes.
+//
+// It answers once the key's binding says what became of it, or after keyWithin, so that the answer describes
+// the key: answered at once, a key the OS refused the same moment read as one being registered, with exit 0,
+// and only a later status said otherwise (M35's Mac pass).
 func (v *Voice) Input(in ipc.VoiceInput) ipc.VoiceStatus {
 	v.mu.Lock()
 	c := v.current
@@ -417,7 +426,24 @@ func (v *Voice) Input(in ipc.VoiceInput) ipc.VoiceStatus {
 	v.publish()
 	v.rebind(c)
 	v.push(c)
-	return v.Status()
+	timeout := time.NewTimer(keyWithin)
+	defer timeout.Stop()
+	for {
+		v.mu.Lock()
+		if st := v.status.Input; v.current != c || st == nil || st.Hotkey != ipc.VoiceHotkeyRegistering {
+			v.mu.Unlock()
+			return v.Status()
+		}
+		changed := c.keyChanged
+		v.mu.Unlock()
+		select {
+		case <-changed:
+		case <-c.finished:
+			return v.Status()
+		case <-timeout.C:
+			return v.Status()
+		}
+	}
 }
 
 // rebind makes c's key binding what c asks for now: its key while it is the call and by push-to-talk,
@@ -480,6 +506,8 @@ func (v *Voice) keyEvents(c *call, gen int) hotkey.Events {
 			in := v.status.Input
 			// The OS's words, and on the portal the desktop's, are a stranger's (rule 19).
 			in.Hotkey, in.Reason, in.Trigger = st.State, reason(st.Reason), reason(st.Trigger)
+			close(c.keyChanged)
+			c.keyChanged = make(chan struct{})
 			v.mu.Unlock()
 			v.publish()
 		},
@@ -566,8 +594,8 @@ func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinR
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{}),
-		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}), input: req.VoiceInput,
-		selfKick: make(chan struct{}, 1)}
+		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}),
+		keyChanged: make(chan struct{}), input: req.VoiceInput, selfKick: make(chan struct{}, 1)}
 	v.last = c
 	result := make(chan error, 1)
 	v.mu.Lock()
