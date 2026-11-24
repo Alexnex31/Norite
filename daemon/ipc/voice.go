@@ -412,7 +412,33 @@ type VoiceStatus struct {
 	// Input is how the call's microphone is let through (M35), while there is a call; nil when there is
 	// none.
 	Input *VoiceInputStatus `json:"input"`
+	// Rejoin is the daemon joining a call again by itself (M36), after the call was lost without anybody
+	// leaving it: from the moment it was lost, through each attempt, and once rejoined or given up, until the
+	// person next joins or leaves. State says how far it got: VoiceJoining while it waits or tries, Reason
+	// saying why the call was lost, VoiceInCall once rejoined, VoiceIdle once given up, Reason saying why.
+	// Nil for a call the person joined.
+	Rejoin *VoiceRejoin `json:"rejoin"`
 }
+
+// VoiceRejoin is why a call is being joined again, and how many attempts have been made, at most
+// MaxVoiceRejoins: 0 while the first waits for the sign-in or the instance.
+type VoiceRejoin struct {
+	Cause   string `json:"cause"`
+	Attempt int    `json:"attempt"`
+}
+
+// Why a call is joined again (M36): the daemon went away mid-call and started again, its voice worker
+// crashed, or the instance no longer held the session the call was signaled on.
+const (
+	VoiceRejoinDaemonRestarted = "daemon_restarted"
+	VoiceRejoinWorkerCrashed   = "worker_crashed"
+	VoiceRejoinSessionLost     = "session_lost"
+)
+
+// MaxVoiceRejoins is how many times a lost call is joined again before the daemon gives up: a rejoin that
+// takes the daemon or its worker down with it is not tried for ever. The count starts again once a call
+// has stayed up for a while.
+const MaxVoiceRejoins = 3
 
 // VoiceInputStatus is how a call's microphone is let through: the mode and the key as asked, and, by
 // push-to-talk, what became of the key and whether it is down.

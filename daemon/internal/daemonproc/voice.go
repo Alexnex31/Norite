@@ -32,7 +32,8 @@ func signedInAccount(src *session.Source) func() (voiceworker.SignIn, error) {
 			return voiceworker.SignIn{}, voiceworker.ErrSignInPending
 		}
 		// Asked after the status: a sign-in that ended in between is a channel already closed.
-		return voiceworker.SignIn{Account: account.UserID, Ended: src.Ended(account.Generation)}, nil
+		return voiceworker.SignIn{Account: account.UserID, Ended: src.Ended(account.Generation),
+			Instance: account.InstanceURL}, nil
 	}
 }
 

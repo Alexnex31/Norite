@@ -33,6 +33,9 @@ import (
 // real one; only the worker is played.
 const standinVariable = "NORITE_VOICE_STANDIN"
 
+// standinMarkVariable names the file crashonce marks its first call in.
+const standinMarkVariable = "NORITE_VOICE_STANDIN_MARK"
+
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(standinVariable); mode != "" {
 		os.Exit(standin(mode))
@@ -292,6 +295,20 @@ func standin(mode string) int {
 			}
 			if mode == "crashincall" {
 				os.Exit(2)
+			}
+			if mode == "crashlater" {
+				// Crashes in every call, a moment after it is up.
+				time.Sleep(100 * time.Millisecond)
+				os.Exit(2)
+			}
+			if mode == "crashonce" {
+				// Crashes in its first call alone, a moment after it is up: the file named marks that one ran.
+				mark := os.Getenv(standinMarkVariable)
+				if _, err := os.Stat(mark); err != nil {
+					_ = os.WriteFile(mark, nil, 0o600)
+					time.Sleep(100 * time.Millisecond)
+					os.Exit(2)
+				}
 			}
 			if mode == "speaksbadly" { // a speaker that is no user id, a moment after the call is up
 				time.Sleep(200 * time.Millisecond)

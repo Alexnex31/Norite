@@ -130,6 +130,16 @@ func (c *VoiceCall) Check() error {
 	return nil
 }
 
+// Clone is a copy of c sharing nothing with it.
+func (c *VoiceCall) Clone() VoiceCall {
+	out := *c
+	out.LocalMutes = slices.Clone(c.LocalMutes)
+	if out.LocalMutes == nil {
+		out.LocalMutes = []string{}
+	}
+	return out
+}
+
 // Equal is whether c and o are the same breadcrumb, nil being none.
 func (c *VoiceCall) Equal(o *VoiceCall) bool {
 	if c == nil || o == nil {

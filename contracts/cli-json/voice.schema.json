@@ -24,7 +24,8 @@
         "max_streams",
         "speaking",
         "dsp",
-        "input"
+        "input",
+        "rejoin"
       ],
       "properties": {
         "state": {
@@ -266,6 +267,37 @@
                 "held": {
                   "type": "boolean",
                   "description": "Whether the key is down now."
+                }
+              }
+            }
+          ]
+        },
+        "rejoin": {
+          "description": "The daemon joining the call again by itself (M36), after it was lost without anybody leaving it: the daemon restarted mid-call, its voice worker crashed, or the instance lost its session. Present from the loss until the call ends or the person next joins or leaves; null for a call the person joined. state says how far it got: joining while it waits or tries, reason saying why the call was lost; in_call once joined again; idle once given up, reason saying why.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cause",
+                "attempt"
+              ],
+              "properties": {
+                "cause": {
+                  "enum": [
+                    "daemon_restarted",
+                    "worker_crashed",
+                    "session_lost"
+                  ]
+                },
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3,
+                  "description": "The attempts made, at most three before the daemon gives up; 0 while the first waits for the sign-in or the instance."
                 }
               }
             }

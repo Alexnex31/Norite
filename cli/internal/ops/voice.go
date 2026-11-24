@@ -4,6 +4,8 @@
 package ops
 
 import (
+	"fmt"
+
 	"github.com/Alexnex31/Norite/daemon/ipc"
 )
 
@@ -149,4 +151,33 @@ func VoiceInput(in *ipc.VoiceInputStatus) []string {
 		lines = append(lines, "The key is down: you are talking")
 	}
 	return lines
+}
+
+// VoiceRejoin words a call the daemon joins again by itself (M36), in the state the status gives: waiting or
+// trying, rejoined, or given up, why it was lost or given up being the status's reason, which the caller
+// cleans. Nothing for a call the person joined.
+func VoiceRejoin(r *ipc.VoiceRejoin, state, reason string) []string {
+	if r == nil {
+		return nil
+	}
+	after := map[string]string{
+		ipc.VoiceRejoinDaemonRestarted: "the daemon restarted",
+		ipc.VoiceRejoinWorkerCrashed:   "the voice worker crashed",
+		ipc.VoiceRejoinSessionLost:     "the connection to the instance was lost",
+	}[r.Cause]
+	if after == "" {
+		after = "the call was lost"
+	}
+	switch state {
+	case ipc.VoiceJoining:
+		lines := []string{withReason("The call was lost", reason)}
+		if r.Attempt == 0 {
+			return append(lines, "Joining it again after "+after+", once the instance can be reached")
+		}
+		return append(lines, fmt.Sprintf("Joining it again after %s: attempt %d of %d", after, r.Attempt,
+			ipc.MaxVoiceRejoins))
+	case ipc.VoiceInCall:
+		return []string{"Joined again after " + after}
+	}
+	return []string{withReason("The call was lost after "+after+", and is not joined again", reason)}
 }

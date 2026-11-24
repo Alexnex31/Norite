@@ -147,7 +147,7 @@ func (g *Gateway) Join(ctx context.Context, account, channel, offer string, self
 		if err := strictJSON(r.data, &refused); err != nil {
 			return Answer{}, errors.New("the instance refused the join in a shape this daemon does not know")
 		}
-		return Answer{}, errors.New(refusalWords(refused.Code))
+		return Answer{}, &InstanceRefusal{Code: refused.Code}
 	}
 	var s gatewayproto.VoiceServer
 	if err := strictJSON(r.data, &s); err != nil || s.ChannelID != channel || s.ConnectionID == "" {
@@ -175,6 +175,24 @@ func (g *Gateway) Join(ctx context.Context, account, channel, offer string, self
 // rights is what VoiceState's three flags leave the account able to do.
 func rights(mute, deaf, suppress bool) voiceipc.Rights {
 	return voiceipc.Rights{Send: !mute && !suppress, Hear: !deaf}
+}
+
+// InstanceRefusal is the instance's VOICE_JOIN_REFUSED (M33), worded by refusalWords.
+type InstanceRefusal struct{ Code string }
+
+func (r *InstanceRefusal) Error() string { return refusalWords(r.Code) }
+
+// Final is whether asking again in a moment changes nothing: the channel, the account's right to it or the
+// instance's voice server said no (M36). A rejoin is not tried again after one. A join already under way, a
+// rate and a voice server that could not take the call pass, and so does a code this daemon does not know,
+// which a rejoin's bounded attempts still end.
+func (r *InstanceRefusal) Final() bool {
+	switch r.Code {
+	case gatewayproto.VoiceNotFound, gatewayproto.VoiceNotVoice, gatewayproto.VoiceForbidden, gatewayproto.VoiceFull,
+		gatewayproto.VoiceBadOffer, gatewayproto.VoiceDisabled:
+		return true
+	}
+	return false
 }
 
 // refusalWords is a refusal code as a person reads it. A code this daemon does not know is said as one.

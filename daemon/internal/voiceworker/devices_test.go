@@ -273,25 +273,41 @@ type losingServer struct {
 	leaves atomic.Int32
 }
 
-func (*losingServer) Prepare(context.Context, string) (Route, error) { return Route{}, nil }
+// Prepare refuses once the session is lost, as the gateway's does until the new one is live.
+func (s *losingServer) Prepare(context.Context, string) (Route, error) {
+	select {
+	case <-s.lost:
+		return Route{}, errors.New("the daemon is not connected to its instance")
+	default:
+		return Route{}, nil
+	}
+}
 func (s *losingServer) Join(context.Context, string, string, string, ipc.VoiceSelf) (Answer, error) {
 	return Answer{SDP: "v=0\r\nanswer\r\n", Rights: voiceipc.Rights{Send: true, Hear: true}, Lost: s.lost}, nil
 }
 func (s *losingServer) Update(context.Context, string, string, ipc.VoiceSelf) error { return nil }
 func (s *losingServer) Leave(context.Context, string)                               { s.leaves.Add(1) }
 
-// A call whose session the instance no longer holds ends at once, saying so (M33's manual pass).
-func TestACallEndsWithItsLostSession(t *testing.T) {
+// A call whose session the instance no longer holds is let go at once, saying so (M33's manual pass): its
+// worker ends and the voice server is told. Since M36 it is joined again once the instance is reachable,
+// and until then the status says why it was lost.
+func TestACallLostWithItsSessionIsLetGoAtOnce(t *testing.T) {
 	fast(t)
 	srv := &losingServer{lost: make(chan struct{})}
 	v := standinVoice(t, "good", srv)
 	_, err := v.Join(context.Background(), "1", ipc.VoiceAllOn())
 	require.NoError(t, err)
+	v.mu.Lock()
+	w := v.current.worker
+	v.mu.Unlock()
 	close(srv.lost)
 	require.Eventually(t, func() bool {
 		st := v.Status()
-		return st.State == ipc.VoiceIdle && st.Reason == SessionLostReason
+		return st.State == ipc.VoiceJoining && st.Reason == SessionLostReason && st.Rejoin != nil
 	}, 5*time.Second, 10*time.Millisecond, "%+v", v.Status())
-	require.True(t, v.Status().EndedInCall, "a call that was up ended, and the status says it was a call")
-	require.False(t, v.Busy())
+	require.NoError(t, within(5*time.Second, w.Done()), "the lost call's worker was not let go")
+	require.Eventually(t, func() bool { return srv.leaves.Load() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the voice server was not told")
+	require.Equal(t, ipc.VoiceRejoin{Cause: ipc.VoiceRejoinSessionLost}, *v.Status().Rejoin)
+	require.True(t, v.Busy())
 }

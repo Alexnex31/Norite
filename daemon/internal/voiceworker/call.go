@@ -16,6 +16,7 @@ import (
 
 	"github.com/Alexnex31/Norite/daemon/internal/hotkey"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/statefile"
 	"github.com/Alexnex31/Norite/daemon/termsafe"
 	"github.com/Alexnex31/Norite/daemon/voiceipc"
 )
@@ -36,6 +37,9 @@ type VoiceOptions struct {
 	Log     zerolog.Logger
 	// Hotkey registers push-to-talk's key while a call by push-to-talk lasts (M35); nil has none to offer.
 	Hotkey hotkey.Binder
+	// Breadcrumbs keeps the call to join again on disk (M36); nil keeps it in memory alone, which rejoins
+	// a call whose worker crashed or whose session was lost, and nothing after a restart.
+	Breadcrumbs Breadcrumbs
 
 	// Args and Env are the worker's, for a stand-in (Options). Tests only.
 	Args, Env []string
@@ -65,7 +69,22 @@ var (
 	// selfRetryEvery spaces the sending again of an update the voice server did not take (M34's
 	// /code-review): a gateway connection resuming is back within seconds.
 	selfRetryEvery = time.Second
+	// rejoinWithin bounds how long after a call was last known up it is joined again (M36's D2): a daemon
+	// restarted by its service manager is back in seconds, and a machine that lost power mid-call and boots
+	// hours later, or a laptop opened the next morning, must not open the microphone in a call nobody asked
+	// for. A rejoined call that stays up this long has its attempts counted from nothing again. aliveEvery
+	// spaces the stamp's refreshing while a call is up.
+	rejoinWithin = time.Minute
+	aliveEvery   = 15 * time.Second
+	// wallNow is the wall clock the breadcrumb is stamped on: Linux's monotonic clock stops in a suspend, and
+	// the bound is about the time that passed. A variable for the tests.
+	wallNow = time.Now
 )
+
+// Breadcrumbs writes the call to join again (statefile.VoiceCall), or removes it with nil.
+type Breadcrumbs interface {
+	Save(*statefile.VoiceCall) error
+}
 
 // Voice is the daemon's voice calls: one at a time, since a person is in one call. A join while in a call
 // ends that call first.
@@ -90,6 +109,22 @@ type Voice struct {
 	prefs prefs
 	// started is a test's, run once a call's worker is started and before its join is sent; nil otherwise.
 	started func()
+
+	// pending is the call being joined again (M36), from the moment it was lost to the attempt that is up or
+	// the last one, under mu.
+	pending *rejoin
+	// crumb is the breadcrumb as it should be on disk, under mu; save writes it, saveMu ordering the writes.
+	// keepKick tells the keeper to write it, the latest only, and keeperStop ends the keeper, which closes
+	// keeperDone once the last is written.
+	crumb      *statefile.VoiceCall
+	saveMu     sync.Mutex
+	keepKick   chan struct{}
+	keeperStop chan struct{}
+	keeperDone chan struct{}
+	stopKeeper sync.Once
+	// rejoins counts the rejoin loops running, which Close waits for; added to under mu, before closed is
+	// set.
+	rejoins sync.WaitGroup
 }
 
 // prefs is what the person has set for their calls (M34): on themselves, whom they muted for themselves
@@ -127,11 +162,14 @@ func (p prefs) live() prefs {
 type SignIn struct {
 	Account string
 	Ended   <-chan struct{}
+	// Instance is the instance signed in to, which a breadcrumb names (M36).
+	Instance string
 }
 
 // call is one call's worker and the goroutine that owns it.
 type call struct {
 	channel    string
+	instance   string
 	processing ipc.VoiceJoin
 	cancel     context.CancelFunc
 	// worker is set under Voice.mu once started.
@@ -187,6 +225,12 @@ type call struct {
 	// keyChanged is closed, and replaced, each time a binding says what became of the key, under Voice.mu:
 	// what a change of mode waits on.
 	keyChanged chan struct{}
+
+	// rejoin is the rejoin this call is an attempt of, nil for a join the person asked for, and attempts
+	// the rejoins its breadcrumb counts; upAt is when it came up. All under Voice.mu (M36).
+	rejoin   *rejoin
+	attempts int
+	upAt     time.Time
 }
 
 // NewVoice builds the daemon's voice calls. Nothing runs until a join.
@@ -195,6 +239,10 @@ func NewVoice(opts VoiceOptions) *Voice {
 	v.status = ipc.VoiceStatus{State: ipc.VoiceIdle, Available: opts.Signaler != nil, Unavailable: opts.Unavailable}
 	if opts.Signaler != nil {
 		v.status.Unavailable = ""
+	}
+	if opts.Breadcrumbs != nil {
+		v.keepKick, v.keeperStop, v.keeperDone = make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+		go v.keeper()
 	}
 	return v
 }
@@ -219,6 +267,10 @@ func (v *Voice) Status() ipc.VoiceStatus {
 	if p.streams != nil {
 		n := *p.streams
 		out.MaxStreams = &n
+	}
+	if out.Rejoin != nil {
+		r := *out.Rejoin
+		out.Rejoin = &r
 	}
 	return out
 }
@@ -262,11 +314,20 @@ func (v *Voice) change(apply func(p *prefs, account string) error) (ipc.VoiceSta
 	}
 	v.prefs = p
 	c := v.current
+	// What a rejoin waiting will join with is the person's now, on disk too, and nothing is taken back from
+	// the breadcrumb over it (M36).
+	if r := v.pending; r != nil {
+		withPrefs(&r.call, p)
+		r.restore = false
+		crumb := r.call.Clone()
+		v.crumb = &crumb
+	}
 	v.mu.Unlock()
 	v.publish()
 	if c != nil {
 		v.push(c)
 	}
+	v.note()
 	return v.Status(), nil
 }
 
@@ -352,6 +413,7 @@ func (v *Voice) Processing(p ipc.VoiceJoin) ipc.VoiceStatus {
 	}
 	v.publish()
 	v.push(c)
+	v.note()
 	timeout := time.NewTimer(processingWithin)
 	defer timeout.Stop()
 	for {
@@ -426,6 +488,7 @@ func (v *Voice) Input(in ipc.VoiceInput) ipc.VoiceStatus {
 	v.publish()
 	v.rebind(c)
 	v.push(c)
+	v.note()
 	timeout := time.NewTimer(keyWithin)
 	defer timeout.Stop()
 	for {
@@ -529,11 +592,12 @@ func (v *Voice) keyEvents(c *call, gen int) hotkey.Events {
 	}
 }
 
-// Busy is a call joined or joining: no moment for the updater to restart the daemon (M24).
+// Busy is a call joined or joining, or one to be joined again (M36): no moment for the updater to restart
+// the daemon (M24).
 func (v *Voice) Busy() bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.current != nil
+	return v.current != nil || v.pending != nil
 }
 
 // The answers Account gives besides an id.
@@ -554,6 +618,8 @@ type Refusal struct {
 	// Failed is a join that was tried and did not work: the worker or the voice server failed. Otherwise
 	// the daemon understood and did not do it.
 	Failed bool
+	// Final is a join the instance refused for good (InstanceRefusal.Final): a rejoin is not tried again.
+	Final bool
 }
 
 func (r *Refusal) Error() string { return r.Msg }
@@ -565,8 +631,15 @@ func (v *Voice) Join(ctx context.Context, channel string, processing ipc.VoiceJo
 }
 
 // JoinWith is Join with the whole of a join's body: the processing, and how the microphone is let through,
-// by voice or by push-to-talk with its key (M35).
+// by voice or by push-to-talk with its key (M35). A call being joined again is given up for it (M36): the
+// person's join wins.
 func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinRequest) (ipc.VoiceStatus, error) {
+	v.cancelRejoin()
+	return v.join(ctx, channel, req, nil)
+}
+
+// join is a join, the person's with rj nil, or an attempt of rejoin rj.
+func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinRequest, rj *rejoin) (ipc.VoiceStatus, error) {
 	processing := req.VoiceJoin
 	if v.opts.Signaler == nil {
 		return v.Status(), &Refusal{Msg: v.opts.Unavailable, Unavailable: true}
@@ -593,17 +666,27 @@ func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinR
 	}
 
 	callCtx, cancel := context.WithCancel(context.Background())
-	c := &call{channel: channel, processing: processing, cancel: cancel, finished: make(chan struct{}),
-		account: signIn.Account, sentProcessing: processing, dspChanged: make(chan struct{}),
-		keyChanged: make(chan struct{}), input: req.VoiceInput, selfKick: make(chan struct{}, 1)}
-	v.last = c
-	result := make(chan error, 1)
+	c := &call{channel: channel, instance: signIn.Instance, processing: processing, cancel: cancel,
+		finished: make(chan struct{}), account: signIn.Account, sentProcessing: processing,
+		dspChanged: make(chan struct{}), keyChanged: make(chan struct{}), input: req.VoiceInput,
+		selfKick: make(chan struct{}, 1)}
 	v.mu.Lock()
 	if v.closed {
 		v.mu.Unlock()
 		cancel()
 		return v.Status(), &Refusal{Msg: "the daemon is stopping"}
 	}
+	// A rejoin the person took over while it waited its turn is not joined.
+	if rj != nil && v.pending != rj {
+		v.mu.Unlock()
+		cancel()
+		return v.Status(), &Refusal{Msg: "the rejoin was given up before its turn came"}
+	}
+	if rj != nil {
+		c.rejoin, c.attempts = rj, rj.call.Attempts
+	}
+	v.last = c
+	result := make(chan error, 1)
 	// The sign-in was read before the join waited its turn, and may have ended since: the join would go on
 	// as an account nobody here is signed in as. Past this point the call watches it (endsWith).
 	select {
@@ -620,10 +703,13 @@ func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinR
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	v.status.Speaking, v.status.DSP = nil, nil
 	v.status.Input = &ipc.VoiceInputStatus{Mode: req.Mode, Key: req.Key}
+	if rj == nil {
+		v.status.Rejoin = nil
+	}
 	v.mu.Unlock()
 	v.publish()
 
-	go v.endsWith(c, signIn.Ended, "the sign-in ended")
+	go v.endsWith(c, signIn.Ended, "the sign-in ended", "")
 	go v.run(callCtx, c, signIn.Account, result)
 	select {
 	case err := <-result:
@@ -657,6 +743,8 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	// by is the devices that ended the call, when the failure is the worker's end and its devices ended it:
 	// said by the caller, never guessed here, since a worker that ended on its devices as the daemon gave up
 	// on it leaves the daemon's reason, which they would contradict.
+	// final is the instance having refused the join for good, which fail says to a rejoin (M36).
+	final := false
 	fail := func(failed bool, by *voiceipc.Devices, format string, args ...any) {
 		msg := reason(fmt.Sprintf(format, args...))
 		if w != nil {
@@ -673,7 +761,7 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 		ev.Str("reason", msg).Msg("the voice call could not be joined")
 		v.ended(c, msg, by)
-		result <- &Refusal{Msg: msg, Failed: failed}
+		result <- &Refusal{Msg: msg, Failed: failed, Final: final}
 	}
 
 	routeCtx, cancelRoute := context.WithTimeout(ctx, routeWithin)
@@ -749,12 +837,14 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	answer, err := v.opts.Signaler.Join(answerCtx, account, c.channel, offer.Offer.SDP, self)
 	cancelAnswer()
 	if err != nil {
+		var refused *InstanceRefusal
+		final = errors.As(err, &refused) && refused.Final()
 		fail(true, nil, "%v", err)
 		return
 	}
 	v.rights(c, answer.Rights)
 	if answer.Lost != nil {
-		go v.endsWith(c, answer.Lost, SessionLostReason)
+		go v.endsWith(c, answer.Lost, SessionLostReason, ipc.VoiceRejoinSessionLost)
 	}
 	// The answer carries the instance's rights, and push the person's own on top, straight after: the media
 	// starts only once the call is ready, so nothing is sent or played in between.
@@ -808,11 +898,20 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	v.mu.Lock()
 	if v.current == c {
 		v.status.State = ipc.VoiceInCall
+		c.upAt = wallNow()
+		// The rejoin this was an attempt of is done; the status keeps saying it rejoined.
+		if c.rejoin != nil && v.pending == c.rejoin {
+			v.pending = nil
+		}
 	}
 	v.mu.Unlock()
 	log.Info().Msg("in a voice call")
 	result <- nil
 	v.publish()
+	// The call is up: from here it is the one to join again if it is lost without anybody leaving it.
+	v.note()
+	alive := time.NewTicker(aliveEvery)
+	defer alive.Stop()
 
 	// The call is up. What the worker says from here is drained, so it never waits on the daemon, until it
 	// ends; its end, crash or not, is the call's. What the instance says the account may do goes to it.
@@ -840,9 +939,19 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 			c.selfUnsent = true
 			v.mu.Unlock()
 			v.push(c)
+		case <-alive.C:
+			v.note()
 		}
 	}
 	<-w.Done()
+	// A worker that crashed, rather than ended the call saying why, takes nobody's decision with it: the call
+	// is joined again (M36), once this one's leave has gone, which the join waits for (Voice.last).
+	if w.Exit().Crashed {
+		if r, _ := v.toRejoin(c, w.Exit().Reason, ipc.VoiceRejoinWorkerCrashed); r != nil {
+			go v.rejoinLoop(r)
+			return
+		}
+	}
 	v.ended(c, w.Exit().Reason, w.Exit().Devices)
 }
 
@@ -1124,6 +1233,18 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 		return
 	}
 	v.current = nil
+	// An attempt of a rejoin that has more to make leaves it waiting, saying why this one failed (M36).
+	if c.rejoin != nil && v.pending == c.rejoin {
+		v.status.State, v.status.Reason, v.status.EndedInCall = ipc.VoiceJoining, reason(why), false
+		v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
+		v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
+		v.mu.Unlock()
+		v.publish()
+		return
+	}
+	// Any other end is one to stay out of: what the instance, the worker or the person decided. The call was
+	// not lost, and the status says nothing more of any rejoin it came from.
+	v.crumb, v.status.Rejoin = nil, nil
 	v.status.EndedInCall = v.status.State == ipc.VoiceInCall
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceIdle, "", reason(why), nil
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
@@ -1132,21 +1253,45 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 		v.status.Microphone, v.status.Speakers = statusDevices(*by)
 	}
 	v.mu.Unlock()
+	v.save()
 	v.publish()
 }
 
 // endsWith ends c for why when ended closes, its sign-in's end or its session's, unless c has finished
-// first.
-func (v *Voice) endsWith(c *call, ended <-chan struct{}, why string) {
+// first. With a cause, a call that was up is joined again (M36).
+func (v *Voice) endsWith(c *call, ended <-chan struct{}, why, cause string) {
 	select {
 	case <-ended:
-		v.leave(c, why)
 	case <-c.finished:
+		return
 	}
+	if cause != "" {
+		if r, w := v.toRejoin(c, why, cause); r != nil {
+			c.cancel()
+			if w != nil {
+				w.Leave()
+			}
+			<-c.finished
+			go v.rejoinLoop(r)
+			return
+		}
+	}
+	v.leave(c, why)
 }
 
-// Leave ends the call, if there is one, and returns once its worker is reaped.
+// Leave ends the call, if there is one, and returns once its worker is reaped. A call being joined again is
+// given up (M36), and nothing is left on disk to join after a restart.
 func (v *Voice) Leave() ipc.VoiceStatus {
+	if v.cancelRejoin() {
+		v.mu.Lock()
+		if v.current == nil {
+			v.status.State, v.status.Channel, v.status.Reason, v.status.EndedInCall = ipc.VoiceIdle, "", "left", false
+			v.mu.Unlock()
+			v.publish()
+			return v.Status()
+		}
+		v.mu.Unlock()
+	}
 	v.mu.Lock()
 	c := v.current
 	if c == nil {
@@ -1188,7 +1333,16 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 	v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
 	v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
 	w := c.worker
+	// A call left is not joined again, unless the daemon is what is stopping (M36's D6): that keeps the
+	// breadcrumb, for the start that follows a restart.
+	closing := v.closed
+	if !closing {
+		v.crumb, v.status.Rejoin = nil, nil
+	}
 	v.mu.Unlock()
+	if !closing {
+		v.save()
+	}
 	v.publish()
 
 	c.cancel()
@@ -1199,12 +1353,25 @@ func (v *Voice) leave(c *call, why string) ipc.VoiceStatus {
 	return v.Status()
 }
 
-// Close ends the call and refuses any join after it: the daemon is stopping.
+// Close ends the call and refuses any join after it: the daemon is stopping. The call to join again stays on
+// disk (M36), and the keeper has written it before Close returns.
 func (v *Voice) Close() {
 	v.mu.Lock()
 	v.closed = true
+	if r := v.pending; r != nil {
+		r.cancel()
+		v.pending = nil
+	}
+	c := v.current
 	v.mu.Unlock()
-	v.Leave()
+	if c != nil {
+		v.leave(c, "left")
+	}
+	v.rejoins.Wait()
+	if v.keeperStop != nil {
+		v.stopKeeper.Do(func() { close(v.keeperStop) })
+		<-v.keeperDone
+	}
 }
 
 func (v *Voice) publish() {
