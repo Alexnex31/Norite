@@ -46,8 +46,9 @@ type fakeCall struct {
 	stuck bool
 	// slowGather makes Offer wait for its context, as a gather waiting out an unreachable TURN does.
 	slowGather bool
-	// by is what EndedBy answers.
-	by *voiceipc.Devices
+	// by is what EndedBy answers, and lost what EndedLost does.
+	by   *voiceipc.Devices
+	lost bool
 }
 
 func newFakeCall() *fakeCall {
@@ -76,6 +77,7 @@ func (c *fakeCall) Rights(r voiceipc.Rights) {
 func (c *fakeCall) Ready() <-chan struct{}     { return c.ready }
 func (c *fakeCall) Ended() <-chan string       { return c.ended }
 func (c *fakeCall) EndedBy() *voiceipc.Devices { return c.by }
+func (c *fakeCall) EndedLost() bool            { return c.lost }
 func (c *fakeCall) Devices() <-chan voiceipc.Devices {
 	return c.devices
 }
@@ -310,6 +312,20 @@ func TestACallThatEndsByItselfSaysWhyAndExits(t *testing.T) {
 	call.ended <- "the voice server closed the call"
 	s := d.state()
 	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the voice server closed the call"}, s)
+	require.Equal(t, ExitOK, d.exit())
+}
+
+// A call whose connection was lost says so in its end, for the daemon to join it again (M36).
+func TestACallWhoseConnectionWasLostSaysSo(t *testing.T) {
+	call := newFakeCall()
+	call.lost = true
+	d := start(t, call, Options{})
+	d.joined()
+	close(call.ready)
+	require.Equal(t, voiceipc.StateReady, d.state().State)
+	call.ended <- "the connection to the voice server failed"
+	require.Equal(t, voiceipc.State{State: voiceipc.StateEnded, Reason: "the connection to the voice server failed",
+		Lost: true}, d.state())
 	require.Equal(t, ExitOK, d.exit())
 }
 

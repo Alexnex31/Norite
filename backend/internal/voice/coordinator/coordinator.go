@@ -12,8 +12,11 @@
 // # What ends a call
 //
 //   - **Its session.** A call belongs to the gateway session that joined it (M33's D3). The gateway calls
-//     Ended when it drops a session, by a revocation or by its resume window running out, so the end of a
-//     sign-in ends the call with nothing a sixth revocation path has to remember.
+//     Ended when it drops a session, by a revocation, by its resume window running out or by the instance
+//     stopping, so the end of a sign-in ends the call with nothing a sixth revocation path has to remember.
+//     It is ended saying nothing: a session's end is nobody's decision about the call, and a client told
+//     nothing takes it as a call lost and joins it again (M36's manual pass), which a revoked sign-in then
+//     cannot do.
 //   - **A newer join.** A session holds one call, and a join replaces the call of any older session of the
 //     same device: a restarted daemon's join is not refused by the call its previous run left behind.
 //   - **A lost right.** guilds publishes a re-check on dispatch.VoiceTopic from every mutation that can take
@@ -571,7 +574,7 @@ func (c *Coordinator) Ended(userID snowflake.ID, sessionID string) {
 		defer c.wg.Done()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), endWithin)
 		defer cancel()
-		c.end(ctx, cl, endedSession)
+		c.end(ctx, cl, "")
 	}()
 }
 
@@ -749,12 +752,12 @@ func (c *Coordinator) ConnectionClosed(conn snowflake.ID) {
 
 // Why a call was ended, as the SFU tells its client before it closes the connection, in words the client
 // shows the person (M33's manual pass, where every one of them read "the voice server closed the call").
-// A call its client left is told nothing.
+// A call its client left is told nothing, and nor is one whose session ended (Ended), since what is said
+// here is what the client takes for a decision it must not undo.
 const (
 	endedChannelGone = "the voice channel was deleted"
 	endedNotMember   = "you are no longer a member of this guild"
 	endedNoConnect   = "you may no longer join this voice channel"
-	endedSession     = "this device's session with the instance ended"
 	endedReplaced    = "this device joined a voice channel again"
 )
 

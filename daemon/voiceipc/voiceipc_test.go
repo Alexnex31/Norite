@@ -70,6 +70,7 @@ func TestEveryFrameIsTheContracts(t *testing.T) {
 		{"ended", OpState, State{State: StateEnded, Reason: strings.Repeat("r", MaxReason)}, true},
 		{"ended by its devices", OpState, State{State: StateEnded, Reason: "r", Devices: &Devices{
 			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoDevice}}}, true},
+		{"ended, its connection lost", OpState, State{State: StateEnded, Reason: "r", Lost: true}, true},
 		{"devices", OpDevices, Devices{Microphone: Device{State: DeviceRefused},
 			Speakers: Device{State: DeviceFailed, Reason: strings.Repeat("r", MaxReason)}}, true},
 		{"speaking", OpSpeaking, Speaking{Users: []string{"1", "18446744073709551615"}}, true},
@@ -124,6 +125,9 @@ func TestTheContractAndTheChecksRefuseTheSameThings(t *testing.T) {
 			Microphone: Device{State: DeviceOpen}, Speakers: Device{State: DeviceNoSession}}}},
 		{"devices that ended a call, saying it goes on", OpState, State{State: StateEnded, Devices: &Devices{
 			Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoSession}, Decided: true}}},
+		{"a connection lost on a call still up", OpState, State{State: StateReady, Lost: true}},
+		{"a connection lost on a call its devices ended", OpState, State{State: StateEnded, Lost: true,
+			Devices: &Devices{Microphone: Device{State: DeviceNoSession}, Speakers: Device{State: DeviceNoSession}}}},
 		{"a microphone in an unknown state", OpDevices, Devices{Microphone: Device{State: "deaf"},
 			Speakers: Device{State: DeviceOpen}}},
 		{"speakers in an unknown state", OpDevices, Devices{Microphone: Device{State: DeviceOpen}}},

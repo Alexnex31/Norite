@@ -164,6 +164,7 @@ func VoiceRejoin(r *ipc.VoiceRejoin, state, reason string) []string {
 		ipc.VoiceRejoinDaemonRestarted: "the daemon restarted",
 		ipc.VoiceRejoinWorkerCrashed:   "the voice worker crashed",
 		ipc.VoiceRejoinSessionLost:     "the connection to the instance was lost",
+		ipc.VoiceRejoinConnectionLost:  "the connection to the voice server was lost",
 	}[r.Cause]
 	if after == "" {
 		after = "the call was lost"

@@ -428,11 +428,14 @@ type VoiceRejoin struct {
 }
 
 // Why a call is joined again (M36): the daemon went away mid-call and started again, its voice worker
-// crashed, or the instance no longer held the session the call was signaled on.
+// crashed, the instance no longer held the session the call was signaled on, or the call's connection to
+// the voice server was lost: ICE gave up, or the server closed it saying nothing, as it does when the
+// session ends or the instance stops (M36's manual pass).
 const (
 	VoiceRejoinDaemonRestarted = "daemon_restarted"
 	VoiceRejoinWorkerCrashed   = "worker_crashed"
 	VoiceRejoinSessionLost     = "session_lost"
+	VoiceRejoinConnectionLost  = "connection_lost"
 )
 
 // MaxVoiceRejoins is how many times a lost call is joined again before the daemon gives up: a rejoin that

@@ -194,7 +194,7 @@ func TestACallEndedOtherwiseKeepsNoDevices(t *testing.T) {
 	require.Equal(t, &ipc.VoiceDevice{State: ipc.VoiceDeviceOpen}, st.Microphone)
 	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 5*time.Second, 10*time.Millisecond)
 	st = v.Status()
-	require.Equal(t, "the voice server closed the call", st.Reason)
+	require.Equal(t, "you may no longer join this voice channel", st.Reason)
 	require.True(t, st.EndedInCall, "a call that was up ended, and the status says it was a call")
 	require.Nil(t, st.Microphone)
 	require.Nil(t, st.Speakers)

@@ -233,8 +233,9 @@ func TestTheVoiceServersLastWordIsTheEnd(t *testing.T) {
 	up := &Session{ended: make(chan string, 1), ready: make(chan struct{})}
 	close(up.ready)
 	up.message(said("you are no longer a member of this guild"))
-	if why := <-up.ended; why != "you are no longer a member of this guild" {
-		t.Errorf("a call that was up ended with %q", why)
+	if why := <-up.ended; why != "you are no longer a member of this guild" || up.EndedLost() {
+		t.Errorf("a call that was up ended with %q, lost %v: the instance's word is a decision (M36)", why,
+			up.EndedLost())
 	}
 	joining := &Session{ended: make(chan string, 1), ready: make(chan struct{})}
 	joining.message(said("room full"))

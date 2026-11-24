@@ -232,6 +232,10 @@ type State struct {
 	// keeps them in its status after that end alone, from this frame rather than the last DEVICES it read.
 	// Nil after any other end, and on every other state.
 	Devices *Devices `json:"devices"`
+	// Lost is, on an ended call, whether the end was its connection lost, which nobody chose (M36): ICE gave
+	// up, or the voice server closed the connection saying nothing. The daemon joins such a call again once
+	// it was up. False after any other end, and on every other state.
+	Lost bool `json:"lost"`
 }
 
 // The states a worker reports.
@@ -334,6 +338,9 @@ func (s State) Check() error {
 	}
 	if len(s.Reason) > MaxReason {
 		return fmt.Errorf("a reason of %d bytes, past %d", len(s.Reason), MaxReason)
+	}
+	if s.Lost && (s.State != StateEnded || s.Devices != nil) {
+		return errors.New("a lost connection that did not end the call, or that its devices ended")
 	}
 	if s.Devices != nil {
 		if s.State != StateEnded {

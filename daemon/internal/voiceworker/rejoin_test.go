@@ -187,6 +187,26 @@ func TestACrashedWorkersCallIsJoinedAgain(t *testing.T) {
 	require.Nil(t, last)
 }
 
+// A call whose connection was lost, ICE giving up or the voice server closing it saying nothing, as an
+// instance's restart does, takes nobody's decision with it either: it is joined again, as it was (M36's
+// manual pass, where both ended a call for good).
+func TestALostConnectionsCallIsJoinedAgain(t *testing.T) {
+	rejoinFast(t)
+	srv, kept := &rejoinServer{}, &crumbs{}
+	v := rejoinVoice(t, "lostonce", srv, kept, standinMarkVariable+"="+filepath.Join(t.TempDir(), "mark"))
+	_, err := v.SetSelf(SelfMute)
+	require.NoError(t, err)
+	_, err = v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+
+	st := waitState(t, v, rejoinedAs(ipc.VoiceRejoinConnectionLost, 1), "the call was not joined again")
+	require.Equal(t, "1001", st.Channel)
+	require.Equal(t, ipc.VoiceSelf{Mute: true}, st.Self)
+	require.Equal(t, []joined{{"1001", ipc.VoiceSelf{Mute: true}}, {"1001", ipc.VoiceSelf{Mute: true}}}, srv.seen())
+	last, _ := kept.last()
+	require.NotNil(t, last, "the call joined again is not the one to join after a restart")
+}
+
 // A session the instance no longer holds ends its call there. The call waits for the instance to be
 // reachable on the new session, starting no worker before, and is joined again once it is (M36's D8).
 func TestALostSessionsCallIsJoinedAgainOnceTheInstanceIsBack(t *testing.T) {

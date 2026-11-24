@@ -944,15 +944,27 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 		}
 	}
 	<-w.Done()
-	// A worker that crashed, rather than ended the call saying why, takes nobody's decision with it: the call
-	// is joined again (M36), once this one's leave has gone, which the join waits for (Voice.last).
-	if w.Exit().Crashed {
-		if r, _ := v.toRejoin(c, w.Exit().Reason, ipc.VoiceRejoinWorkerCrashed); r != nil {
+	// A worker that crashed, or whose connection was lost, rather than one that ended the call saying why,
+	// takes nobody's decision with it: the call is joined again (M36), once this one's leave has gone, which
+	// the join waits for (Voice.last).
+	if cause := lostCause(w.Exit()); cause != "" {
+		if r, _ := v.toRejoin(c, w.Exit().Reason, cause); r != nil {
 			go v.rejoinLoop(r)
 			return
 		}
 	}
 	v.ended(c, w.Exit().Reason, w.Exit().Devices)
+}
+
+// lostCause is why a worker's end is a call to join again, or "" for an end somebody chose.
+func lostCause(e Exit) string {
+	switch {
+	case e.Crashed:
+		return ipc.VoiceRejoinWorkerCrashed
+	case e.Lost:
+		return ipc.VoiceRejoinConnectionLost
+	}
+	return ""
 }
 
 // await waits for the event want accepts, the worker's end, the bound, or the call's cancellation. A

@@ -202,6 +202,20 @@ func dropped(t *testing.T, c *voicetest.Client, what string) {
 func droppedSaying(t *testing.T, c *voicetest.Client, what, reason string) {
 	t.Helper()
 	dropped(t, c, what)
+	assert.Equal(t, []string{reason}, told(t, c), "what %s told the client", what)
+}
+
+// droppedSayingNothing is dropped with no word from the SFU first: an end the client takes for a call lost,
+// which it joins again (M36), rather than for a decision.
+func droppedSayingNothing(t *testing.T, c *voicetest.Client, what string) {
+	t.Helper()
+	dropped(t, c, what)
+	assert.Empty(t, told(t, c), "what %s told the client", what)
+}
+
+// told is every reason the SFU gave the client.
+func told(t *testing.T, c *voicetest.Client) []string {
+	t.Helper()
 	var said []string
 	for _, m := range c.Messages() {
 		if op, _ := voiceproto.OpOf(m); op == voiceproto.OpRefused {
@@ -210,7 +224,7 @@ func droppedSaying(t *testing.T, c *voicetest.Client, what, reason string) {
 			said = append(said, r.Reason)
 		}
 	}
-	assert.Equal(t, []string{reason}, said, "what %s told the client", what)
+	return said
 }
 
 // The done-when: a join over the real gateway path allocates a real SFU connection, end to end, and the
@@ -334,14 +348,15 @@ func TestASelfMuteReachesTheChannel(t *testing.T) {
 }
 
 // The end of a sign-in ends its call: the revocation drops the session, and the session's end reaches the
-// coordinator (M33's D3).
+// coordinator (M33's D3). It says nothing, as any session's end does (M36): the daemon learns of a sign-in's
+// end from the sign-in.
 func TestALogoutEndsTheCall(t *testing.T) {
 	f := newVoiceFixture(t, nil)
 	pair := f.api.login("member@example.com", "member-laptop")
 	member, _ := f.joinCall(t, pair.AccessToken, f.channel)
 	res := f.api.call(http.MethodPost, "/api/v1/auth/logout", map[string]string{"refresh_token": pair.RefreshToken})
 	require.Equal(t, http.StatusNoContent, res.Code, res)
-	droppedSaying(t, member.client, "a logout", "this device's session with the instance ended")
+	droppedSayingNothing(t, member.client, "a logout")
 }
 
 // A session that is not resumed in its window ends its call with it.
@@ -349,8 +364,7 @@ func TestASessionExpiredPastItsResumeWindowEndsItsCall(t *testing.T) {
 	f := newVoiceFixture(t, func(o *gateway.Options) { o.ResumeWindow = 200 * time.Millisecond })
 	member, _ := f.joinCall(t, f.memberToken, f.channel)
 	require.NoError(t, member.gw.ws.CloseNow())
-	droppedSaying(t, member.client, "the resume window running out",
-		"this device's session with the instance ended")
+	droppedSayingNothing(t, member.client, "the resume window running out")
 }
 
 // A second join from the same session replaces its call, and one from a new session of the same device

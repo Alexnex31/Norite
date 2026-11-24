@@ -153,6 +153,8 @@ type Exit struct {
 	Reason string
 	// Devices is the devices a worker said ended its call, both failing as it started (M32), or nil.
 	Devices *voiceipc.Devices
+	// Lost is a worker that said its call's connection was lost, which nobody chose (M36).
+	Lost bool
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
@@ -344,7 +346,7 @@ func (w *Worker) wait() {
 		if why == "" {
 			why = "the voice worker ended the call without saying why"
 		}
-		w.exit = Exit{Reason: why, Devices: w.ended.Devices}
+		w.exit = Exit{Reason: why, Devices: w.ended.Devices, Lost: w.ended.Lost}
 	case w.leaving:
 		w.exit = Exit{Reason: "left"}
 	default:

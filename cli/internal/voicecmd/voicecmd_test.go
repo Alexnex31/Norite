@@ -371,6 +371,9 @@ func TestACallJoinedAgainIsSaidAsSuch(t *testing.T) {
 		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
 			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinWorkerCrashed, Attempt: 1}},
 			"In a voice call in channel 42.\nJoined again after the voice worker crashed.\n", ""},
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinConnectionLost, Attempt: 1}},
+			"In a voice call in channel 42.\nJoined again after the connection to the voice server was lost.\n", ""},
 		{ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: "this account may not join that voice channel",
 			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinDaemonRestarted, Attempt: 1}},
 			"Not in a voice call.\nThe call was lost after the daemon restarted, and is not joined again: this account " +

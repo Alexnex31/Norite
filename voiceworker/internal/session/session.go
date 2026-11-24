@@ -100,7 +100,10 @@ type Session struct {
 	endOnce sync.Once
 	// endedBy is the devices that ended the call, when the end Ended delivers was theirs, stored before it is
 	// delivered.
-	endedBy  atomic.Pointer[voiceipc.Devices]
+	endedBy atomic.Pointer[voiceipc.Devices]
+	// lost is whether that end was the connection lost, with nobody having chosen it (M36): ICE gave up, or
+	// the voice server closed the connection saying nothing. Stored before the end is delivered.
+	lost     atomic.Bool
 	readyOne sync.Once
 
 	track  *webrtc.TrackLocalStaticRTP
@@ -256,9 +259,9 @@ func New(join voiceipc.Join, opts Options) (*Session, error) {
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		switch st {
 		case webrtc.PeerConnectionStateFailed:
-			s.end("the connection to the voice server failed")
+			s.endLost("the connection to the voice server failed")
 		case webrtc.PeerConnectionStateClosed:
-			s.end("the connection to the voice server closed")
+			s.endLost("the connection to the voice server closed")
 		}
 	})
 	return s, nil
@@ -408,6 +411,17 @@ func (s *Session) endFor(reason string, by *voiceipc.Devices) {
 	})
 }
 
+// endLost reports the call over because its connection was lost, which nobody chose (M36).
+func (s *Session) endLost(reason string) {
+	s.endOnce.Do(func() {
+		s.lost.Store(true)
+		s.ended <- reason
+	})
+}
+
+// EndedLost is whether the end Ended delivered was the connection lost, asked once Ended has delivered.
+func (s *Session) EndedLost() bool { return s.lost.Load() }
+
 // Offer adds the call's sections and returns the offer, which carries no candidate.
 func (s *Session) Offer(ctx context.Context) (string, error) {
 	track, err := webrtc.NewTrackLocalStaticRTP(opusCapability, "audio", "norite-voice")
@@ -446,7 +460,9 @@ func (s *Session) Offer(ctx context.Context) (string, error) {
 		}
 	})
 	dc.OnMessage(func(m webrtc.DataChannelMessage) { s.message(m.Data) })
-	dc.OnClose(func() { s.end("the voice server closed the call") })
+	// Closed with no word first: the SFU says why whenever the instance chose the end (OpRefused), so this
+	// is the connection lost, a session's end or the instance stopping (M36).
+	dc.OnClose(func() { s.endLost("the voice server closed the call") })
 
 	// Created and not yet set: setting it starts gathering, which waits for the answer's servers (M33). The
 	// offer carries no candidate, since the SFU is ICE-lite and learns the client's addresses from its
