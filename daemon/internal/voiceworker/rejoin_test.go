@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,8 @@ type crumbs struct {
 	saved []*statefile.VoiceCall
 	// saving is told each write as it is made, when set.
 	saving func(*statefile.VoiceCall)
+	// failing is how many writes from now fail, as a state file's lock held elsewhere fails them.
+	failing int
 }
 
 func (c *crumbs) Save(v *statefile.VoiceCall) error {
@@ -35,6 +39,11 @@ func (c *crumbs) Save(v *statefile.VoiceCall) error {
 		v = &cp
 	}
 	c.mu.Lock()
+	if c.failing > 0 {
+		c.failing--
+		c.mu.Unlock()
+		return errors.New("the state file is locked by another writer")
+	}
 	c.saved = append(c.saved, v)
 	saving := c.saving
 	c.mu.Unlock()
@@ -519,4 +528,251 @@ func TestAttemptsAreCountedAgainOnceARejoinedCallStaysUp(t *testing.T) {
 	require.Eventually(t, func() bool { c, _ := kept.last(); return c != nil && c.Attempts == 0 }, 5*time.Second,
 		5*time.Millisecond, "the attempts were not counted from nothing again")
 	v.Close()
+}
+
+// gatedPrepare holds the first Prepare after it is armed until released, which is a rejoin's, its first
+// step: a rejoin made, and waiting where the test wants it.
+type gatedPrepare struct {
+	*rejoinServer
+	armed         atomic.Bool
+	once          sync.Once
+	held, release chan struct{}
+}
+
+func newGatedPrepare() *gatedPrepare {
+	return &gatedPrepare{rejoinServer: &rejoinServer{}, held: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gatedPrepare) Prepare(ctx context.Context, account string) (Route, error) {
+	if g.armed.Load() {
+		first := false
+		g.once.Do(func() { first = true })
+		if first {
+			close(g.held)
+			<-g.release
+		}
+	}
+	return g.rejoinServer.Prepare(ctx, account)
+}
+
+// crashWorker kills the call's worker as a crash would, not as the daemon's Kill does.
+func crashWorker(t *testing.T, v *Voice) {
+	t.Helper()
+	v.mu.Lock()
+	w := v.current.worker
+	v.mu.Unlock()
+	require.NoError(t, w.cmd.Process.Kill())
+}
+
+// A call lost while the person's join waited its turn, past the rejoin it gave up, is made a rejoin the
+// join then gives up too: nothing leaves the call the person joined to go back (M36's /code-review).
+func TestAPersonsJoinWinsOverARejoinMadeAsItWaited(t *testing.T) {
+	rejoinFast(t)
+	srv, kept := newGatedPrepare(), &crumbs{}
+	v := rejoinVoice(t, "good", srv, kept)
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+
+	waiting := make(chan struct{})
+	beforeJoinTurn = func() { close(waiting) }
+	t.Cleanup(func() { beforeJoinTurn = nil })
+	v.joinMu.Lock()
+	joined := make(chan error, 1)
+	go func() {
+		_, err := v.Join(context.Background(), "2002", ipc.VoiceAllOn())
+		joined <- err
+	}()
+	<-waiting
+	beforeJoinTurn = nil
+	srv.armed.Store(true)
+	crashWorker(t, v)
+	<-srv.held
+	v.joinMu.Unlock()
+	require.NoError(t, <-joined)
+	close(srv.release)
+
+	time.Sleep(300 * time.Millisecond)
+	st := v.Status()
+	require.Equal(t, ipc.VoiceInCall, st.State)
+	require.Equal(t, "2002", st.Channel)
+	require.Nil(t, st.Rejoin)
+	require.Equal(t, []string{"1001", "2002"}, channelsOf(srv.seen()))
+}
+
+// A call lost as the person's leave began is made a rejoin before the leave reaches it: the leave gives the
+// rejoin up as well (M36's /code-review).
+func TestAPersonsLeaveWinsOverARejoinMadeAsItLeft(t *testing.T) {
+	rejoinFast(t)
+	srv, kept := newGatedPrepare(), &crumbs{}
+	v := rejoinVoice(t, "good", srv, kept)
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+
+	srv.armed.Store(true)
+	beforeLeaving = func() {
+		crashWorker(t, v)
+		<-srv.held
+	}
+	t.Cleanup(func() { beforeLeaving = nil })
+	st := v.Leave()
+	beforeLeaving = nil
+	close(srv.release)
+	require.Equal(t, ipc.VoiceIdle, st.State)
+	require.Nil(t, st.Rejoin)
+
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, ipc.VoiceIdle, v.Status().State)
+	require.False(t, v.Busy())
+	require.Equal(t, []string{"1001"}, channelsOf(srv.seen()))
+	require.Eventually(t, func() bool { c, ok := kept.last(); return ok && c == nil }, 5*time.Second,
+		5*time.Millisecond, "the breadcrumb was not removed")
+}
+
+func channelsOf(js []joined) []string {
+	out := make([]string, 0, len(js))
+	for _, j := range js {
+		out = append(out, j.channel)
+	}
+	return out
+}
+
+// A daemon started again holds the person's switches only in the breadcrumb it waits to join. A change made
+// meanwhile is made to them, never to nothing, and written at once, so a caller who had muted themselves is
+// not brought back heard, whether the rejoin goes or the daemon is killed first (M36's /code-review).
+func TestAChangeWhileARestartedDaemonWaitsIsMadeToTheBreadcrumb(t *testing.T) {
+	rejoinFast(t)
+	rejoinBackoff = []time.Duration{time.Hour}
+	srv, kept := &rejoinServer{}, &crumbs{}
+	v := rejoinVoice(t, "good", srv, kept)
+	srv.setConnected(false)
+	v.Resume(&statefile.VoiceCall{Instance: testInstance, Account: "42", Channel: "1001", Alive: wallNow(),
+		Processing: ipc.VoiceAllOn(), Input: ipc.DefaultVoiceInput(), Self: ipc.VoiceSelf{Mute: true},
+		LocalMutes: []string{}})
+	waitState(t, v, func(st ipc.VoiceStatus) bool { return st.State == ipc.VoiceJoining }, "no rejoin waits")
+
+	_, err := v.LocalMute("7", true)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		c, _ := kept.last()
+		return c != nil && c.Self.Mute && slices.Equal(c.LocalMutes, []string{"7"})
+	}, 5*time.Second, 5*time.Millisecond, "the change is not on disk as made to the breadcrumb")
+
+	srv.setConnected(true)
+	v.Online()
+	st := waitState(t, v, rejoinedAs(ipc.VoiceRejoinDaemonRestarted, 1), "the call was not joined again")
+	require.Equal(t, ipc.VoiceSelf{Mute: true}, st.Self)
+	require.Equal(t, []string{"7"}, st.LocalMutes)
+	require.Equal(t, []joined{{"1001", ipc.VoiceSelf{Mute: true}}}, srv.seen())
+}
+
+// A rejoin is the sign-in's it was lost under: a sign-out ends it, even when the same account signs in again
+// before it goes, since the person ended the call by signing out (M36's /code-review).
+func TestARejoinEndsWithTheSignInItWasLostUnder(t *testing.T) {
+	rejoinFast(t)
+	rejoinBackoff = []time.Duration{time.Hour}
+	srv, kept := &rejoinServer{}, &crumbs{}
+	o := standinOptions(t, "crashonce", nil)
+	var mu sync.Mutex
+	ended := make(chan struct{})
+	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: srv, Breadcrumbs: kept,
+		Env: append(o.Env, standinMarkVariable+"="+filepath.Join(t.TempDir(), "mark")), Log: zerolog.Nop(),
+		Account: func() (SignIn, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return SignIn{Account: "42", Ended: ended, Instance: testInstance}, nil
+		}})
+	t.Cleanup(v.Close)
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	srv.setConnected(false)
+	waitState(t, v, func(st ipc.VoiceStatus) bool {
+		return st.State == ipc.VoiceJoining && st.Rejoin != nil
+	}, "the crash made no rejoin")
+
+	// Signed out and in again, and nothing else to wake the rejoin: the sign-in's end does.
+	mu.Lock()
+	close(ended)
+	ended = make(chan struct{})
+	mu.Unlock()
+	waitState(t, v, func(st ipc.VoiceStatus) bool { return st.State == ipc.VoiceIdle && !v.Busy() },
+		"the rejoin outlived the sign-in")
+	srv.setConnected(true)
+	v.Online()
+	time.Sleep(100 * time.Millisecond)
+	require.Nil(t, v.Status().Rejoin)
+	require.Len(t, srv.seen(), 1)
+	require.Eventually(t, func() bool { c, ok := kept.last(); return ok && c == nil }, 5*time.Second,
+		5*time.Millisecond, "the breadcrumb was not removed")
+}
+
+// A rejoin waiting after an attempt that failed, or given up, says nothing of a call: no processing, no
+// input, no devices (the contract's null for a status with no call), whatever its last attempt had set
+// (M36's /code-review).
+func TestARejoinWaitingOrGivenUpSaysNothingOfACall(t *testing.T) {
+	rejoinFast(t)
+	rejoinBackoff = []time.Duration{time.Hour}
+	srv := &rejoinServer{refuse: func(n int) error {
+		switch n {
+		case 2:
+			return &InstanceRefusal{Code: gatewayproto.VoiceBusy}
+		case 3:
+			return &InstanceRefusal{Code: gatewayproto.VoiceForbidden}
+		}
+		return nil
+	}}
+	v := rejoinVoice(t, "crashonce", srv, &crumbs{}, standinMarkVariable+"="+filepath.Join(t.TempDir(), "mark"))
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	st := waitState(t, v, func(st ipc.VoiceStatus) bool {
+		return st.State == ipc.VoiceJoining && st.Rejoin != nil && st.Rejoin.Attempt == 1 && len(srv.seen()) == 2 &&
+			st.Reason != ""
+	}, "the first attempt's failure was not waited out")
+	require.Nil(t, st.Processing)
+	require.Nil(t, st.Input)
+
+	v.Online()
+	st = waitState(t, v, func(st ipc.VoiceStatus) bool { return st.State == ipc.VoiceIdle && st.Rejoin != nil },
+		"the rejoin was not given up")
+	require.Nil(t, st.Processing)
+	require.Nil(t, st.Input)
+	require.Nil(t, st.Microphone)
+	require.Nil(t, st.Speakers)
+	require.Nil(t, st.Rights)
+}
+
+// A worker the daemon killed for breaking the protocol is the daemon's decision, and its call is not joined
+// again: a fresh worker for the same call would meet whatever made the first one break (M36's /code-review).
+func TestAWorkerTheDaemonKilledIsNotJoinedAgain(t *testing.T) {
+	rejoinFast(t)
+	srv, kept := &rejoinServer{}, &crumbs{}
+	v := rejoinVoice(t, "speaksbadly", srv, kept)
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	st := waitState(t, v, func(st ipc.VoiceStatus) bool { return st.State == ipc.VoiceIdle }, "the call is not over")
+	require.Contains(t, st.Reason, "broke the protocol")
+	time.Sleep(200 * time.Millisecond)
+	require.Nil(t, v.Status().Rejoin)
+	require.Len(t, srv.seen(), 1)
+}
+
+// A removal the state file refused, its lock held elsewhere, is written again until it is done: a leave
+// whose breadcrumb stayed would join the call the person left at the next start (M36's /code-review).
+func TestABreadcrumbThatCouldNotBeRemovedIsRemovedLater(t *testing.T) {
+	rejoinFast(t)
+	retry := saveRetry
+	saveRetry = 20 * time.Millisecond
+	t.Cleanup(func() { saveRetry = retry })
+	srv, kept := &rejoinServer{}, &crumbs{}
+	v := rejoinVoice(t, "good", srv, kept)
+	_, err := v.Join(context.Background(), "1001", ipc.VoiceAllOn())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { c, _ := kept.last(); return c != nil }, 5*time.Second,
+		5*time.Millisecond, "the call up was never the one to join again")
+
+	kept.mu.Lock()
+	kept.failing = 3
+	kept.mu.Unlock()
+	v.Leave()
+	require.Eventually(t, func() bool { c, ok := kept.last(); return ok && c == nil }, 5*time.Second,
+		5*time.Millisecond, "the breadcrumb of a call left stays on disk")
 }

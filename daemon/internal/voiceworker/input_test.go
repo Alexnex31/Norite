@@ -66,7 +66,7 @@ func inputVoice(t *testing.T, binder hotkey.Binder) (*Voice, *logBuffer) {
 	logged := &logBuffer{}
 	o := standinOptions(t, "inputs", nil)
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: &selfServer{}, Env: o.Env,
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.New(logged),
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil }, Log: zerolog.New(logged),
 		Hotkey: binder})
 	t.Cleanup(v.Close)
 	return v, logged

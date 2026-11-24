@@ -237,7 +237,7 @@ func TestAProcessingChangeDuringAJoinIsNoRace(t *testing.T) {
 // The switches compose as people expect: a deafen mutes, an undeafen puts back the mute from before, and
 // an unmute while deafened undeafens too.
 func TestTheSelfSwitchesCompose(t *testing.T) {
-	v := NewVoice(VoiceOptions{Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+	v := NewVoice(VoiceOptions{Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Log: zerolog.Nop()})
 	steps := []struct {
 		what string
@@ -404,7 +404,7 @@ func TestAFailedProcessingAnswersAChangeAtOnce(t *testing.T) {
 // D1 and D3).
 func TestThePersonsSwitchesEndWithTheSignIn(t *testing.T) {
 	ended := make(chan struct{})
-	signIn := SignIn{Account: "42", Ended: ended}
+	signIn := SignIn{Account: "42", Instance: testInstance, Ended: ended}
 	var mu sync.Mutex
 	v := NewVoice(VoiceOptions{Log: zerolog.Nop(), Account: func() (SignIn, error) {
 		mu.Lock()
@@ -423,7 +423,7 @@ func TestThePersonsSwitchesEndWithTheSignIn(t *testing.T) {
 	require.Empty(t, st.LocalMutes)
 
 	mu.Lock()
-	signIn = SignIn{Account: "42", Ended: make(chan struct{})}
+	signIn = SignIn{Account: "42", Instance: testInstance, Ended: make(chan struct{})}
 	mu.Unlock()
 	st, err = v.LocalMute("8", true)
 	require.NoError(t, err)
@@ -431,7 +431,7 @@ func TestThePersonsSwitchesEndWithTheSignIn(t *testing.T) {
 
 	// A sign-in replaced before the end of the one it replaced is seen: the prefs are still another's.
 	mu.Lock()
-	signIn = SignIn{Account: "43", Ended: make(chan struct{})}
+	signIn = SignIn{Account: "43", Instance: testInstance, Ended: make(chan struct{})}
 	mu.Unlock()
 	st, err = v.LocalMute("9", true)
 	require.NoError(t, err)
@@ -457,7 +457,7 @@ func TestAWorkerSpeakingOutOfTurnIsKilled(t *testing.T) {
 
 // One account mutes at most a full room for itself.
 func TestLocalMutesAreBounded(t *testing.T) {
-	v := NewVoice(VoiceOptions{Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+	v := NewVoice(VoiceOptions{Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Log: zerolog.Nop()})
 	for i := range ipc.MaxLocalMutes {
 		_, err := v.LocalMute(fmt.Sprint(1000+i), true)

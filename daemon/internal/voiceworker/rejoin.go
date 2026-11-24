@@ -46,6 +46,11 @@ type rejoin struct {
 	backoff []time.Duration
 	ctx     context.Context
 	cancel  context.CancelFunc
+	// from is the call lost, nil for one a previous run left; signedIn closes when the sign-in it was lost
+	// under ends, and is the first one read for a previous run's. A rejoin is that sign-in's alone: a
+	// sign-out ends it, even with the same account signed in again (M36's /code-review). Under Voice.mu.
+	from     *call
+	signedIn <-chan struct{}
 }
 
 func newRejoin(cause string, call statefile.VoiceCall, restore bool) *rejoin {
@@ -112,8 +117,7 @@ func (v *Voice) waitToRejoin(r *rejoin, why string) {
 	v.crumb = &crumb
 	v.status.State, v.status.Channel, v.status.Reason, v.status.EndedInCall = ipc.VoiceJoining, r.call.Channel,
 		reason(why), false
-	v.status.Processing, v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil, nil
-	v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
+	clearCall(&v.status)
 	v.status.Rejoin = &ipc.VoiceRejoin{Cause: r.cause, Attempt: r.call.Attempts}
 }
 
@@ -127,6 +131,7 @@ func (v *Voice) toRejoin(c *call, why, cause string) (*rejoin, *Worker) {
 	}
 	v.current = nil
 	r := newRejoin(cause, *v.crumbFor(c), false)
+	r.from, r.signedIn = c, c.signedIn
 	v.waitToRejoin(r, why)
 	// Counted under mu, where Close sets closed, so Close's wait sees every loop that will run.
 	v.rejoins.Add(1)
@@ -161,10 +166,14 @@ func (v *Voice) rejoinLoop(r *rejoin) {
 	var wait time.Duration
 	for step := 0; ; step++ {
 		if wait > 0 {
+			v.mu.Lock()
+			signedIn := r.signedIn
+			v.mu.Unlock()
 			timer := time.NewTimer(wait)
 			select {
 			case <-timer.C:
 			case <-r.online:
+			case <-signedIn:
 			case <-r.ctx.Done():
 				timer.Stop()
 				return
@@ -189,8 +198,9 @@ func (v *Voice) rejoinLoop(r *rejoin) {
 		case err != nil:
 			v.giveUp(r, "")
 			return
-		case signIn.Account != account || !sameInstance(signIn.Instance, instance):
-			// Somebody else is signed in now: the call was theirs to keep, not this account's to join.
+		case signIn.Account != account || !ipc.SameInstance(signIn.Instance, instance) || !v.signedInAs(r, signIn):
+			// Somebody else is signed in now, or the same account again after a sign-out: the call was
+			// that sign-in's, which ended it.
 			v.giveUp(r, "")
 			return
 		}
@@ -263,6 +273,7 @@ func (v *Voice) giveUp(r *rejoin, why string) {
 	r.cancel()
 	v.pending, v.crumb = nil, nil
 	v.status.State, v.status.Channel, v.status.Reason, v.status.EndedInCall = ipc.VoiceIdle, "", reason(why), false
+	clearCall(&v.status)
 	if why == "" {
 		v.status.Rejoin = nil
 	}
@@ -329,9 +340,15 @@ func fresh(alive time.Time) bool {
 	return d <= rejoinWithin && d >= -rejoinWithin
 }
 
-// sameInstance is ipc.SameInstance, or the same text, which a test's sign-in naming none is.
-func sameInstance(a, b string) bool {
-	return a == b || ipc.SameInstance(a, b)
+// signedInAs is whether signIn is the sign-in r was lost under, taking it as that one for a previous run's
+// breadcrumb, which the first sign-in read stands for.
+func (v *Voice) signedInAs(r *rejoin, signIn SignIn) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if r.signedIn == nil {
+		r.signedIn = signIn.Ended
+	}
+	return r.signedIn == signIn.Ended
 }
 
 // keep has the keeper write the breadcrumb, the latest only. Never waits.
@@ -361,7 +378,12 @@ func (v *Voice) keeper() {
 	}
 }
 
-// save writes the breadcrumb as it is now, or removes it. A write that fails is logged, and the call goes on.
+// saveRetry is how long after a write that failed the keeper writes again: a removal left undone would
+// join a call the person left at the next start (M36's /code-review). A variable for the tests.
+var saveRetry = time.Second
+
+// save writes the breadcrumb as it is now, or removes it. A write that fails is logged once, and the keeper
+// writes the latest again every saveRetry until one is done; the call goes on meanwhile.
 func (v *Voice) save() {
 	if v.opts.Breadcrumbs == nil {
 		return
@@ -376,6 +398,16 @@ func (v *Voice) save() {
 	}
 	v.mu.Unlock()
 	if err := v.opts.Breadcrumbs.Save(crumb); err != nil {
-		v.opts.Log.Warn().Err(err).Msg("cannot record the voice call to join again after a restart")
+		if !v.saveFailing {
+			v.opts.Log.Warn().Err(err).Msg("cannot record the voice call to join again after a restart; " +
+				"trying again")
+		}
+		v.saveFailing = true
+		time.AfterFunc(saveRetry, v.keep)
+		return
 	}
+	if v.saveFailing {
+		v.opts.Log.Info().Msg("recorded the voice call to join again after a restart")
+	}
+	v.saveFailing = false
 }

@@ -116,12 +116,14 @@ type Voice struct {
 	// crumb is the breadcrumb as it should be on disk, under mu; save writes it, saveMu ordering the writes.
 	// keepKick tells the keeper to write it, the latest only, and keeperStop ends the keeper, which closes
 	// keeperDone once the last is written.
-	crumb      *statefile.VoiceCall
-	saveMu     sync.Mutex
-	keepKick   chan struct{}
-	keeperStop chan struct{}
-	keeperDone chan struct{}
-	stopKeeper sync.Once
+	crumb  *statefile.VoiceCall
+	saveMu sync.Mutex
+	// saveFailing is whether the last write failed, under saveMu, so a failing lock is logged once.
+	saveFailing bool
+	keepKick    chan struct{}
+	keeperStop  chan struct{}
+	keeperDone  chan struct{}
+	stopKeeper  sync.Once
 	// rejoins counts the rejoin loops running, which Close waits for; added to under mu, before closed is
 	// set.
 	rejoins sync.WaitGroup
@@ -231,6 +233,9 @@ type call struct {
 	rejoin   *rejoin
 	attempts int
 	upAt     time.Time
+	// signedIn closes when the sign-in the call was joined under ends: a rejoin of it is that sign-in's
+	// alone (M36's /code-review).
+	signedIn <-chan struct{}
 }
 
 // NewVoice builds the daemon's voice calls. Nothing runs until a join.
@@ -303,6 +308,12 @@ func (v *Voice) change(apply func(p *prefs, account string) error) (ipc.VoiceSta
 	p := v.prefs.live()
 	if !p.set || p.ended != signIn.Ended {
 		p = prefs{set: true, ended: signIn.Ended}
+		// A daemon started again has the person's switches only in the breadcrumb it waits to join: a change
+		// made meanwhile is made to them, never to nothing, or a muted caller comes back heard (M36's
+		// /code-review).
+		if r := v.pending; r != nil && r.restore {
+			p = prefsFrom(r.call, signIn.Ended)
+		}
 	}
 	p.mutes = maps.Clone(p.mutes)
 	if p.mutes == nil {
@@ -316,6 +327,7 @@ func (v *Voice) change(apply func(p *prefs, account string) error) (ipc.VoiceSta
 	c := v.current
 	// What a rejoin waiting will join with is the person's now, on disk too, and nothing is taken back from
 	// the breadcrumb over it (M36).
+	waiting := v.pending != nil
 	if r := v.pending; r != nil {
 		withPrefs(&r.call, p)
 		r.restore = false
@@ -323,6 +335,10 @@ func (v *Voice) change(apply func(p *prefs, account string) error) (ipc.VoiceSta
 		v.crumb = &crumb
 	}
 	v.mu.Unlock()
+	if waiting {
+		// note writes only a call that is up.
+		v.keep()
+	}
 	v.publish()
 	if c != nil {
 		v.push(c)
@@ -638,6 +654,11 @@ func (v *Voice) JoinWith(ctx context.Context, channel string, req ipc.VoiceJoinR
 	return v.join(ctx, channel, req, nil)
 }
 
+// beforeJoinTurn and beforeLeaving are nil outside tests, which stage a call lost at the two moments a
+// person's join or leave can lose a race with it: a join past its cancelRejoin and before its turn, and a
+// leave that has read the call and not yet ended it (M36's /code-review).
+var beforeJoinTurn, beforeLeaving func()
+
 // join is a join, the person's with rj nil, or an attempt of rejoin rj.
 func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinRequest, rj *rejoin) (ipc.VoiceStatus, error) {
 	processing := req.VoiceJoin
@@ -653,6 +674,9 @@ func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinReque
 		return v.Status(), &Refusal{Msg: "nobody is signed in to this daemon; sign in with `norite login`"}
 	}
 
+	if rj == nil && beforeJoinTurn != nil {
+		beforeJoinTurn()
+	}
 	v.joinMu.Lock()
 	defer v.joinMu.Unlock()
 	// A join waits here behind another for as long as that one takes. One whose asker has gone by then
@@ -667,7 +691,7 @@ func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinReque
 
 	callCtx, cancel := context.WithCancel(context.Background())
 	c := &call{channel: channel, instance: signIn.Instance, processing: processing, cancel: cancel,
-		finished: make(chan struct{}), account: signIn.Account, sentProcessing: processing,
+		finished: make(chan struct{}), account: signIn.Account, sentProcessing: processing, signedIn: signIn.Ended,
 		dspChanged: make(chan struct{}), keyChanged: make(chan struct{}), input: req.VoiceInput,
 		selfKick: make(chan struct{}, 1)}
 	v.mu.Lock()
@@ -696,6 +720,14 @@ func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinReque
 		return v.Status(), &Refusal{Msg: "the sign-in changed while the join waited; join again", Pending: true}
 	default:
 	}
+	// A rejoin made while the person's join waited its turn, of a call lost in between, is given up here,
+	// under the lock that made it: the person's join wins, and nothing joins the old call over the new
+	// (M36's /code-review).
+	dropped := false
+	if rj == nil && v.pending != nil {
+		v.pending.cancel()
+		v.pending, v.crumb, dropped = nil, nil, true
+	}
 	v.current = c
 	asked := processing
 	v.status.State, v.status.Channel, v.status.Reason, v.status.Processing = ipc.VoiceJoining, channel, "", &asked
@@ -707,6 +739,9 @@ func (v *Voice) join(ctx context.Context, channel string, req ipc.VoiceJoinReque
 		v.status.Rejoin = nil
 	}
 	v.mu.Unlock()
+	if dropped {
+		v.save()
+	}
 	v.publish()
 
 	go v.endsWith(c, signIn.Ended, "the sign-in ended", "")
@@ -956,10 +991,11 @@ func (v *Voice) run(ctx context.Context, c *call, account string, result chan<- 
 	v.ended(c, w.Exit().Reason, w.Exit().Devices)
 }
 
-// lostCause is why a worker's end is a call to join again, or "" for an end somebody chose.
+// lostCause is why a worker's end is a call to join again, or "" for an end somebody chose, the daemon's
+// kill of a worker that broke the protocol or its bounds included.
 func lostCause(e Exit) string {
 	switch {
-	case e.Crashed:
+	case e.Crashed && !e.Killed:
 		return ipc.VoiceRejoinWorkerCrashed
 	case e.Lost:
 		return ipc.VoiceRejoinConnectionLost
@@ -1248,8 +1284,7 @@ func (v *Voice) ended(c *call, why string, by *voiceipc.Devices) {
 	// An attempt of a rejoin that has more to make leaves it waiting, saying why this one failed (M36).
 	if c.rejoin != nil && v.pending == c.rejoin {
 		v.status.State, v.status.Reason, v.status.EndedInCall = ipc.VoiceJoining, reason(why), false
-		v.status.Microphone, v.status.Speakers, v.status.Rights = nil, nil, nil
-		v.status.Speaking, v.status.DSP, v.status.Input = nil, nil, nil
+		clearCall(&v.status)
 		v.mu.Unlock()
 		v.publish()
 		return
@@ -1297,7 +1332,7 @@ func (v *Voice) Leave() ipc.VoiceStatus {
 	if v.cancelRejoin() {
 		v.mu.Lock()
 		if v.current == nil {
-			v.status.State, v.status.Channel, v.status.Reason, v.status.EndedInCall = ipc.VoiceIdle, "", "left", false
+			v.leftNothing()
 			v.mu.Unlock()
 			v.publish()
 			return v.Status()
@@ -1318,7 +1353,40 @@ func (v *Voice) Leave() ipc.VoiceStatus {
 		return v.Status()
 	}
 	v.mu.Unlock()
-	return v.leave(c, "left")
+	if beforeLeaving != nil {
+		beforeLeaving()
+	}
+	v.leave(c, "left")
+	// A call lost as the leave began was made a rejoin before the leave could take it: the person's leave
+	// is of that too (M36's /code-review).
+	v.mu.Lock()
+	r, cur := v.pending, v.current
+	v.mu.Unlock()
+	if r != nil && r.from == c && v.cancelRejoin() {
+		v.mu.Lock()
+		if v.current == nil {
+			v.leftNothing()
+		}
+		v.mu.Unlock()
+		v.publish()
+	}
+	if cur != nil && cur.rejoin != nil && cur.rejoin.from == c {
+		v.leave(cur, "left")
+	}
+	return v.Status()
+}
+
+// leftNothing is the status of a leave that ended no call, a rejoin waiting given up: idle, every field of
+// a call cleared. Under Voice.mu.
+func (v *Voice) leftNothing() {
+	v.status.State, v.status.Channel, v.status.Reason, v.status.EndedInCall = ipc.VoiceIdle, "", "left", false
+	clearCall(&v.status)
+}
+
+// clearCall clears what a status says of a call, for a status with none.
+func clearCall(st *ipc.VoiceStatus) {
+	st.Processing, st.Microphone, st.Speakers, st.Rights = nil, nil, nil, nil
+	st.Speaking, st.DSP, st.Input = nil, nil, nil
 }
 
 // leaveCurrent ends the call there is, if any, and leaves the status alone otherwise: a join, which sets

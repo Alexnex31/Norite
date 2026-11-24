@@ -208,7 +208,7 @@ func TestAJoinAfterADevicesFailurePublishesNoLeave(t *testing.T) {
 	var mu sync.Mutex
 	var seen []ipc.VoiceStatus
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: answeringServer{}, Env: o.Env,
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.Nop(),
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil }, Log: zerolog.Nop(),
 		Changed: func(st ipc.VoiceStatus) {
 			mu.Lock()
 			seen = append(seen, st)

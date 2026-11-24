@@ -42,7 +42,7 @@ func standinVoice(t *testing.T, mode string, signaler Signaler) *Voice {
 	t.Helper()
 	o := standinOptions(t, mode, nil)
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: signaler, Env: o.Env,
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.Nop()})
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil }, Log: zerolog.Nop()})
 	t.Cleanup(v.Close)
 	return v
 }
@@ -150,7 +150,7 @@ func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 	srv := &recordingServer{}
 	ended := make(chan struct{})
 	v := NewVoice(VoiceOptions{Signaler: srv, Log: zerolog.Nop(),
-		Account: func() (SignIn, error) { return SignIn{Account: "42", Ended: ended}, nil }})
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance, Ended: ended}, nil }})
 	t.Cleanup(v.Close)
 	v.joinMu.Lock()
 	answered := make(chan error, 1)
@@ -177,7 +177,7 @@ func TestAJoinWaitingWhileTheSignInEndsIsNotMade(t *testing.T) {
 func TestTheEndOfTheSignInEndsTheCall(t *testing.T) {
 	ended := make(chan struct{})
 	v := NewVoice(VoiceOptions{Signaler: &blockingServer{}, Log: zerolog.Nop(),
-		Account: func() (SignIn, error) { return SignIn{Account: "42", Ended: ended}, nil }})
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance, Ended: ended}, nil }})
 	t.Cleanup(v.Close)
 	go func() { _, _ = v.Join(context.Background(), "1", ipc.VoiceAllOn()) }()
 	require.Eventually(t, v.Busy, 5*time.Second, 5*time.Millisecond)
@@ -196,7 +196,7 @@ func TestTheJoinsSettingsReachTheWorker(t *testing.T) {
 		o := standinOptions(t, "processing", nil)
 		srv := &refusingServer{}
 		v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: srv, Env: o.Env,
-			Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.New(log)})
+			Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil }, Log: zerolog.New(log)})
 		srv.v = v
 		_, err := v.Join(context.Background(), "1", p)
 		require.ErrorContains(t, err, "room full")
@@ -213,7 +213,7 @@ func TestALeaveWhileTheWorkerStartsIsNoCrash(t *testing.T) {
 	log := &logBuffer{}
 	o := standinOptions(t, "silent", nil)
 	v := NewVoice(VoiceOptions{Program: o.Program, Version: o.Version, Signaler: &refusingServer{}, Env: o.Env,
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil }, Log: zerolog.New(log)})
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil }, Log: zerolog.New(log)})
 	t.Cleanup(v.Close)
 	answered := make(chan error, 1)
 	go func() {
@@ -272,7 +272,7 @@ func TestAFailedJoinIsOverWhenItIsAnswered(t *testing.T) {
 	var answered, early atomic.Bool
 	idle := make(chan struct{})
 	v := NewVoice(VoiceOptions{Signaler: routelessServer{}, Log: zerolog.Nop(),
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Changed: func(st ipc.VoiceStatus) {
 			if st.State != ipc.VoiceIdle {
 				return

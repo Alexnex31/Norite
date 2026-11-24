@@ -148,7 +148,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Changed: seen.add, Log: zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)
@@ -218,7 +218,7 @@ func TestACallWithNoAudioServerEndsSayingSo(t *testing.T) {
 	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Log:     zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)
