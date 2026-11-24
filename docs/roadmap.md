@@ -2743,15 +2743,18 @@ of this section.
   includes a muted caller rejoining muted.
 
   **As built** (planned by reading the entry against the code, every decision taken as recommended):
-  - **A call is joined again after three losses nobody chose**, and no other:
+  - **A call is joined again after four losses nobody chose**, and no other:
     - the daemon went away mid-call, whatever ended it, at its next start;
     - the worker crashed, at once;
-    - the gateway session was lost (an instance restart, or a connection down past the 30 s resume window),
-      once a new session is live. The entry named the first two; this is the one people will meet most.
+    - the call's connection to the voice server was lost, at once: ICE gave up, as a network cut leaves it,
+      or the SFU closed the connection saying nothing, as it does when the session ends or the instance
+      stops. The worker says so in its ended frame (`lost`). The manual pass found these two, the ones
+      people will meet most, ending a call for good, and they are what the fix below is for;
+    - the gateway session was lost under a call still up, once a new session is live.
 
-    The person's leave or join elsewhere, the sign-in's end, a refused join, a call lost before it was up,
-    and every end the instance or the worker gave a reason for are not undone: a rejoin after a moderator's
-    disconnect would undo the moderation.
+    The entry named the first two. The person's leave or join elsewhere, the sign-in's end, a refused join, a
+    call lost before it was up, and every end the instance or the worker gave a reason for are not undone: a
+    rejoin after a moderator's disconnect would undo the moderation.
   - **A rejoin is an ordinary join**: op 4, authorized afresh by the coordinator (rule 1). An instance's
     refusal for good (no such channel, not a voice channel, no right, full, a bad offer, voice off) gives up
     at once and says why; anything that passes is tried again after 1, 2 and 4 s.
@@ -2789,6 +2792,24 @@ of this section.
     daemon, since conhost exits 0 whatever it ran (M23), so the restart is the person's `norite daemon start`
     or the next logon. systemd restarts a crashed daemon after 5 s, launchd at once, or 30 s after a start
     that crashed sooner.
+  - **A session's end says nothing to its call.** The coordinator ended a dropped session's call saying
+    "this device's session with the instance ended", which a client must take for a decision; it now ends
+    it as the connection lost. A revoked sign-in cannot join again, and the daemon words its own end.
+  - **The manual pass ran in unprivileged VMs, one at a time, against a real `norite-server` through TURN,
+    with a watcher on the gateway as the channel's view.**
+    - **Linux, the daemon under systemd:** a `kill -9` was restarted at 5.4 s and back in the call 2.3 s
+      later, muted, and heard once unmuted; a killed worker came back in 2.2 s, `daemon restart` in 2.5 s;
+      `daemon stop` left first and came back in nothing; a start 70 s after a signal joined nothing.
+    - **Windows 11, the logon task:** a killed daemon was not restarted; `norite daemon start` within the
+      minute was back in 3.5 s, after it nothing; a killed worker came back in 2.25 s; `daemon stop` left.
+    - **It found two things, both fixed and walked again:**
+      - a 40 s network cut ended the call for good, ICE having given up; after the fix it was back 2 s after
+        ICE gave up, muted;
+      - an instance restart ended both callers' calls for good; after the fix both were back within 4 s of
+        the instance starting again, muted as they were.
+    - **Not walked:** a Windows logoff followed by a login within the minute; macOS, by the author's choice.
+    - **Seen, and not M36's:** `norite daemon stop` says nothing of the call it leaves; on Linux a daemon
+      stopped by a signal stays listed in its channel until the SFU gives up on ICE (16 s), as since M28.
 - **M36a — Voice downlink adaptation**: the receiver caps its own subscription from what its downlink
   loses. M34 built the cap by hand (`norite voice streams`, `voice.max_streams`, the SFU's `cap` from M26),
   and the sender's controller follows its uplink alone (architecture.md §17). Here the worker measures

@@ -16,7 +16,7 @@ software.
 [![CI](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexnex31/Norite/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--1.0-yellow.svg)](#status)
 [![Release](https://img.shields.io/badge/release-v0.1.2-blue.svg)](https://github.com/Alexnex31/Norite/releases/tag/v0.1.2)
-[![Milestone](https://img.shields.io/badge/milestone-M35%20of%20M125-lightgrey.svg)](docs/roadmap.md)
+[![Milestone](https://img.shields.io/badge/milestone-M36%20of%20M125-lightgrey.svg)](docs/roadmap.md)
 
 **You can run it and talk on it today.** The first client landed at `M20a`, and with it:
 
@@ -46,9 +46,10 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 > `norite voice join` joins one, over the server (`M26`), its relay (`M27`), the call's audio on your machine
 > (`M29`), its noise suppression and echo cancellation (`M30`), a bitrate that follows your connection (`M31`)
 > and word of what your microphone and speakers are doing (`M32`). Since `M34`, `norite voice` mutes and
-> deafens you, and more, and since `M35` you talk by voice detection or by a push-to-talk key. A screen for
-> the call comes later. The client shows one channel at a time, in
-> plain text, and no third party has reviewed the code. The full scope is multi-year work — [Status](#status) says exactly what exists.
+> deafens you, and more, since `M35` you talk by voice detection or by a push-to-talk key, and since `M36` a
+> call lost to a crash, a restart or the network comes back by itself. A screen for the call comes later.
+> The client shows one channel at a time, in plain text, and no third party has reviewed the code. The full
+> scope is multi-year work — [Status](#status) says exactly what exists.
 
 ---
 
@@ -71,17 +72,16 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 
 ## Status
 
-**Norite is at milestone `M35` of 125: text chat works end to end, and voice calls have just arrived.**
+**Norite is at milestone `M36` of 125: text chat works end to end, and voice calls have just arrived.**
 
 - **What works today:** accounts with two-factor, guilds with roles and per-channel permissions, real-time
   messages in a terminal client, moderation (audit log, reports, edit history), scripting with `--json`,
   and a client that updates itself. Since Phase E, voice: `norite voice join` puts you in a call, with
   noise suppression, echo cancellation, mute and deafen, and you are heard when you speak or while you
-  hold a push-to-talk key.
-- **What comes next:** the end of Phase E (`M36` to `M37a`: rejoining a call after a restart, adapting
-  to a weak downlink, an instance's choice to run without voice, and a Snap package), then presence and
-  the full-screen terminal client (Phase F), then DMs, search, the native GUI and the rest of the
-  [roadmap](docs/roadmap.md).
+  hold a push-to-talk key; a call lost without you leaving it comes back by itself.
+- **What comes next:** the end of Phase E (`M36a` to `M37a`: adapting to a weak downlink, an instance's
+  choice to run without voice, and a Snap package), then presence and the full-screen terminal client
+  (Phase F), then DMs, search, the native GUI and the rest of the [roadmap](docs/roadmap.md).
 - **How stable it is:** pre-1.0. Releases follow [Semantic Versioning](docs/adr/0033-semver-release-progression.md),
   any `0.x` release may break compatibility with the one before, and no third party has reviewed the code
   yet.
@@ -132,6 +132,7 @@ Email [norite.tests@gmail.com](mailto:norite.tests@gmail.com) to ask for an invi
 | `M33` | Joining a call for real — `norite voice join` asks the instance over the connection the daemon already holds, and the instance checks you may connect to that channel, makes room for you on its voice server and answers with what your voice program needs, the relay's credential among it, so a network that refuses UDP no longer delays the join. The instance tells the people who can see the channel who is in it, though no client draws that yet. A moderator's mute or deafen, or a channel where you may not speak, is applied by your client and said in `norite voice status`; a kick or a lost right to connect ends the call, saying why. Calls run at 128 kbps unless the channel says otherwise, and an instance runs voice by default |
 | `M34` | Controlling a call — `norite voice mute`, `unmute`, `deafen` and `undeafen`, which the people in the channel see; `local-mute` someone so that you alone stop hearing them, which reports nothing; `streams 1`, `2` or `3` to hear at most that many people at once on a weak connection; `processing` to turn echo cancellation, noise suppression or automatic gain on or off during the call; and `norite voice status` saying who is speaking and what your microphone's processing is actually doing. `norite report user` reports somebody from a voice channel to its moderators, since a call leaves no message to report. Your voice program also lowers its bitrate on a connection whose buffer is too shallow to show a queue, and a call follows your default device on Windows and macOS when you unplug a headset or plug one in |
 | `M35` | How you are heard — by default your microphone sends only while you speak, so a silent participant sends nothing even while the others talk; or, with `norite voice mode push-to-talk`, only while you hold a key, Ctrl+Shift+Space unless you choose another, which works whatever program is in front: on Windows, on Linux through the desktop's shortcut portal or on X11, and on macOS, with no permission to grant. The key is held only while the call lasts, and `norite voice status` says what became of it |
+| `M36` | A call that comes back by itself — when the daemon crashes or restarts, its voice program crashes, your network drops for a while or the instance restarts, you are back in the call within seconds, muted if you had muted yourself and with the people you had muted still muted; nothing comes back after you left, after a moderator or the instance ended your call, or more than a minute later, so a laptop opened the next morning joins nothing; `norite daemon stop` leaves the call first, and `norite voice status` says when a call was joined again and why. On Windows a crashed daemon is not restarted for you, so the call comes back once you start it within the minute |
 
 </details>
 

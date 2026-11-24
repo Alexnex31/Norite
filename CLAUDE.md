@@ -405,7 +405,7 @@ range. From M4 on, the PR-plus-tag pairing above applies normally again.
 ## Milestone status
 
 **Phases B, C and D are complete** (B through M11a, C through M17 with M13a built last, D through M24).
-**Phase E is under way, M35 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
+**Phase E is under way, M36 done.** The dependency-ordered roadmap, `M0` through `M125` plus suffixed
 insertions, with Phase P (the flagship's Kubernetes track) running in parallel, is `docs/roadmap.md`, which is
 also the authority for what each milestone owes. What follows is a summary: the reasoning of a milestone is in
 its roadmap entry, its ADRs, `docs/security-ledger.md` and its commits, and this file's history keeps the long
@@ -567,6 +567,14 @@ agent never creates a `v*` tag or bumps a version.**
 
   An agent installed before M35 keeps `Background` until `norite daemon install` runs again, which the
   release carrying voice must say.
+- **M36 — Voice auto-rejoin**: done. `state.json`'s `voice_call` keeps the call while it is up, with the
+  person's switches, so a muted caller comes back muted. A call is joined again after the daemon went away,
+  a worker crash, a lost connection or a lost session, never after an end somebody chose, within 60 s and
+  three attempts; `norite daemon stop` leaves first. Its done-when is a test running the real processes
+  against a real instance. Its manual pass ran on Linux and Windows 11 in VMs and found two things, both
+  fixed:
+  - a network cut ended the call for good, ICE having given up;
+  - an instance's restart did too, the coordinator ending each call with a reason.
 
 ## What keeps coming back
 
@@ -601,6 +609,10 @@ that milestone's roadmap entry, commits and ledger entries hold the detail.
   the worker gave a reason for and one for a session lost before the call was up, survived their removal:
   no test had a call up when the end came, so both paths ended it anyway. When an end is handled by how far
   the thing got, each test reaches that point first.
+- **A loss is staged the way it happens** (M36). Every test lost the gateway session under a call whose
+  media stayed up, and the rejoin worked. A real network cut and an instance's restart end the media first,
+  ICE failing or the SFU closing with a reason, and neither was rejoined until the manual pass cut a link
+  and restarted a server. Before trusting a recovery, cause the loss the way the world does.
 - **A test's silence is not a device's** (M29). Digital silence hid the comfort noise that real quiet
   makes DTX send, and every talk-spurt played 440 ms late. Feed a test the signal the device delivers.
 - **A test of what is sent is not a test of what is heard** (M30). A sender too slow for real time encoded
@@ -2521,7 +2533,8 @@ And on voice signaling, from M33:
 - **A call the instance ends says why.** `EvictConnection` takes a reason (the coordinator's `ended*`
   constants), which the SFU sends on the data channel before it closes and the worker shows once the call
   is up. A re-check ends its calls, all at once, before it evicts the user or closes the room, which would
-  close them saying nothing. A call its client left is told nothing. The daemon's status says a failed join
+  close them saying nothing. A call its client left is told nothing, and since M36 nor is one whose session
+  ended, which the daemon takes for a call lost and joins again. The daemon's status says a failed join
   apart from an ended call (`ended_in_call`).
 - **Mute, deafen and Speak are applied by the client** (ledger). They are `voiceipc.Rights`:
   - in the answer, then as `OpRights` from the account's own `VOICE_STATE_UPDATE`;
@@ -2626,10 +2639,15 @@ And on how the microphone is let through, from M35 (ADR 0034 §2–§5):
 
 And on rejoining a call, from M36:
 
-- **Three losses are rejoined, and a new one is a decision** (`voiceworker/rejoin.go`): the daemon gone
-  (`Voice.Resume` at start), the worker crashed (`Exit.Crashed`) and the gateway session lost
-  (`Answer.Lost`). Every other end is somebody's choice and clears the breadcrumb; a new way for a call to end
-  says which it is. An end the instance gave a reason for is never rejoined, or a rejoin undoes moderation.
+- **Four losses are rejoined, and a new one is a decision** (`voiceworker/rejoin.go`): the daemon gone
+  (`Voice.Resume` at start), the worker crashed (`Exit.Crashed`), the call's connection lost (`Exit.Lost`,
+  from the worker's ended frame) and the gateway session lost (`Answer.Lost`). Every other end is somebody's
+  choice and clears the breadcrumb; a new way for a call to end says which it is. An end the instance gave a
+  reason for is never rejoined, or a rejoin undoes moderation.
+- **What the SFU says decides it.** The worker marks an end lost (`Session.endLost`) when ICE fails or the
+  connection or the data channel closes with no `refused` first; the SFU's word is a decision. So the
+  coordinator gives a reason only for an end the instance chose, and a session's end says nothing
+  (`Coordinator.Ended`). A new eviction with a reason is a call never joined again.
 - **A rejoin is a join**: through `Voice.join`, op 4, authorized afresh. `InstanceRefusal.Final` decides what
   gives up at once; a new refusal code is a row there. The person's own join or leave cancels a pending
   rejoin before anything else (`cancelRejoin`), and an attempt checks it is still the rejoin under

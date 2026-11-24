@@ -2527,10 +2527,13 @@ around whoever is transmitting) plus two **separate** actions (each its own keyb
 persisted "last active voice channel" breadcrumb (§3) — the one exception to otherwise-ephemeral daemon
 state. The client auto-update mechanism (§11) defers applying an update while a voice session is active, so
 it never forces a mid-call daemon restart. As built at M36 (`daemon/internal/voiceworker/rejoin.go`):
-- **Three losses are rejoined, and nothing else**: the daemon gone (at its next start), the worker crashed
-  (at once), and the gateway session lost (once a new one is live, which the gateway client reports after
-  READY marks the connection live). The person's leave, the sign-in's end, a refused join, a call lost before
-  it was up, and every end the instance or the worker gave a reason for are not undone.
+- **Four losses are rejoined, and nothing else**: the daemon gone (at its next start), the worker crashed
+  (at once), the call's connection lost (at once: ICE gave up, or the SFU closed it saying nothing, which the
+  worker's ended frame says as `lost`), and the gateway session lost under a call still up (once a new one is
+  live, which the gateway client reports after READY marks the connection live). The SFU says why whenever
+  the instance chose an end, and says nothing when a session ends or the instance stops, so a network cut
+  and an instance's restart are both rejoined. The person's leave, the sign-in's end, a refused join, a call
+  lost before it was up, and every end the instance or the worker gave a reason for are not undone.
 - **The breadcrumb is the call as it was**: instance, account, channel, the processing and the input, and
   the person's switches (M34), so a muted caller rejoins muted. It names its instance and account, and a
   daemon signed in to another discards it. It holds no credential. One goroutine writes it, latest state

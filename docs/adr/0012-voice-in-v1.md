@@ -65,8 +65,9 @@ surfaces mitigate this with a real-time active-speaker indicator plus separate l
 - The daemon respawns the worker and rejoins on crash/restart via a persisted "last active voice channel"
   breadcrumb — the one exception to otherwise-ephemeral daemon state. The client auto-update mechanism must
   defer applying an update while a voice session is active, so it doesn't force a mid-call daemon restart.
-  *(Built at M36, and wider than this sentence: a worker's crash and a lost gateway session are rejoined
-  too, while an end the person, the instance or the worker chose is not. A rejoin is an ordinary join,
+  *(Built at M36, and wider than this sentence: a worker's crash, a call's connection lost and a lost
+  gateway session are rejoined too, a network cut and an instance's restart among them, while an end the
+  person, the instance or the worker chose is not. A rejoin is an ordinary join,
   authorized afresh, bounded to 60 s after the call was last up and to three attempts, since it opens the
   microphone without being asked; the updater counts a pending rejoin as a call. See
   `docs/architecture.md` §6, "Auto-rejoin".)*
