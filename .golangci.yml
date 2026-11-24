@@ -8,9 +8,8 @@
 #   - the justfile's `lint` recipe, which checks the local binary matches
 #
 # golangci-lint must be built with a Go version at least as new as the highest `go` directive in the
-# workspace (currently 1.25.0, raised by testcontainers-go). An older binary fails with
-# "the Go language version used to build golangci-lint is lower than the targeted Go version" — that is
-# what broke the first M1 CI run.
+# workspace (currently 1.26.0). An older binary fails with "the Go language version used to build
+# golangci-lint is lower than the targeted Go version" — that is what broke the first M1 CI run.
 version: "2"
 
 run:

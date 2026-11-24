@@ -205,7 +205,7 @@ func startServer(t *testing.T, binary, addr, dsn string, env ...string) *running
 		}
 		_ = cmd.Process.Kill()
 		select {
-		case <-wait:
+		case <-wait: //nolint:errcheck // killed, so the exit status says nothing
 		case <-time.After(15 * time.Second):
 			t.Errorf("server process did not exit after being killed")
 		}
