@@ -618,14 +618,20 @@ func (v view) Text(t *output.Text) {
 		t.Line("Joining voice channel %s.", channel)
 	default:
 		t.Line("Not in a voice call.")
-		// A join that failed is not a call that ended, which the status says apart since M33.
+		// A join that failed is not a call that ended, which the status says apart since M33. A rejoin given up
+		// says its reason with it, below.
 		switch {
-		case v.Reason == "" || v.Reason == "left":
+		case v.Reason == "" || v.Reason == "left" || v.Rejoin != nil:
 		case v.EndedInCall:
 			t.Line("The last call ended: %s.", output.Clean(v.Reason))
 		default:
 			t.Line("The last join failed: %s.", output.Clean(v.Reason))
 		}
+	}
+	// A call the daemon joins again by itself (M36), and why it was lost: the reason is the worker's or the
+	// instance's words.
+	for _, line := range ops.VoiceRejoin(v.Rejoin, v.State, v.Reason) {
+		t.Line("%s.", output.Clean(line))
 	}
 	// What the processing is doing, as the worker said (M34), and what was asked before it has said.
 	switch d := v.DSP; {

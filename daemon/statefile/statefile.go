@@ -6,14 +6,16 @@
 // config.toml is the user's: hand-edited, commented, exported, kept in a dotfiles repository. This file is
 // the other half, in the state directory beside the daemon's lock: never edited by hand, never exported,
 // and machine-local by nature. It holds whether the terminal client and the GUI read separate config files
-// (M21) and how the port for scripts is set (M22); the voice-channel breadcrumb (M36) and plugin grants and
-// pinned hashes (M89) join it.
+// (M21), how the port for scripts is set (M22) and the voice call to rejoin (M36); plugin grants and pinned
+// hashes (M89) join it.
 //
 // This package only reads. A client needs to know which config file is its own, with or without a daemon
 // running, so reading is public; writing is daemon/internal/statefile, which nothing outside the daemon
 // module can import. "The daemon is its only writer" is the compiler's to hold, not a habit.
 //
-// JSON rather than TOML because nobody edits it, and versioned because a later milestone will change it.
+// JSON rather than TOML because nobody edits it, and versioned because a later milestone will change it. A
+// field added is not a new version: a daemon older than it, as after the updater rolls back, puts it back as
+// it found it, and the field must be harmless then (M36's breadcrumb is, by its age).
 package statefile
 
 import (
@@ -57,6 +59,20 @@ type State struct {
 	// AutomationInstance is the instance the port was turned on for, and the only one it serves: a script's
 	// token is a credential for the instance that minted it, and is not sent to another.
 	AutomationInstance string `json:"automation_instance"`
+
+	// VoiceCall is the voice call to join again (M36), or nil.
+	VoiceCall *VoiceCall `json:"voice_call,omitempty"`
+}
+
+// VoiceCallField is VoiceCall's name in the file.
+const VoiceCallField = "voice_call"
+
+// Equal is whether s and o hold the same state. State is not compared with ==, which takes a breadcrumb's
+// address for the breadcrumb.
+func (s State) Equal(o State) bool {
+	voice := s.VoiceCall.Equal(o.VoiceCall)
+	s.VoiceCall, o.VoiceCall = nil, nil
+	return voice && s == o
 }
 
 // PathIn returns where the file is in a state directory.

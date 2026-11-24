@@ -4,7 +4,9 @@
 package session
 
 import (
+	"runtime"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -195,4 +197,63 @@ func TestTheProcessingIsReportedAndChangedDuringTheCall(t *testing.T) {
 		t.Error("the speakers still feed an echo canceller that was turned off")
 	}
 	checkHeard(t, "the listener, after the change", steady(t, listener, 2*time.Second), 440, 0.8)
+}
+
+// A voice server that stops ends the call saying nothing, which is the connection lost: nobody chose it, and
+// the daemon joins such a call again (M36's manual pass, where an instance's restart ended every call as
+// though it had been chosen).
+func TestACallWhoseVoiceServerStopsIsLost(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("stops the harness with SIGTERM, which Windows cannot send")
+	}
+	h := startHarness(t)
+	s := h.join(t, "1", "1", &audiotest.Device{Source: audiotest.Tone(440, 8000)}, Options{})
+	select {
+	case <-s.Ready():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never came up")
+	}
+	if err := h.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case why := <-s.Ended():
+		if !s.EndedLost() {
+			t.Errorf("the call ended with %q, not as lost", why)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("the call did not end when its voice server stopped")
+	}
+}
+
+// A voice server that goes away without a word, as a network cut leaves it, is a connection ICE gives up on:
+// lost as well, with nothing closed first (M36's manual pass, where a 40 s cut ended the call for good).
+func TestACallWhoseVoiceServerVanishesIsLost(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds M26's harness and makes real calls, and waits out ICE")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("shares the harness's stop with the test above")
+	}
+	h := startHarness(t)
+	s := h.join(t, "1", "1", &audiotest.Device{Source: audiotest.Tone(440, 8000)}, Options{})
+	select {
+	case <-s.Ready():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the call never came up")
+	}
+	if err := h.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case why := <-s.Ended():
+		if why != "the connection to the voice server failed" || !s.EndedLost() {
+			t.Errorf("the call ended with %q, lost %v", why, s.EndedLost())
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the call did not end when its voice server vanished")
+	}
 }

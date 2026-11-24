@@ -10,10 +10,15 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/Alexnex31/Norite/daemon/internal/session"
 	"github.com/Alexnex31/Norite/daemon/internal/voiceworker"
 	"github.com/Alexnex31/Norite/daemon/ipc"
+	"github.com/Alexnex31/Norite/daemon/statefile"
+	"github.com/Alexnex31/Norite/daemon/termsafe"
 )
 
 // signedInAccount is the sign-in a call is joined under: the session's account, and the session's own
@@ -32,7 +37,8 @@ func signedInAccount(src *session.Source) func() (voiceworker.SignIn, error) {
 			return voiceworker.SignIn{}, voiceworker.ErrSignInPending
 		}
 		// Asked after the status: a sign-in that ended in between is a channel already closed.
-		return voiceworker.SignIn{Account: account.UserID, Ended: src.Ended(account.Generation)}, nil
+		return voiceworker.SignIn{Account: account.UserID, Ended: src.Ended(account.Generation),
+			Instance: account.InstanceURL}, nil
 	}
 }
 
@@ -127,4 +133,31 @@ func (l *localRequests) voiceRequested(ctx context.Context, req ipc.Request) ipc
 	}
 	status := http.StatusOK
 	return ipc.Response{Status: &status, Body: body}
+}
+
+// breadcrumbs keeps the call to join again in state.json (M36), the daemon its only writer.
+type breadcrumbs struct{ stateDir string }
+
+// breadcrumbWithin bounds a write: the state file's lock is held for a moment by whoever holds it, and the
+// voice keeper is the only one waiting.
+const breadcrumbWithin = 5 * time.Second
+
+func (b breadcrumbs) Save(c *statefile.VoiceCall) error {
+	ctx, cancel := context.WithTimeout(context.Background(), breadcrumbWithin)
+	defer cancel()
+	return updateState(ctx, b.stateDir, func(s *statefile.State) error {
+		s.VoiceCall = c
+		return nil
+	}, nil)
+}
+
+// resumeCall hands calls the breadcrumb the previous run left, if any. A state file that cannot be read joins
+// nothing, and says so.
+func resumeCall(stateDir string, calls *voiceworker.Voice, log zerolog.Logger) {
+	st, err := statefile.ReadIn(stateDir)
+	if err != nil {
+		log.Warn().Str("reason", termsafe.Text(err.Error())).Msg("cannot read the voice call to join again")
+		return
+	}
+	calls.Resume(st.VoiceCall)
 }

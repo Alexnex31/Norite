@@ -354,6 +354,48 @@ func TestTheDevicesAreInTheJSON(t *testing.T) {
 	assert.Equal(t, d.status, got)
 }
 
+// A call the daemon joins again by itself (M36) is said in each state its status gives, why it was lost the
+// worker's or the instance's words, cleaned; and is in --json as the contract has it (rule 15).
+func TestACallJoinedAgainIsSaidAsSuch(t *testing.T) {
+	for _, tc := range []struct {
+		st        ipc.VoiceStatus
+		want, not string
+	}{
+		{ipc.VoiceStatus{State: ipc.VoiceJoining, Channel: "42", Available: true, Reason: "the connection was lost\x1b[2J",
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinSessionLost}},
+			"Joining voice channel 42.\nThe call was lost: the connection was lost\uFFFD[2J.\nJoining it again after the " +
+				"connection to the instance was lost, once the instance can be reached.\n", "\x1b"},
+		{ipc.VoiceStatus{State: ipc.VoiceJoining, Channel: "42", Available: true,
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinDaemonRestarted, Attempt: 2}},
+			"The call was lost.\nJoining it again after the daemon restarted: attempt 2 of 3.\n", ""},
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinWorkerCrashed, Attempt: 1}},
+			"In a voice call in channel 42.\nJoined again after the voice worker crashed.\n", ""},
+		{ipc.VoiceStatus{State: ipc.VoiceInCall, Channel: "42", Available: true,
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinConnectionLost, Attempt: 1}},
+			"In a voice call in channel 42.\nJoined again after the connection to the voice server was lost.\n", ""},
+		{ipc.VoiceStatus{State: ipc.VoiceIdle, Available: true, Reason: "this account may not join that voice channel",
+			Rejoin: &ipc.VoiceRejoin{Cause: ipc.VoiceRejoinDaemonRestarted, Attempt: 1}},
+			"Not in a voice call.\nThe call was lost after the daemon restarted, and is not joined again: this account " +
+				"may not join that voice channel.\n", "The last join failed"},
+	} {
+		r := norite(t, &fakeDaemon{status: tc.st}, false, "status")
+		require.NoError(t, r.err)
+		assert.Contains(t, r.out, tc.want)
+		if tc.not != "" {
+			assert.NotContains(t, r.out, tc.not)
+		}
+
+		tc.st.LocalMutes, tc.st.Speaking = []string{}, []string{}
+		r = norite(t, &fakeDaemon{status: tc.st}, true, "status")
+		require.NoError(t, r.err)
+		daemontest.MatchesCLISchema(t, r.out, "voice.schema.json", "status")
+		var got ipc.VoiceStatus
+		require.NoError(t, json.Unmarshal([]byte(r.out), &got))
+		assert.Equal(t, tc.st.Rejoin, got.Rejoin)
+	}
+}
+
 // What the person sets for their calls asks its own request, the ones carrying an id or a number only of a
 // daemon that answered GET first, and the ones carrying nothing straight away (M34). Each prints the
 // contract.

@@ -34,6 +34,9 @@ func TestMain(m *testing.M) {
 	socketStop = func(context.Context, string) stopOutcome {
 		panic("a daemonctl test reached the real attach socket; say what it answers with answerStop")
 	}
+	socketLeave = func(context.Context, string) bool {
+		panic("a daemonctl test reached the real attach socket; say what it answers with answerLeave")
+	}
 	realSocketStatus = socketStatus
 	socketStatus = func(context.Context, string) socketAnswer {
 		panic("a daemonctl test reached the real attach socket; say what it answers with answerStatus")

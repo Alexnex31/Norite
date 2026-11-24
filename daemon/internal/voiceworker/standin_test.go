@@ -33,6 +33,9 @@ import (
 // real one; only the worker is played.
 const standinVariable = "NORITE_VOICE_STANDIN"
 
+// standinMarkVariable names the file crashonce and lostonce mark their first call in.
+const standinMarkVariable = "NORITE_VOICE_STANDIN_MARK"
+
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(standinVariable); mode != "" {
 		os.Exit(standin(mode))
@@ -276,14 +279,26 @@ func standin(mode string) int {
 			}
 			if mode == "devdropped" {
 				// The devices working, then both on the stand-in as the session ends mid-call, which leaves the
-				// call up, then the voice server closing it.
+				// call up, then the voice server ending it, saying why as it does for an end the instance chose.
 				send(voiceipc.OpDevices, dev(voiceipc.DeviceOpen, voiceipc.DeviceOpen, ""))
 				time.Sleep(200 * time.Millisecond)
 				send(voiceipc.OpDevices, dev(voiceipc.DeviceNoSession, voiceipc.DeviceNoSession, "nobody is logged in"))
 				time.Sleep(100 * time.Millisecond)
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-					Reason: "the voice server closed the call"})
+					Reason: "you may no longer join this voice channel"})
 				return 0
+			}
+			if mode == "lostonce" {
+				// Its first call's connection is lost a moment after it is up, as ICE giving up or a voice
+				// server closing it saying nothing ends a real one (M36): the file named marks that one ran.
+				mark := os.Getenv(standinMarkVariable)
+				if _, err := os.Stat(mark); err != nil {
+					_ = os.WriteFile(mark, nil, 0o600)
+					time.Sleep(100 * time.Millisecond)
+					send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
+						Reason: "the connection to the voice server failed", Lost: true})
+					return 0
+				}
 			}
 			if mode == "dropcall" {
 				send(voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
@@ -292,6 +307,20 @@ func standin(mode string) int {
 			}
 			if mode == "crashincall" {
 				os.Exit(2)
+			}
+			if mode == "crashlater" {
+				// Crashes in every call, a moment after it is up.
+				time.Sleep(100 * time.Millisecond)
+				os.Exit(2)
+			}
+			if mode == "crashonce" {
+				// Crashes in its first call alone, a moment after it is up: the file named marks that one ran.
+				mark := os.Getenv(standinMarkVariable)
+				if _, err := os.Stat(mark); err != nil {
+					_ = os.WriteFile(mark, nil, 0o600)
+					time.Sleep(100 * time.Millisecond)
+					os.Exit(2)
+				}
 			}
 			if mode == "speaksbadly" { // a speaker that is no user id, a moment after the call is up
 				time.Sleep(200 * time.Millisecond)

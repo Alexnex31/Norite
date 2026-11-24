@@ -39,6 +39,9 @@ type Call interface {
 	// EndedBy is the devices that ended it, both failing as it started (M32), or nil, asked once Ended has
 	// delivered.
 	EndedBy() *voiceipc.Devices
+	// EndedLost is whether that end was the connection lost, which nobody chose (M36), asked once Ended has
+	// delivered.
+	EndedLost() bool
 	// Devices delivers the microphone's and the speakers' state each time either changes (M32), the latest
 	// only, or is nil for a call with no devices. One queued as the call ends may be sent before the end or
 	// not at all: the ended state says which devices ended it, and the daemon keeps nothing else of them
@@ -336,22 +339,23 @@ func (r *run) awaitAnswer(ctx context.Context) (voiceipc.Answer, int, bool) {
 }
 
 // end reports the call ended, and why, as the worker's last frame.
-func (r *run) end(reason string) int { return r.endBy(reason, nil) }
+func (r *run) end(reason string) int { return r.endBy(reason, nil, false) }
 
-// ended reports the end the call itself delivered, with the devices that ended it when they did.
-func (r *run) ended(reason string) int { return r.endBy(reason, r.call.EndedBy()) }
+// ended reports the end the call itself delivered, with the devices that ended it when they did, and
+// whether it was the connection lost.
+func (r *run) ended(reason string) int { return r.endBy(reason, r.call.EndedBy(), r.call.EndedLost()) }
 
 // endBy is the one writer of the ended frame.
-func (r *run) endBy(reason string, by *voiceipc.Devices) int {
+func (r *run) endBy(reason string, by *voiceipc.Devices, lost bool) int {
 	_ = voiceipc.Write(r.out, voiceipc.OpState, voiceipc.State{State: voiceipc.StateEnded,
-		Reason: voiceipc.CutReason(reason), Devices: by})
+		Reason: voiceipc.CutReason(reason), Devices: by, Lost: lost})
 	return ExitOK
 }
 
 // violation is a frame out of order or malformed. The worker says so and exits: its daemon is of the same
 // install, so this is a bug, and guessing what was meant would hide it.
 func (r *run) violation(f gatewayproto.Frame) int {
-	r.endBy(fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op), nil)
+	r.endBy(fmt.Sprintf("%v: op %d where it was not expected, or malformed", errProtocol, f.Op), nil, false)
 	return ExitProtocol
 }
 

@@ -44,6 +44,10 @@ replacing the byte range of the value being changed, over v2's `unstable.Parser`
   because the session id dies with the process — a restarted daemon identifies afresh and refills over
   REST. See `docs/architecture.md` §3, "State persistence".)* The one deliberate exception is the "last
   active voice channel" breadcrumb, persisted specifically so voice can auto-rejoin after a crash.
+  *(Built at M36 as `state.json`'s `voice_call`, which exists only while a call is up or being joined
+  again, and carries the person's mute, deafen, local mutes and stream cap with the channel, so the
+  exception stays one: outside a call those switches are still in memory only. See `docs/architecture.md`
+  §6, "Auto-rejoin".)*
 - Cross-client pane splitting is a requirement for all three clients but is never synced across clients or
   devices by default — each client implements its own split-pane engine, and layout lives in the daemon/
   config-file state (CLI/GUI, same machine) or `localStorage` (web, separate codebase). A same-machine

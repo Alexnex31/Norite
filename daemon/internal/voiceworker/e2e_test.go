@@ -148,7 +148,7 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Changed: seen.add, Log: zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)
@@ -171,20 +171,27 @@ func TestJoiningVoiceStartsTheWorkerAndLeavingEndsIt(t *testing.T) {
 	require.False(t, v.Busy())
 	require.Equal(t, []string{ipc.VoiceJoining, ipc.VoiceInCall, ipc.VoiceIdle}, seen.states())
 
-	// A crash, seen through the closed pipe, ends the call with its reason; the next join works. Each step
-	// takes a room of its own: the SFU counts a killed worker's connection until ICE gives up on it, and
-	// holds two per user in a room (M36's entry).
+	// A crash, seen through the closed pipe, ends the worker, and the call is joined again with a new one
+	// (M36). The SFU counts the killed worker's connection until ICE gives up on it, and holds two per user in
+	// a room, so the rejoin is admitted beside it. Each step takes a room of its own for the same reason.
 	_, err = v.Join(ctx, "1002", ipc.VoiceAllOn())
 	require.NoError(t, err)
 	v.mu.Lock()
-	pid := v.current.worker.PID()
+	killed := v.current.worker
 	v.mu.Unlock()
-	p, err := os.FindProcess(pid)
+	p, err := os.FindProcess(killed.PID())
 	require.NoError(t, err)
 	require.NoError(t, p.Kill())
-	require.Eventually(t, func() bool { return v.Status().State == ipc.VoiceIdle }, 10*time.Second, 10*time.Millisecond)
-	require.Contains(t, v.Status().Reason, "stopped unexpectedly")
-	require.False(t, v.Busy())
+	require.Eventually(t, func() bool {
+		st := v.Status()
+		return st.State == ipc.VoiceInCall && st.Rejoin != nil
+	}, 20*time.Second, 10*time.Millisecond, "the call was not joined again: %+v", v.Status())
+	st = v.Status()
+	require.Equal(t, ipc.VoiceRejoin{Cause: ipc.VoiceRejoinWorkerCrashed, Attempt: 1}, *st.Rejoin)
+	require.Equal(t, "1002", st.Channel)
+	v.mu.Lock()
+	require.NotSame(t, killed, v.current.worker, "the call runs on a new worker")
+	v.mu.Unlock()
 
 	// Joining another channel while in a call leaves the first.
 	_, err = v.Join(ctx, "1003", ipc.VoiceAllOn())
@@ -211,7 +218,7 @@ func TestACallWithNoAudioServerEndsSayingSo(t *testing.T) {
 	logged := &logBuffer{}
 	v := NewVoice(VoiceOptions{
 		Program: worker, Version: "dev", Signaler: Harness{URL: h.url},
-		Account: func() (SignIn, error) { return SignIn{Account: "42"}, nil },
+		Account: func() (SignIn, error) { return SignIn{Account: "42", Instance: testInstance}, nil },
 		Log:     zerolog.New(logged),
 	})
 	t.Cleanup(v.Close)

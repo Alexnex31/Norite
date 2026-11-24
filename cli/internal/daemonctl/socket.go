@@ -65,6 +65,41 @@ var socketStop = func(ctx context.Context, version string) stopOutcome {
 	})
 }
 
+// socketLeave asks this user's daemon to leave its voice call, if it is in one or joining one (M36): somebody
+// who stops the daemon on purpose is out of the call, and the daemon keeps a call it was in when it stops,
+// for the start that follows a restart, so a later start would take them back in. `restart` does not ask.
+// Best effort and bounded: a daemon with no call, an older one or none at all is stopped all the same. It
+// reports whether the daemon was asked to leave. A variable so the commands' tests can say what it found.
+//
+// The stop request itself does not leave the call, so that it does nothing a signal does not (the ledger's
+// entry on stopping through the attach socket).
+var socketLeave = func(ctx context.Context, version string) bool {
+	askCtx, cancel := context.WithTimeout(ctx, stopAskTimeout)
+	defer cancel()
+	client, err := ipc.Connect(askCtx, ipc.Options{Client: "norite", Version: version})
+	if err != nil {
+		return false
+	}
+	defer func() { _ = client.Close() }()
+	return leaveCall(askCtx, client)
+}
+
+// leaveCall asks c how its call stands and, when one is up or being joined, asks it to leave. Neither request
+// carries anything of the user's, so a daemon older than them relays them harmlessly, and the instance's
+// answer is not a 200 from the daemon.
+func leaveCall(ctx context.Context, c stopCaller) bool {
+	res, err := c.Do(ctx, http.MethodGet, ipc.PathVoice, nil)
+	if err != nil || res.Status != http.StatusOK {
+		return false
+	}
+	var st ipc.VoiceStatus
+	if err := json.Unmarshal(res.Body, &st); err != nil || st.State == ipc.VoiceIdle {
+		return false
+	}
+	res, err = c.Do(ctx, http.MethodPost, ipc.PathVoiceLeave, nil)
+	return err == nil && res.Status == http.StatusOK
+}
+
 // askToStop sends the request on c and reports what came of it. gone waits for the daemon to be gone and
 // reports whether it is: for the process when it is given one, and when it is given 0, for whatever else
 // shows a daemon nobody named has stopped.

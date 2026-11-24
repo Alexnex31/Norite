@@ -189,7 +189,9 @@ func uninstallCommand(version string) *cli.Command {
 				return err
 			}
 			// Uninstalling stops the daemon, and the service manager's stop is a kill on Windows. Asked
-			// first, the daemon has usually finished before the definition goes.
+			// first, the daemon has usually finished before the definition goes. Its voice call is left first,
+			// or it would be joined again by a daemon installed later (M36).
+			socketLeave(ctx, version)
 			socketStop(ctx, version)
 			if err := mgr.Uninstall(ctx); err != nil {
 				return err
@@ -213,7 +215,8 @@ func stopCommand(version string) *cli.Command {
 		Name:  "stop",
 		Usage: "stop the daemon now",
 		Description: "Asks the daemon to stop, which lets it finish what it has begun, and then tells the\n" +
-			"service manager. A daemon started by hand is stopped too.\n\n" +
+			"service manager. A daemon started by hand is stopped too. A voice call the daemon is in is\n" +
+			"left first, where `norite daemon restart` keeps it and joins it again.\n\n" +
 			"An installed daemon will start again at your next login. To prevent that, use\n" +
 			"`norite daemon uninstall`.",
 		Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -222,6 +225,9 @@ func stopCommand(version string) *cli.Command {
 				return err
 			}
 			out := cmd.Root().Writer
+			// A daemon stopped on purpose leaves its voice call first, or its next start would join it again
+			// (M36). A restart keeps it.
+			socketLeave(ctx, version)
 			asked := socketStop(ctx, version)
 			// Always, when there is a service: it is what makes the service manager's own record say
 			// stopped, and what stops a daemon the request did not reach. Stopping a stopped one succeeds.

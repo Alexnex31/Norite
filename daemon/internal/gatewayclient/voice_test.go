@@ -111,9 +111,12 @@ func strictJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 // belongs to its session (M33), so the daemon's ends with the session the instance no longer holds. A resumed
 // one is told as resumed, once the connection is live, so the call can send again what the lost connection
 // may have dropped (M34's /code-review).
+//
+// A fresh session is told again once its connection is live (Online), after NewSession, so a call lost with
+// the session before it can be joined again on it (M36); a resumed one is not, nothing having been lost.
 func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
-	var fresh, resumed atomic.Int32
-	var liveWhenTold, liveWhenResumed atomic.Bool
+	var fresh, resumed, online atomic.Int32
+	var liveWhenTold, liveWhenResumed, liveWhenOnline, freshBeforeOnline atomic.Bool
 	var h *harness
 	h = start(t, func(o *Options) {
 		o.NewSession = func() {
@@ -124,11 +127,19 @@ func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
 			resumed.Add(1)
 			liveWhenResumed.Store(h.client.Connected())
 		}
+		o.Online = func() {
+			freshBeforeOnline.Store(fresh.Load() == online.Add(1))
+			liveWhenOnline.Store(h.client.Connected())
+		}
 	})
 	c := h.g.next()
 	c.handshake("sess-1")
 	require.Eventually(t, func() bool { return fresh.Load() == 1 }, 5*time.Second, time.Millisecond)
 	assert.False(t, liveWhenTold.Load(), "told after the connection was live, where a join could be sent first")
+	require.Eventually(t, func() bool { return online.Load() == 1 }, 5*time.Second, time.Millisecond,
+		"a fresh session's live connection was not told")
+	assert.True(t, liveWhenOnline.Load(), "told online before the connection was live, where a join is refused")
+	assert.True(t, freshBeforeOnline.Load(), "told online before the session was told it was fresh")
 
 	c.closeWith(websocket.StatusCode(gatewayproto.CloseUnknownError), "")
 	c2 := h.g.next()
@@ -138,6 +149,7 @@ func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
 	c2.dispatch("RESUMED", map[string]any{})
 	require.Eventually(t, h.client.Connected, 5*time.Second, time.Millisecond)
 	assert.Equal(t, int32(1), fresh.Load(), "a resumed session was told it was fresh")
+	assert.Equal(t, int32(1), online.Load(), "a resumed session was told online, as a fresh one is")
 	require.Eventually(t, func() bool { return resumed.Load() == 1 }, 5*time.Second, time.Millisecond,
 		"a resumed session was not told")
 	assert.True(t, liveWhenResumed.Load(), "told before the connection was live, where nothing could be sent")
@@ -151,5 +163,7 @@ func TestAFreshSessionIsToldAndAResumedOneIsNot(t *testing.T) {
 	c3.ready("sess-2")
 	require.Eventually(t, func() bool { return fresh.Load() == 2 }, 5*time.Second, time.Millisecond,
 		"a session that could not be resumed was not told")
+	require.Eventually(t, func() bool { return online.Load() == 2 }, 5*time.Second, time.Millisecond,
+		"a session that could not be resumed was not told online")
 	assert.Equal(t, int32(1), resumed.Load(), "a fresh session was told it was resumed")
 }

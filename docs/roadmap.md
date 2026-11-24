@@ -1421,12 +1421,12 @@ of this section.
   merged key by key keeping the target's value unless `--overwrite`.
 
   **The daemon-owned state file**, `state.json` in the state directory, never hand-edited and never
-  exported. It holds the same-machine toggle here; the voice breadcrumb (M36) and plugin grants and hashes
-  (M89) join it. **The same-machine TUI/GUI separate-config toggle** is `norite config split` /
-  `unsplit`, requests to the daemon, which is the state file's only writer: split copies `config.toml` to
-  one file per client, and unsplit reconciles them onto it: each client's own section from its own file,
-  and `[shared]` key by key, the more recently written file winning a conflict there and neither client's
-  other settings dropped. Nothing is deleted: the split files and
+  exported. It holds the same-machine toggle here; the voice breadcrumb (M36, `voice_call`) and plugin
+  grants and hashes (M89) join it. **The same-machine TUI/GUI separate-config toggle** is
+  `norite config split` / `unsplit`, requests to the daemon, which is the state file's only writer: split
+  copies `config.toml` to one file per client, and unsplit reconciles them onto it: each client's own
+  section from its own file, and `[shared]` key by key, the more recently written file winning a conflict
+  there and neither client's other settings dropped. Nothing is deleted: the split files and
   the `config.toml` they replace are kept as `*.before-unsplit`. While split the config verbs mean the
   terminal client's file, and `--client gui` the other. The two requests are the first the daemon answers
   itself rather than relaying, under `/@daemon/` on the existing request frame (`architecture.md` §3). The
@@ -2741,6 +2741,88 @@ of this section.
   so a rejoin would put a person who had muted themselves back in the call heard. The breadcrumb carries
   them with the channel, or the rejoin comes back muted; this milestone decides which, and the done-when
   includes a muted caller rejoining muted.
+
+  **As built** (planned by reading the entry against the code, every decision taken as recommended):
+  - **A call is joined again after four losses nobody chose**, and no other:
+    - the daemon went away mid-call, whatever ended it, at its next start;
+    - the worker crashed, at once;
+    - the call's connection to the voice server was lost, at once: ICE gave up, as a network cut leaves it,
+      or the SFU closed the connection saying nothing, as it does when the session ends or the instance
+      stops. The worker says so in its ended frame (`lost`). The manual pass found these two, the ones
+      people will meet most, ending a call for good, and they are what the fix below is for;
+    - the gateway session was lost under a call still up, once a new session is live.
+
+    The entry named the first two. The person's leave or join elsewhere, the sign-in's end, a refused join, a
+    call lost before it was up, and every end the instance or the worker gave a reason for are not undone: a
+    rejoin after a moderator's disconnect would undo the moderation.
+  - **A rejoin is an ordinary join**: op 4, authorized afresh by the coordinator (rule 1). An instance's
+    refusal for good (no such channel, not a voice channel, no right, full, a bad offer, voice off) gives up
+    at once and says why; anything that passes is tried again after 1, 2 and 4 s.
+  - **The breadcrumb is `state.json`'s `voice_call`** (`daemon/statefile.VoiceCall`): the instance, the
+    account, the channel, the last moment the call was known up, the attempts, the processing and the input,
+    and the person's switches. It holds no credential. It is written while the call is up, by one goroutine
+    of its own, latest state only, its stamp every 15 s, and removed by every end that is not rejoined. Read
+    back it is foreign: decoded strictly and held to what a join request is held to, field by field. One bad
+    field discards it whole, the log saying why, and never fails reading the rest of the file. The field is
+    additive, so the file's version did not move.
+  - **A muted caller rejoins muted**, and an unmuted one unmuted: the switches travel with the breadcrumb,
+    so the call comes back as it was. Outside a call they stay in memory, as M34 built them.
+  - **Two bounds, since a rejoin opens the microphone without being asked.** Nothing is joined past 60 s
+    since the call was last known up, measured on the wall clock either way, so a machine suspended mid-call
+    and woken the next morning joins nothing. And each attempt is counted on disk before it is made, three at
+    most, so a rejoin that takes the daemon down stops after three starts. The count starts again once a
+    rejoined call has stayed up a minute.
+  - **The person wins.** A join or a leave while a rejoin waits cancels it, and the updater counts a
+    pending rejoin as a call. `norite daemon stop` and `uninstall` leave the call before they stop the
+    daemon, so somebody who stops it on purpose comes back in no call. The stop request itself is unchanged
+    (the ledger's stop entry), so a signal, `norite daemon restart` and a logoff followed within the minute by
+    a login all rejoin.
+  - **The status says it**: `VoiceStatus.rejoin`, the cause and the attempt, from the moment the call is lost
+    until the person's next join or leave, with no new state value. `norite voice status` says "Joining it
+    again after the daemon restarted: attempt 1 of 3", then "Joined again after …".
+  - **The gateway client tells the daemon a new session is live** (`Options.Online`, after the connection
+    is marked live on READY), since the hook M33 used runs before a join can be sent.
+  - **The done-when's test runs the processes**: `backend/cmd/server`'s `voice_rejoin_e2e_test.go` builds
+    `norite`, `norite-daemon` and `norite-voice` from the checkout and runs them on temporary directories
+    against the real instance. After a `kill -9` mid-call the restarted daemon was back in the call, muted,
+    3.1 to 3.3 s after it started, 3 s of it the wait for a microphone a worker without audio never opens; the
+    channel never saw the caller unmuted. Beside it, a SIGTERM rejoins, a leave does not, and a right lost
+    while the daemon was down refuses the rejoin with its reason, tried once.
+  - **Windows rejoins only after a start within the minute.** The logon task never restarts a crashed
+    daemon, since conhost exits 0 whatever it ran (M23), so the restart is the person's `norite daemon start`
+    or the next logon. systemd restarts a crashed daemon after 5 s, launchd at once, or 30 s after a start
+    that crashed sooner.
+  - **A session's end says nothing to its call.** The coordinator ended a dropped session's call saying
+    "this device's session with the instance ended", which a client must take for a decision; it now ends
+    it as the connection lost. A revoked sign-in cannot join again, and the daemon words its own end.
+  - **The manual pass ran in unprivileged VMs, one at a time, against a real `norite-server` through TURN,
+    with a watcher on the gateway as the channel's view.**
+    - **Linux, the daemon under systemd:** a `kill -9` was restarted at 5.4 s and back in the call 2.3 s
+      later, muted, and heard once unmuted; a killed worker came back in 2.2 s, `daemon restart` in 2.5 s;
+      `daemon stop` left first and came back in nothing; a start 70 s after a signal joined nothing.
+    - **Windows 11, the logon task:** a killed daemon was not restarted; `norite daemon start` within the
+      minute was back in 3.5 s, after it nothing; a killed worker came back in 2.25 s; `daemon stop` left.
+    - **It found two things, both fixed and walked again:**
+      - a 40 s network cut ended the call for good, ICE having given up; after the fix it was back 2 s after
+        ICE gave up, muted;
+      - an instance restart ended both callers' calls for good; after the fix both were back within 4 s of
+        the instance starting again, muted as they were.
+    - **Not walked:** a Windows logoff followed by a login within the minute; macOS, by the author's choice.
+    - **Seen, and not M36's:** `norite daemon stop` says nothing of the call it leaves; on Linux a daemon
+      stopped by a signal stays listed in its channel until the SFU gives up on ICE (16 s), as since M28.
+  - **`/code-review high` on the whole branch** found seven things, all fixed and proved by removal:
+    - a person's join that waited its turn, or a leave that had read the call, lost a race with a call lost
+      in between, and the rejoin went back to the old call;
+    - a local mute or a stream cap set while a restarted daemon waited was made to empty switches, so a
+      muted caller came back heard, and was not written to disk;
+    - a logout and a login as the same account within the minute rejoined, unmuted: a rejoin is now the
+      sign-in's it was lost under;
+    - a status with no call kept the last attempt's processing;
+    - a worker the daemon killed for breaking the protocol was started again;
+    - a breadcrumb the state file's lock refused stayed, and joined a left call at the next start; a failed
+      write is tried again until it is done.
+
+    Kept at the author's word: the stamp written every 15 s during a call (D2).
 - **M36a — Voice downlink adaptation**: the receiver caps its own subscription from what its downlink
   loses. M34 built the cap by hand (`norite voice streams`, `voice.max_streams`, the SFU's `cap` from M26),
   and the sender's controller follows its uplink alone (architecture.md §17). Here the worker measures

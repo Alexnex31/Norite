@@ -34,6 +34,8 @@ import (
 
 type harness struct {
 	url string
+	// cmd is the harness's process, which a test may stop as an instance stops.
+	cmd *exec.Cmd
 	mu  sync.Mutex
 	log strings.Builder
 }
@@ -84,7 +86,7 @@ func startHarness(t *testing.T) *harness {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{url: "http://" + httpAddr}
+	h := &harness{url: "http://" + httpAddr, cmd: cmd}
 	go func() {
 		sc := bufio.NewScanner(out)
 		for sc.Scan() {

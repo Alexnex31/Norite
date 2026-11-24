@@ -64,7 +64,7 @@ func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) er
 		return err
 	}
 	state.Version = statefile.Version
-	if state == before {
+	if state.Equal(before) {
 		// Nothing to record. No file is the defaults, and stays no file.
 		if then != nil {
 			then()
@@ -80,6 +80,10 @@ func Update(ctx context.Context, stateDir string, fn func(s *statefile.State) er
 	}
 	if err := json.Unmarshal(known, &raw); err != nil {
 		return err
+	}
+	// A breadcrumb removed, or refused as it was read, is no field at all rather than a null.
+	if state.VoiceCall == nil || state.VoiceCall.Refused() != nil {
+		delete(raw, statefile.VoiceCallField)
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

@@ -113,13 +113,20 @@ func PathVoiceJoin(channel string) string { return pathVoiceJoin + channel }
 // digits, as every id the CLI puts in a path is.
 func VoiceJoinChannel(path string) (string, bool) {
 	ch, ok := strings.CutPrefix(path, pathVoiceJoin)
-	if !ok || ch == "" || len(ch) > 20 {
-		return "", false
-	}
-	if _, err := strconv.ParseUint(ch, 10, 64); err != nil {
+	if !ok || !IsChannelID(ch) {
 		return "", false
 	}
 	return ch, true
+}
+
+// IsChannelID is whether s is a channel id as a join's path carries one: digits, at most twenty, an unsigned
+// 64-bit number. The breadcrumb's channel is held to it as the path is (M36).
+func IsChannelID(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
 }
 
 // VoiceJoin is which of the DSP's components process the microphone (M30), as the client's config.toml
@@ -285,9 +292,9 @@ func (in *VoiceInput) fields() map[string]field {
 	return map[string]field{"input_mode": {s: &in.Mode}, "push_to_talk_key": {s: &in.Key}}
 }
 
-// check refuses a mode that is not one of the words, and a key not written the one way CanonicalKey writes
+// Check refuses a mode that is not one of the words, and a key not written the one way CanonicalKey writes
 // it: a client writes it so before sending, and a key compared as text is the same key only spelled once.
-func (in *VoiceInput) check() error {
+func (in *VoiceInput) Check() error {
 	if in.Mode != VoiceInputVoice && in.Mode != VoiceInputPushToTalk {
 		return fmt.Errorf("the input mode is %s or %s", VoiceInputVoice, VoiceInputPushToTalk)
 	}
@@ -317,7 +324,7 @@ func DecodeVoiceJoin(body json.RawMessage) (VoiceJoinRequest, error) {
 			"noise_suppression and auto_gain, each true or false, and input_mode and push_to_talk_key, each " +
 			"once, and nothing else")
 	}
-	if err := out.check(); err != nil {
+	if err := out.Check(); err != nil {
 		return VoiceJoinRequest{}, err
 	}
 	return out, nil
@@ -341,7 +348,7 @@ func DecodeVoiceMode(body json.RawMessage) (VoiceInput, error) {
 		return VoiceInput{}, errors.New("the input must be an object naming input_mode and push_to_talk_key, " +
 			"each once, and nothing else")
 	}
-	if err := out.check(); err != nil {
+	if err := out.Check(); err != nil {
 		return VoiceInput{}, err
 	}
 	return out, nil
@@ -405,7 +412,36 @@ type VoiceStatus struct {
 	// Input is how the call's microphone is let through (M35), while there is a call; nil when there is
 	// none.
 	Input *VoiceInputStatus `json:"input"`
+	// Rejoin is the daemon joining a call again by itself (M36), after the call was lost without anybody
+	// leaving it: from the moment it was lost, through each attempt, and once rejoined or given up, until the
+	// person next joins or leaves. State says how far it got: VoiceJoining while it waits or tries, Reason
+	// saying why the call was lost, VoiceInCall once rejoined, VoiceIdle once given up, Reason saying why.
+	// Nil for a call the person joined.
+	Rejoin *VoiceRejoin `json:"rejoin"`
 }
+
+// VoiceRejoin is why a call is being joined again, and how many attempts have been made, at most
+// MaxVoiceRejoins: 0 while the first waits for the sign-in or the instance.
+type VoiceRejoin struct {
+	Cause   string `json:"cause"`
+	Attempt int    `json:"attempt"`
+}
+
+// Why a call is joined again (M36): the daemon went away mid-call and started again, its voice worker
+// crashed, the instance no longer held the session the call was signaled on, or the call's connection to
+// the voice server was lost: ICE gave up, or the server closed it saying nothing, as it does when the
+// session ends or the instance stops (M36's manual pass).
+const (
+	VoiceRejoinDaemonRestarted = "daemon_restarted"
+	VoiceRejoinWorkerCrashed   = "worker_crashed"
+	VoiceRejoinSessionLost     = "session_lost"
+	VoiceRejoinConnectionLost  = "connection_lost"
+)
+
+// MaxVoiceRejoins is how many times a lost call is joined again before the daemon gives up: a rejoin that
+// takes the daemon or its worker down with it is not tried for ever. The count starts again once a call
+// has stayed up for a while.
+const MaxVoiceRejoins = 3
 
 // VoiceInputStatus is how a call's microphone is let through: the mode and the key as asked, and, by
 // push-to-talk, what became of the key and whether it is down.

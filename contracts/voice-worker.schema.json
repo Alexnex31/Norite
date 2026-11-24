@@ -156,7 +156,8 @@
           "required": [
             "state",
             "reason",
-            "devices"
+            "devices",
+            "lost"
           ],
           "additionalProperties": false,
           "properties": {
@@ -171,6 +172,10 @@
               "type": "string",
               "maxLength": 256,
               "description": "Why a call ended, for a person, or empty."
+            },
+            "lost": {
+              "type": "boolean",
+              "description": "On an ended call, whether the end was its connection lost, which nobody chose (M36): ICE gave up, or the voice server closed the connection saying nothing. The daemon joins such a call again once it was up. False after any other end, and on every other state."
             },
             "devices": {
               "description": "On an ended call, the devices that ended it, both failing as it started (M32): the daemon keeps them in its status after that end alone, and they are not decided, the start having been judged to end the call. Null after any other end, and on every other state.",
@@ -222,6 +227,25 @@
             "properties": {
               "devices": {
                 "type": "null"
+              },
+              "lost": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "if": {
+              "properties": {
+                "devices": {
+                  "type": "object"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "lost": {
+                  "const": false
+                }
               }
             }
           }

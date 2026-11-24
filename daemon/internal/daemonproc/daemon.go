@@ -310,6 +310,8 @@ func Run(ctx context.Context, opts Options) error {
 				Changed: func(ipc.VoiceStatus) { server.Local(ipc.EventVoice, json.RawMessage("{}")) },
 				// Push-to-talk's key, registered while a call by push-to-talk lasts (M35).
 				Hotkey: hotkey.Default(),
+				// The call to join again after a restart (M36), in state.json.
+				Breadcrumbs: breadcrumbs{stateDir: stateDir},
 			})
 			voice.Store(calls)
 			local.voice = calls
@@ -318,6 +320,7 @@ func Run(ctx context.Context, opts Options) error {
 				Log: part("gateway"), OnVersionRefused: update.Nudge, Voice: voiceGateway.Deliver,
 				NewSession: voiceGateway.SessionLost,
 				Resumed:    voiceGateway.Resumed,
+				Online:     calls.Online,
 			})
 			// Before anything runs: the voice signaler reads it from the join's goroutine.
 			voiceGateway.Link = gw
@@ -328,6 +331,9 @@ func Run(ctx context.Context, opts Options) error {
 				<-ctx.Done()
 				calls.Close()
 			})
+			// The call the previous run was in and did not leave, joined again once its sign-in is read and the
+			// instance is reachable (M36). Before the gateway runs, so its first live session finds it waiting.
+			resumeCall(stateDir, calls, part("voice"))
 			components.Go(func() { gw.Run(ctx) })
 			components.Go(func() { server.Serve(ctx, listener) })
 			components.Go(func() { watchConfig(ctx, server, part("config")) })

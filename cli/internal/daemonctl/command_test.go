@@ -78,6 +78,9 @@ func runCommand(t *testing.T, mgr Manager, argv ...string) (stdout string, err e
 	if !statusStubbed {
 		answerStatus(t, socketAnswer{})
 	}
+	if !leaveStubbed {
+		answerLeave(t)
+	}
 
 	var out bytes.Buffer
 	err = testRoot(&out).Run(t.Context(), append([]string{"norite"}, argv...))
@@ -94,6 +97,21 @@ func answerStatus(t *testing.T, answer socketAnswer) {
 	socketStatus = func(context.Context, string) socketAnswer { return answer }
 	statusStubbed = true
 	t.Cleanup(func() { socketStatus, statusStubbed = previous, was })
+}
+
+// leaveStubbed is whether a test has said what the socket answers being asked to leave a voice call.
+var leaveStubbed bool
+
+// answerLeave makes the socket find no call to leave for the rest of the test, and returns how many times it
+// was asked.
+func answerLeave(t *testing.T) *int {
+	t.Helper()
+	asked := new(int)
+	previous, was := socketLeave, leaveStubbed
+	socketLeave = func(context.Context, string) bool { *asked++; return false }
+	leaveStubbed = true
+	t.Cleanup(func() { socketLeave, leaveStubbed = previous, was })
+	return asked
 }
 
 // stopStubbed is whether a test has said what the socket answers a stop request.

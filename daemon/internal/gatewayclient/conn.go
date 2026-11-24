@@ -171,6 +171,9 @@ func (c *Client) converse(ctx context.Context, ws *websocket.Conn, cred session.
 				}
 				c.live.Store(ws)
 				c.log.Info().Int64("seq", seq.Load()).Msg("connected to the gateway")
+				if c.online != nil {
+					c.online()
+				}
 			case "RESUMED":
 				out.established = true
 				c.live.Store(ws)

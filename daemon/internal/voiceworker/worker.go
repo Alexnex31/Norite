@@ -153,6 +153,11 @@ type Exit struct {
 	Reason string
 	// Devices is the devices a worker said ended its call, both failing as it started (M32), or nil.
 	Devices *voiceipc.Devices
+	// Lost is a worker that said its call's connection was lost, which nobody chose (M36).
+	Lost bool
+	// Killed is a crash the daemon caused, killing a worker that broke the protocol or its bounds: the
+	// daemon's decision, which a rejoin would undo (M36's /code-review).
+	Killed bool
 }
 
 // ErrStart is a worker that could not be started or did not say who it is.
@@ -336,7 +341,7 @@ func (w *Worker) wait() {
 	}
 	switch {
 	case w.broke != "":
-		w.exit = Exit{Crashed: true, Reason: w.broke}
+		w.exit = Exit{Crashed: true, Killed: true, Reason: w.broke}
 	case err != nil && !w.leaving:
 		w.exit = Exit{Crashed: true, Reason: fmt.Sprintf("the voice worker stopped unexpectedly (%s)", status(err, code))}
 	case w.ended != nil:
@@ -344,7 +349,7 @@ func (w *Worker) wait() {
 		if why == "" {
 			why = "the voice worker ended the call without saying why"
 		}
-		w.exit = Exit{Reason: why, Devices: w.ended.Devices}
+		w.exit = Exit{Reason: why, Devices: w.ended.Devices, Lost: w.ended.Lost}
 	case w.leaving:
 		w.exit = Exit{Reason: "left"}
 	default:
