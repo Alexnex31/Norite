@@ -37,9 +37,11 @@ import (
 // real coordinator over the fixture's database.
 type voiceFixture struct {
 	*guildFixture
-	url     string
-	sfu     *voice.SFU
-	coord   *coordinator.Coordinator
+	url   string
+	sfu   *voice.SFU
+	coord *coordinator.Coordinator
+	// gw is the gateway url serves, which a router of the test's own can mount (M36's end-to-end test).
+	gw      *gateway.Server
 	channel string
 	text    string
 }
@@ -65,13 +67,13 @@ func newVoiceFixture(t *testing.T, mutate func(*gateway.Options)) *voiceFixture 
 	require.NoError(t, coord.Sweep(t.Context()))
 	t.Cleanup(coord.Close)
 
-	url, _ := customGateway(t, f, func(o *gateway.Options) {
+	url, gw := customGateway(t, f, func(o *gateway.Options) {
 		o.Voice = coord
 		if mutate != nil {
 			mutate(o)
 		}
 	})
-	vf := &voiceFixture{guildFixture: f, url: url, sfu: sfu, coord: coord}
+	vf := &voiceFixture{guildFixture: f, url: url, sfu: sfu, coord: coord, gw: gw}
 	vf.channel = vf.createChannel(t, map[string]any{"name": "lounge", "type": 2})
 	vf.text = vf.createChannel(t, map[string]any{"name": "general", "type": 0})
 	return vf
