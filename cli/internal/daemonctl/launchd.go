@@ -82,10 +82,13 @@ var plistTemplate = template.Must(template.New("plist").Funcs(template.FuncMap{
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 
-	<!-- Background: this is a long-lived support process, not something the user is waiting on, so it
-	     should not compete with foreground apps for CPU or keep the machine awake. -->
+	<!-- Interactive, because a call is something a person is waiting on, and the voice worker is this job's
+	     child and runs at its priority. Under Background its threads ran at priority 4, and a busy Mac held
+	     the audio processing past its watchdog, which ended the call. Standard kept the call and still fell
+	     behind the microphone under load; Interactive never did (M35's Mac pass). Between calls the daemon
+	     mostly sleeps on its sockets. -->
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Interactive</string>
 
 	<!-- Only stderr, and only for what escapes the daemon's own logging: a panic, or a failure from before
 	     the log file is open. Nothing routine reaches it (see -stderr-log=false above), so this file stays
