@@ -18,7 +18,7 @@ oapi_codegen_version := "v2.8.0"
 
 # Must match .github/workflows/ci.yml's GOLANGCI_LINT_VERSION. golangci-lint has to be built with a Go
 # version at least as new as the highest `go` directive in the workspace, or it refuses to run at all.
-golangci_lint_version := "2.12.2"
+golangci_lint_version := "2.15.0"
 
 # The fourth generator, and the last to be pinned — it was `go install ...@latest` in CI until M14, which
 # was safe only by accident: v2 moved to a /v2 module path, so `@latest` on the old path could never
@@ -102,7 +102,9 @@ test-short:
 
 # Warns (but does not fail) when the local golangci-lint differs from the version CI pins, since a
 # mismatch means a green run here predicts nothing about CI. Frontend linting joins once frontend/ exists
-# (Phase O).
+# (Phase O). Each run takes a lock in the temporary directory and gives up when another holds it past a
+# few seconds, which on a cold cache failed whichever modules waited behind a slow one; the cache itself
+# is Go's, safe for several processes, so the runs skip the lock.
 
 # Vet + lint every Go module, in parallel.
 [doc("Vet + lint every Go module, in parallel.")]
@@ -115,7 +117,7 @@ lint:
     fi
     pids=()
     for m in {{go_modules}}; do
-        (cd "$m" && { go vet ./... && golangci-lint run ./...; } 2>&1 | sed "s/^/[$m] /") &
+        (cd "$m" && { go vet ./... && golangci-lint run --allow-parallel-runners ./...; } 2>&1 | sed "s/^/[$m] /") &
         pids+=($!)
     done
     fail=0

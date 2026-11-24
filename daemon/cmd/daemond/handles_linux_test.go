@@ -117,7 +117,7 @@ func TestTheDaemonHoldsEveryCapUnderTheLowestDescriptorLimit(t *testing.T) {
 	t.Cleanup(func() {
 		_ = daemon.Process.Kill()
 		select {
-		case <-exited:
+		case <-exited: //nolint:errcheck // killed, so the exit status says nothing
 		case <-time.After(5 * time.Second):
 		}
 	})
